@@ -26,6 +26,7 @@ from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STAT
 from crop_explorer.schemas import Applicability, Basis, EnvKey, RightsStatus, Topic
 from crop_explorer.search import FilterOptions, build_result
 from crop_explorer.views import (
+    ChipSupport,
     CommentResult,
     CommentView,
     FactView,
@@ -97,7 +98,10 @@ def comment(
     source_id: str = "demo",
     source_kind: str = "synthetic_fixture",
     created_at: str | None = None,
+    analysed: bool | None = None,
 ) -> CommentView:
+    """Build a view; ``analysed`` defaults to "has mentions" (``False`` means never extracted)."""
+    extracted = bool(mentions) if analysed is None else analysed
     return CommentView(
         comment_id=comment_id,
         source_id=source_id,
@@ -107,7 +111,7 @@ def comment(
         permalink=permalink,
         source_order=0,
         created_at=created_at,
-        parse_status=None if not mentions else "parsed",
+        parse_status="parsed" if extracted else None,
         mentions=tuple(mentions),
     )
 
@@ -124,6 +128,7 @@ def search_of(views: Sequence[CommentView], query: SearchQuery) -> SearchResult:
 
 
 GARDEN_6B_POTS = GardenContext(zone="6b", method="container")
+MAX_CHARS = 200
 QUERY_6B_POTS = SearchQuery(garden=GARDEN_6B_POTS)
 
 
@@ -346,7 +351,8 @@ class TestConditionLines:
         assert lines == ("Not stated: summer heat (only a heatwave reported, not comparable)",)
 
     def test_comment_without_mentions_states_every_selected_condition_as_unknown(self) -> None:
-        lines = ui.condition_lines(result_of(comment(), QUERY_6B_POTS), GARDEN_6B_POTS)
+        unresolved = comment(analysed=True)  # extracted, but no variety mention was found
+        lines = ui.condition_lines(result_of(unresolved, QUERY_6B_POTS), GARDEN_6B_POTS)
         assert lines == ("Not stated: hardiness zone, growing method",)
 
     def test_without_selection_lists_reported_conditions(self) -> None:
@@ -407,7 +413,134 @@ class TestConditionLines:
             "Shown for Juliet (1 of 2 mentions)",
             "Relevant: containers",
             "Not stated: hardiness zone",
+            "Roma: Different: in the ground (you: containers)",
         )
+
+    # F15: a second relevant mention in a worse tier states its own tier line.
+    def test_other_mention_in_a_different_tier_is_stated(self) -> None:
+        view = comment(
+            mentions=[
+                mention(
+                    "c1#m0",
+                    crop="pepper",
+                    variety="Jalapeño",
+                    facts=[fact("shelter", "greenhouse", "in the greenhouse", fact_id="a")],
+                ),
+                mention(
+                    "c1#m1",
+                    variety="Roma",
+                    facts=[fact("shelter", "outdoors", "outside", fact_id="b")],
+                ),
+            ]
+        )
+        garden = GardenContext(shelter="greenhouse")
+        lines = ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden)
+        assert lines == (
+            "Shown for Jalapeño (1 of 2 mentions)",
+            "Relevant: greenhouse / tunnel",
+            "Roma: Different: outdoors (you: greenhouse / tunnel)",
+        )
+
+    def test_other_mentions_in_the_same_tier_are_not_repeated(self) -> None:
+        view = comment(
+            mentions=[
+                mention("c1#m0", facts=[fact("method", "container", fact_id="a")]),
+                mention(
+                    "c1#m1", variety="Juliet", facts=[fact("method", "container", fact_id="b")]
+                ),
+                mention("c1#m2", variety="Roma"),
+            ]
+        )
+        garden = GardenContext(method="container")
+        lines = ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden)
+        assert lines == (
+            "Shown for Sungold (1 of 3 mentions)",
+            "Relevant: containers",
+            "Roma: Not stated: growing method",
+        )
+
+    # F21: only the reported values that produced a status are labelled with it.
+    def test_mild_summers_with_a_heatwave_label_only_the_heatwave_as_relevant(self) -> None:
+        facts = [
+            fact("summer_heat", "mild", "usually mild", fact_id="a"),
+            fact("summer_heat", "heatwave", "a heat wave hit", fact_id="b"),
+        ]
+        garden = GardenContext(summer_heat="hot")
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        assert ui.condition_lines(found, garden) == ("Relevant: a heatwave (you: hot summers)",)
+
+    def test_hot_summers_with_a_heatwave_label_only_the_climate_as_different(self) -> None:
+        facts = [
+            fact("summer_heat", "hot", "hot summers", fact_id="a"),
+            fact("summer_heat", "heatwave", "a heat wave", fact_id="b"),
+        ]
+        garden = GardenContext(summer_heat="mild")
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        assert ui.condition_lines(found, garden) == ("Different: hot summers (you: mild summers)",)
+
+    def test_imprecise_zone_ignores_a_differing_zone(self) -> None:
+        facts = [
+            fact("zone", "7a", "zone 7a", fact_id="a"),
+            fact("zone", "6", "zone 6", fact_id="b"),
+        ]
+        garden = GardenContext(zone="6b")
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        assert ui.condition_lines(found, garden) == (
+            "Relevant: zone 6, subzone unknown (you: zone 6b)",
+        )
+
+    # F19: display-only phrases are stated as written, never as "not stated".
+    def test_selected_condition_mentioned_only_as_written_is_not_called_unstated(self) -> None:
+        facts = [
+            fact("zone", None, "zones 6-7", fact_id="a"),
+            fact("humidity", None, "not humid", fact_id="b"),
+            fact("soil", None, "sandy\n  loam", fact_id="c"),
+        ]
+        garden = GardenContext(zone="6b", humidity="humid", soil="loam")
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        assert ui.condition_lines(found, garden) == (
+            'Mentioned as written, not comparable: hardiness zone "zones 6-7" · '
+            'humidity "not humid" · soil "sandy loam"',
+        )
+
+    def test_written_phrases_sit_beside_unstated_and_matching_conditions(self) -> None:
+        facts = [
+            fact("method", "container", "pots", fact_id="a"),
+            fact("soil", None, "rocky hillside dirt", fact_id="b"),
+        ]
+        garden = GardenContext(zone="6b", method="container", soil="clay")
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        assert ui.condition_lines(found, garden) == (
+            "Relevant: containers",
+            "Not stated: hardiness zone",
+            'Mentioned as written, not comparable: soil "rocky hillside dirt"',
+        )
+
+    def test_without_selection_written_phrases_replace_the_not_stated_line(self) -> None:
+        dirt = fact("soil", None, "rocky hillside dirt", fact_id="a")
+        found = result_of(comment(mentions=[mention(facts=[dirt])]))
+        assert ui.condition_lines(found, GardenContext()) == (
+            'Mentioned as written, not comparable: soil "rocky hillside dirt"',
+        )
+
+    def test_without_selection_written_phrases_follow_reported_conditions(self) -> None:
+        facts = [
+            fact("method", "container", "pots", fact_id="a"),
+            fact("soil", None, "rocky hillside dirt", fact_id="b"),
+            fact("growing_year", None, "last year", fact_id="c"),
+        ]
+        found = result_of(comment(mentions=[mention(facts=facts)]))
+        assert ui.condition_lines(found, GardenContext()) == (
+            "Reported: containers",
+            'Mentioned as written, not comparable: soil "rocky hillside dirt"',
+        )
+
+    # F20: a comment that was never extracted is "not yet analysed", not "not stated".
+    @pytest.mark.parametrize("garden", [GardenContext(), GARDEN_6B_POTS])
+    def test_never_extracted_comment_is_not_yet_analysed(self, garden: GardenContext) -> None:
+        view = comment(text="Zone 6b here, Sungold in containers.", analysed=False)
+        found = result_of(view, SearchQuery(garden=garden))
+        assert ui.condition_lines(found, garden) == ("Not yet analysed for growing conditions",)
 
     @settings(max_examples=200)
     @given(
@@ -487,6 +620,78 @@ class TestRegionLine:
             ]
         )
         assert ui.region_line(result_of(view)) == "Region: Connecticut, Maine"
+
+
+# --------------------------------------------------------------------------- card heading/caption
+
+
+class TestCardLabels:
+    """F16: every card carries the SPEC §7 provenance labels outside the Evidence expander."""
+
+    def test_heading_is_badged_as_a_community_report(self) -> None:
+        found = result_of(comment(mentions=[mention(topics=["flavor"])]))
+        assert ui.card_heading(found) == (
+            "**Sungold tomato · flavor** :green-badge[community report]"
+        )
+
+    def test_heading_escapes_untrusted_variety_names(self) -> None:
+        found = result_of(comment(mentions=[mention(variety="[x](https://e.example)")]))
+        heading = ui.card_heading(found)
+        assert heading.startswith("**\\[x\\]\\(https\\:")
+        assert heading.endswith(" :green-badge[community report]")
+
+    def test_caption_with_stated_conditions_is_badged(self) -> None:
+        found = result_of(full_match_view(), QUERY_6B_POTS)
+        assert ui.condition_caption(found, GARDEN_6B_POTS) == (
+            ":green-badge[reported conditions] "
+            + ui.escape_markdown("Relevant: zone 6b · containers\nRegion not reported")
+        )
+
+    def test_caption_without_stated_conditions_has_no_badge(self) -> None:
+        found = result_of(comment(mentions=[mention()]), QUERY_6B_POTS)
+        assert ui.condition_caption(found, GARDEN_6B_POTS) == ui.escape_markdown(
+            "Not stated: hardiness zone, growing method\nRegion not reported"
+        )
+        assert ui.condition_caption(result_of(comment(mentions=[mention()])), GardenContext()) == (
+            "Growing conditions not stated  \nRegion not reported"
+        )
+
+    def test_caption_badges_a_stated_region_alone(self) -> None:
+        view = comment(mentions=[mention(facts=[fact("region", "US-VT", "Vermont")])])
+        caption = ui.condition_caption(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
+        assert caption.startswith(":green-badge[reported conditions] Not stated\\:")
+        assert caption.endswith(ui.escape_markdown("Region: Vermont"))
+
+    def test_caption_badges_display_only_phrases(self) -> None:
+        dirt = fact("soil", None, "rocky dirt")
+        caption = ui.condition_caption(
+            result_of(comment(mentions=[mention(facts=[dirt])])), GardenContext()
+        )
+        assert caption.startswith(":green-badge[reported conditions] Mentioned as written")
+
+    def test_caption_badges_another_mentions_difference(self) -> None:
+        view = comment(
+            mentions=[
+                mention("c1#m0"),
+                mention("c1#m1", variety="Roma", facts=[fact("method", "in_ground", fact_id="x")]),
+            ]
+        )
+        caption = ui.condition_caption(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
+        assert caption.startswith(":green-badge[reported conditions] Shown for Sungold")
+
+    def test_unanalysed_caption_omits_region_and_badge(self) -> None:
+        found = result_of(comment(analysed=False), QUERY_6B_POTS)
+        assert ui.condition_caption(found, GARDEN_6B_POTS) == (
+            "Not yet analysed for growing conditions"
+        )
+
+    def test_caption_escapes_untrusted_phrases(self) -> None:
+        dirt = fact("soil", None, "[x](https://e.example)")
+        caption = ui.condition_caption(
+            result_of(comment(mentions=[mention(facts=[dirt])])), GardenContext()
+        )
+        assert "\\[x\\]\\(" in caption
+        assert "](" not in caption
 
 
 # --------------------------------------------------------------------------- evidence_rows
@@ -599,6 +804,17 @@ class TestSourceLink:
         assert ui.source_link(view) == "https://example.org/c/1"
         assert ui.provenance_note(view) is None
 
+    @pytest.mark.parametrize("rights", ["cleared", "private_unverified"])
+    def test_real_comments_link_out(self, rights: RightsStatus) -> None:
+        view = comment(permalink="https://example.org/c/1", rights=rights)
+        assert ui.source_link(view) == "https://example.org/c/1"
+
+    def test_synthetic_comment_with_a_permalink_never_links_and_stays_marked(self) -> None:
+        """F13: fiction never links out, and its synthetic marker never depends on a link."""
+        view = comment(permalink="https://www.youtube.com/watch?v=x", rights="synthetic")
+        assert ui.source_link(view) is None
+        assert ui.provenance_note(view) == ui.SYNTHETIC_NOTE
+
     def test_synthetic_comment_without_link_says_so(self) -> None:
         view = comment()
         assert ui.source_link(view) is None
@@ -681,7 +897,7 @@ class TestState:
     def test_reset_values_give_an_empty_query(self) -> None:
         values = ui.reset_values()
         assert tuple(values) == ui.reset_state_keys()
-        assert ui.query_from_state(values) == SearchQuery()
+        assert ui.query_from_state(values, max_query_chars=MAX_CHARS) == SearchQuery()
         assert values[ui.TEXT_KEY] == ""
         assert values[ui.TOPICS_KEY] == []
         assert values[ui.STRICT_KEY] is False
@@ -699,7 +915,7 @@ class TestState:
             ui.STRICT_KEY: True,
             ui.REGION_FILTER_KEY: "US-ME",
         }
-        assert ui.query_from_state(state) == SearchQuery(
+        assert ui.query_from_state(state, max_query_chars=MAX_CHARS) == SearchQuery(
             text="Sungold",
             crop="tomato",
             topics=("flavor",),
@@ -711,18 +927,102 @@ class TestState:
 
     def test_blank_search_text_is_no_filter(self) -> None:
         state = {**ui.reset_values(), ui.TEXT_KEY: "   "}
-        assert ui.query_from_state(state).text is None
+        assert ui.query_from_state(state, max_query_chars=MAX_CHARS).text is None
 
     def test_missing_keys_mean_defaults(self) -> None:
-        assert ui.query_from_state({}) == SearchQuery()
+        assert ui.query_from_state({}, max_query_chars=MAX_CHARS) == SearchQuery()
 
     def test_invalid_condition_value_fails_loudly(self) -> None:
         with pytest.raises(ValidationError):
-            ui.query_from_state({ui.CONDITION_KEYS["zone"]: "6c"})
+            ui.query_from_state({ui.CONDITION_KEYS["zone"]: "6c"}, max_query_chars=MAX_CHARS)
 
     def test_non_text_search_value_fails_loudly(self) -> None:
         with pytest.raises(TypeError):
-            ui.query_from_state({ui.TEXT_KEY: 42})
+            ui.query_from_state({ui.TEXT_KEY: 42}, max_query_chars=MAX_CHARS)
+
+    def test_search_text_is_capped(self) -> None:
+        """F37: defence in depth behind the text box's max_chars (session state is writable)."""
+        query = ui.query_from_state({ui.TEXT_KEY: "a " * 50_000}, max_query_chars=MAX_CHARS)
+        assert query.text is not None
+        assert len(query.text) <= MAX_CHARS
+        capped = ui.query_from_state({ui.TEXT_KEY: "  Sungold tomato"}, max_query_chars=5)
+        assert capped.text == "Sun"
+
+    def test_cap_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="max_query_chars"):
+            ui.query_from_state({}, max_query_chars=0)
+
+
+class TestConditionLayout:
+    """F45 and F32: which conditions are always visible, and the "More conditions" label."""
+
+    def test_always_visible_conditions_follow_the_spec(self) -> None:
+        assert ui.ALWAYS_VISIBLE_KEYS == ("zone", "method", "shelter")
+        assert ui.MORE_KEYS == (
+            "summer_heat",
+            "humidity",
+            "precipitation",
+            "season_length",
+            "sun",
+            "soil",
+            "irrigation",
+        )
+        assert sorted((*ui.ALWAYS_VISIBLE_KEYS, *ui.MORE_KEYS)) == sorted(COMPARABLE_KEYS)
+
+    def test_more_conditions_label_without_hidden_conditions(self) -> None:
+        state = {**ui.reset_values(), ui.CONDITION_KEYS["zone"]: "6b"}
+        assert ui.active_more_conditions(state) == ()
+        assert ui.more_conditions_label(()) == "More conditions"
+
+    def test_more_conditions_label_lists_the_hidden_conditions_that_are_set(self) -> None:
+        state = {
+            **ui.reset_values(),
+            ui.CONDITION_KEYS["soil"]: "clay",
+            ui.CONDITION_KEYS["humidity"]: "humid",
+            ui.CONDITION_KEYS["method"]: "container",
+        }
+        active = ui.active_more_conditions(state)
+        assert active == ("humid", "clay soil")
+        assert ui.more_conditions_label(active) == "More conditions (humid, clay soil)"
+
+    def test_none_labels_match_the_select_placeholders(self) -> None:
+        """F33: after Clear a select shows its placeholder, which must read like first load."""
+        assert ui.ALL_STATES == "All states"
+        assert ui.state_choices(region_counts([], 1), None)[None] == ui.ALL_STATES
+
+
+class TestPaging:
+    """F39: each group renders one page of cards at a time."""
+
+    def found(self) -> SearchResult:
+        views = [comment(f"c{i:02d}") for i in range(25)]
+        return search_of(views, SearchQuery())
+
+    def test_a_new_query_resets_every_group_to_one_page(self) -> None:
+        query = SearchQuery(text="tomato")
+        fixes = ui.paging_fixes({}, query)
+        assert fixes[ui.PAGE_QUERY_KEY] == query.model_dump_json()
+        assert {fixes[ui.page_key(key)] for key in ("all", "match", "different")} == {1}
+        state = {**fixes, ui.page_key("all"): 3}
+        assert ui.paging_fixes(state, query) == {}
+        assert ui.paging_fixes(state, SearchQuery(text="pepper"))[ui.page_key("all")] == 1
+
+    def test_cards_to_show_grows_by_one_page(self) -> None:
+        (group,) = self.found().groups
+        assert ui.cards_to_show({}, group, 10) == 10
+        assert ui.cards_to_show({ui.page_key("all"): 2}, group, 10) == 20
+        assert ui.cards_to_show({ui.page_key("all"): 3}, group, 10) == 25
+
+    def test_corrupt_page_count_fails_loudly(self) -> None:
+        (group,) = self.found().groups
+        with pytest.raises(ValueError, match="page"):
+            ui.cards_to_show({ui.page_key("all"): 0}, group, 10)
+        with pytest.raises(ValueError, match="page"):
+            ui.cards_to_show({ui.page_key("all"): "2"}, group, 10)
+
+    def test_show_more_label(self) -> None:
+        assert ui.show_more_label(45, 20) == "Show 20 more (45 not shown yet)"
+        assert ui.show_more_label(7, 20) == "Show 7 more"
 
 
 OPTIONS = FilterOptions(crops=("pepper", "tomato"), topics=("disease", "flavor"), years=("2024",))
@@ -757,7 +1057,9 @@ class TestStaleState:
         self, crop: str | None, topics: list[str], year: str | None
     ) -> None:
         state = {ui.CROP_KEY: crop, ui.TOPICS_KEY: topics, ui.YEAR_KEY: year}
-        query = ui.query_from_state(state | ui.stale_state_fixes(state, OPTIONS))
+        query = ui.query_from_state(
+            state | ui.stale_state_fixes(state, OPTIONS), max_query_chars=MAX_CHARS
+        )
         assert query.crop is None or query.crop in OPTIONS.crops
         assert set(query.topics) <= set(OPTIONS.topics)
         assert query.year is None or query.year in OPTIONS.years
@@ -774,14 +1076,44 @@ CHIPS = (
 )
 
 
+def support(n_any: int, n_all: int | None = None) -> ChipSupport:
+    return ChipSupport(n_any=n_any, n_all=n_any if n_all is None else n_all)
+
+
 class TestChips:
     def test_only_chips_with_enough_support_are_shown(self) -> None:
-        support = {"Containers": 8, "Hot & humid": 2, "Near me": 3}
-        assert ui.visible_chips(CHIPS, support, 3) == (CHIPS[0], CHIPS[2])
+        counts = {"Containers": support(8), "Hot & humid": support(2), "Near me": support(3)}
+        assert ui.visible_chips(CHIPS, counts, 3) == (CHIPS[0], CHIPS[2])
+
+    def test_gate_counts_reports_stating_any_condition(self) -> None:
+        counts = {"Containers": support(8), "Hot & humid": support(6, 2), "Near me": support(0)}
+        assert ui.visible_chips(CHIPS, counts, 3) == (CHIPS[0], CHIPS[1])
 
     def test_unknown_support_fails_loudly(self) -> None:
         with pytest.raises(KeyError):
-            ui.visible_chips(CHIPS, {"Containers": 8}, 3)
+            ui.visible_chips(CHIPS, {"Containers": support(8)}, 3)
+
+    def test_help_of_a_multi_condition_chip_states_both_counts(self) -> None:
+        """F18: the tooltip never implies that every counted report states every condition."""
+        assert ui.chip_help(CHIPS[1], support(6, 2)) == (
+            "6 reports mention hot summers or humid; 2 mention both"
+        )
+        assert ui.chip_help(CHIPS[1], support(1, 1)) == (
+            "1 report mentions hot summers or humid; 1 mentions both"
+        )
+
+    def test_help_of_a_three_condition_chip(self) -> None:
+        chip = QuickChip(
+            label="Muggy pots",
+            conditions={"summer_heat": "hot", "humidity": "humid", "method": "container"},
+        )
+        assert ui.chip_help(chip, support(5, 0)) == (
+            "5 reports mention hot summers, humid or containers; 0 mention all of them"
+        )
+
+    def test_help_of_a_single_condition_chip(self) -> None:
+        assert ui.chip_help(CHIPS[0], support(8)) == "Set this condition (8 reports state it)"
+        assert ui.chip_help(CHIPS[2], support(1)) == "Set this condition (1 report states it)"
 
     def test_chip_state_maps_conditions_to_widget_keys(self) -> None:
         assert ui.chip_state(CHIPS[1]) == {
@@ -792,7 +1124,7 @@ class TestChips:
 
     def test_applying_a_chip_sets_its_conditions(self) -> None:
         state = {**ui.reset_values(), **ui.chip_state(CHIPS[1])}
-        assert ui.query_from_state(state).garden == GardenContext(
+        assert ui.query_from_state(state, max_query_chars=MAX_CHARS).garden == GardenContext(
             summer_heat="hot", humidity="humid"
         )
 
@@ -879,10 +1211,54 @@ class TestSummaries:
         )
         assert ui.strict_note(found, SearchQuery()) is None
 
+    def test_strict_note_with_only_a_region(self) -> None:
+        """F42: Region is a location preference, so it cannot drive "Only show stated matches"."""
+        strict = SearchQuery(garden=GardenContext(region="US-CT"), only_stated_matches=True)
+        found = search_of(sample_views(), strict)
+        assert ui.strict_note(found, strict) == (
+            "Region only lists reports from your area first; choose a condition such as zone or "
+            "growing method to use this filter. Until then nothing is hidden."
+        )
+        relaxed = strict.model_copy(update={"only_stated_matches": False})
+        assert ui.strict_note(found, relaxed) is None
+
     def test_region_filter_note(self) -> None:
         assert ui.region_filter_note("US-CT") == (
             "Showing only reports that name Connecticut as where they grew."
         )
+
+    def test_year_filter_note(self) -> None:
+        assert ui.year_filter_note("2023") == ("Showing only reports that say they grew in 2023.")
+
+    def test_empty_state_without_strict_hiding(self) -> None:
+        found = search_of([], SearchQuery())
+        assert ui.empty_state(found) == (
+            "No reports to show. Try a different search, or remove a filter or condition."
+        )
+
+    def test_empty_state_names_the_strict_checkbox(self) -> None:
+        """F30: when strict mode empties the list, say so and how to undo it."""
+        strict = QUERY_6B_POTS.model_copy(update={"only_stated_matches": True})
+        views = [view for view in sample_views() if view.comment_id in ("c3", "c4")]
+        found = search_of(views, strict)
+        assert found.groups == ()
+        assert ui.empty_state(found) == (
+            'All 2 reports are hidden by "Only show stated matches". Untick it to see them.'
+        )
+        different = search_of(views[1:], strict)  # c4 states a differing method
+        assert ui.empty_state(different) == (
+            'The 1 report found is hidden by "Only show stated matches". Untick it to see it.'
+        )
+
+    def test_no_empty_state_when_the_limitation_message_already_explains_the_hiding(
+        self,
+    ) -> None:
+        strict = QUERY_6B_POTS.model_copy(update={"only_stated_matches": True})
+        found = search_of([comment("c1"), comment("c2", mentions=[mention("c2#m0")])], strict)
+        assert found.groups == ()
+        assert found.limitation_message is not None
+        assert '"Only show stated matches"' in found.limitation_message
+        assert ui.empty_state(found) is None
 
 
 # --------------------------------------------------------------------------- map helpers
@@ -998,10 +1374,36 @@ class TestParseAppArgs:
         args = ui.parse_app_args([])
         assert args == ui.AppArgs(config=DEFAULT_CONFIG_PATH, db=None, scope=None)
 
-    def test_overrides_and_unknown_arguments(self) -> None:
-        args = ui.parse_app_args(["--db", "x.sqlite", "--scope", "private", "--other", "-q"])
+    def test_overrides(self) -> None:
+        args = ui.parse_app_args(["--db", "x.sqlite", "--scope", "private"])
         assert args == ui.AppArgs(config=DEFAULT_CONFIG_PATH, db=Path("x.sqlite"), scope="private")
 
+    @pytest.mark.parametrize(
+        "argv", [["--database", "other.sqlite"], ["--confg", "c.yaml"], ["--db", "x", "-q"]]
+    )
+    def test_unknown_arguments_fail_loudly(self, argv: list[str]) -> None:
+        """F36: a mistyped option must never silently open the default database or config."""
+        with pytest.raises(ValueError, match="unrecognized arguments"):
+            ui.parse_app_args(argv)
+
     def test_invalid_scope_fails(self) -> None:
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValueError, match="--scope"):
             ui.parse_app_args(["--scope", "everyone"])
+
+    def test_missing_value_fails(self) -> None:
+        with pytest.raises(ValueError, match="--db"):
+            ui.parse_app_args(["--db"])
+
+
+class TestLoopback:
+    """F01: a private-scope viewer may only listen on this machine."""
+
+    @pytest.mark.parametrize(
+        "address", ["localhost", "127.0.0.1", "::1", "127.0.0.2", "LOCALHOST"]
+    )
+    def test_loopback_addresses(self, address: str) -> None:
+        assert ui.is_loopback_address(address)
+
+    @pytest.mark.parametrize("address", [None, "", "0.0.0.0", "::", "192.168.1.5", "example.org"])
+    def test_other_addresses_are_not_loopback(self, address: str | None) -> None:
+        assert not ui.is_loopback_address(address)

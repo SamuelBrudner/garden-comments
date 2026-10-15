@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from crop_explorer import db
 from crop_explorer.config import QuickChip, load_config
@@ -50,6 +51,7 @@ from crop_explorer.search import (
 from crop_explorer.views import (
     GROUP_TITLES,
     TIER_ORDER,
+    ChipSupport,
     CommentResult,
     CommentView,
     FactView,
@@ -237,15 +239,18 @@ def tiers(result: SearchResult) -> dict[str, str | None]:
     return {r.comment.comment_id: r.tier for r in shown(result)}
 
 
+REGION_RANKS = {"same": 0, "same_country": 1}
+
+
 def display_key(result: CommentResult) -> tuple[int, str, int, str]:
-    region_rank = 0 if result.region_status == "same" else 1
+    region_rank = REGION_RANKS.get(str(result.region_status), 2)
     view = result.comment
     return (region_rank, view.source_id, view.source_order, view.comment_id)
 
 
 # --------------------------------------------------------------------------- strategies
 
-REGIONS = ("US-CT", "US-ME", "CA-ON", "GB")
+REGIONS = ("US-CT", "US-ME", "CA-ON", "GB", "US", "CA")
 FACT_KEYS: tuple[EnvKey, ...] = (*COMPARABLE_KEYS, "region", "growing_year")
 APPLICABILITIES: tuple[Applicability, ...] = ("this_mention", "whole_comment")
 
@@ -308,12 +313,13 @@ def mention_views(draw: st.DrawFn, mention_id: str) -> MentionView:
 @st.composite
 def comment_views(draw: st.DrawFn, comment_id: str) -> CommentView:
     n_mentions = draw(st.integers(0, 3))
+    statuses: tuple[ParseStatus | None, ...] = ("parsed", "partial", "unresolved")
     return comment(
         comment_id,
         *(draw(mention_views(f"{comment_id}#m{i}")) for i in range(n_mentions)),
         order=draw(st.integers(0, 3)),
         source_id=draw(st.sampled_from(("src-a", "src-b"))),
-        status=draw(st.sampled_from(("parsed", "partial", "unresolved", None))),
+        status=draw(st.sampled_from(statuses if n_mentions else (*statuses, None))),
     )
 
 
@@ -323,9 +329,13 @@ def view_lists(draw: st.DrawFn) -> list[CommentView]:
     return [draw(comment_views(f"c{i}")) for i in range(n_comments)]
 
 
+SEARCH_TEXTS = ("Sungold", "juliet tomatoes", "peppers", "hornworms", "!!")
+
+
 @st.composite
 def queries(draw: st.DrawFn) -> SearchQuery:
     return SearchQuery(
+        text=draw(st.none() | st.sampled_from(SEARCH_TEXTS)),
         crop=draw(st.none() | st.sampled_from(("tomato", "Peppers"))),
         topics=tuple(draw(st.lists(st.sampled_from(("flavor", "disease")), unique=True))),
         year=draw(st.none() | st.sampled_from(("2023", "2024"))),
@@ -385,6 +395,10 @@ class TestWithoutSelectedConditions:
 
 class TestSearchPreservation:
     """SPEC §11 #1: comments without extraction stay retrievable and never break filters."""
+
+    def test_a_never_extracted_comment_cannot_carry_mentions(self) -> None:
+        with pytest.raises(ValidationError, match="never been through extraction"):
+            comment("bad", mention("bad#m0"), status=None)
 
     def test_comments_without_mentions_are_kept_without_mention_filters(self) -> None:
         result = build_result([UNRESOLVED, NEVER_EXTRACTED, reporting("c1", order=2)], ask())
@@ -450,6 +464,89 @@ class TestEnvironmentAssociation:
         assert split.tier == "match"
         assert [match_of(mm).tier for mm in split.mention_matches] == ["match", "different"]
         assert split.explanation == "Jalapeño: Matches your greenhouse / tunnel."
+
+
+class TestTextNamesTheRelevantMentions:
+    """F15: a search naming a variety or crop makes that mention the query unit (SPEC §4)."""
+
+    SPLIT = TestEnvironmentAssociation.SPLIT
+
+    def varieties(self, result: SearchResult) -> list[str | None]:
+        return [mm.mention.variety_as_written for mm in card(result, "split").mention_matches]
+
+    @pytest.mark.parametrize("text", ["Roma", "roma!", "my ROMA tomatoes", "tomatoes", "Tomato"])
+    def test_searching_the_outdoor_tomato_shows_its_difference(self, text: str) -> None:
+        result = build_result([self.SPLIT], ask(text=text, shelter="greenhouse"))
+        assert layout(result) == {"different": ["split"]}
+        assert self.varieties(result) == ["Roma"]
+        assert card(result, "split").explanation == (
+            "Different: outdoors (you: greenhouse / tunnel)."
+        )
+
+    @pytest.mark.parametrize("text", ["Jalapeño", "jalapeno", "JALAPENO peppers", "chillies"])
+    def test_searching_the_greenhouse_pepper_shows_its_match(self, text: str) -> None:
+        result = build_result([self.SPLIT], ask(text=text, shelter="greenhouse"))
+        assert layout(result) == {"match": ["split"]}
+        assert self.varieties(result) == ["Jalapeño"]
+
+    def test_strict_mode_hides_a_searched_mention_that_differs(self) -> None:
+        result = build_result(
+            [self.SPLIT], ask(text="Roma", shelter="greenhouse", only_stated=True)
+        )
+        assert result.groups == ()
+        assert (result.n_candidates, result.n_hidden_by_strict) == (1, 1)
+
+    @pytest.mark.parametrize("text", ["hornworms", "greenhouse", "Rom", "!!", "  "])
+    def test_text_naming_no_mention_keeps_every_mention(self, text: str) -> None:
+        result = build_result([self.SPLIT], ask(text=text, shelter="greenhouse"))
+        assert layout(result) == {"match": ["split"]}
+        assert self.varieties(result) == ["Jalapeño", "Roma"]
+
+    def test_text_naming_both_mentions_keeps_both(self) -> None:
+        result = build_result([self.SPLIT], ask(text="Roma and Jalapeño", shelter="greenhouse"))
+        assert self.varieties(result) == ["Jalapeño", "Roma"]
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            ask(text="Roma", topics=("flavor",), shelter="greenhouse"),
+            ask(text="Roma", crop="pepper", shelter="greenhouse"),
+        ],
+        ids=["topics", "crop"],
+    )
+    def test_a_mention_filter_takes_precedence_over_the_text(self, query: SearchQuery) -> None:
+        result = build_result([self.SPLIT], query)
+        assert layout(result) == {"match": ["split"]}
+        assert "Jalapeño" in self.varieties(result)
+
+    def test_a_multi_word_variety_must_be_named_in_full(self) -> None:
+        def named(text: str) -> list[str]:
+            matches = relevant_mentions(three_varieties(), ask(text=text))
+            assert matches is not None
+            return [mm.mention.mention_id for mm in matches]
+
+        assert named("black krim") == ["trio#m2"]
+        assert named("Black-Krim seedlings") == ["trio#m2"]
+        assert named("krim") == ["trio#m0", "trio#m1", "trio#m2"]
+        assert named("Juliet or Sungold?") == ["trio#m0", "trio#m1"]
+
+    def test_the_named_mentions_drive_region_and_conditions(self) -> None:
+        mixed = two_crops()
+        result = build_result([mixed], ask(text="Jalapeño", region="US-CT"))
+        mixed_card = card(result, "mixed")
+        assert mixed_card.region_status == "elsewhere"
+        assert [mm.mention.crop for mm in mixed_card.mention_matches] == ["pepper"]
+
+    @settings(deadline=None)
+    @given(view=comment_views("c0"), text=st.sampled_from(SEARCH_TEXTS))
+    def test_text_never_drops_a_comment_or_all_its_mentions(
+        self, view: CommentView, text: str
+    ) -> None:
+        matches = relevant_mentions(view, ask(text=text))
+        assert matches is not None
+        assert bool(matches) == bool(view.mentions)
+        kept = [mm.mention for mm in matches]
+        assert kept == [m for m in view.mentions if m in kept]
 
 
 class TestMissingIsNotMismatch:
@@ -632,8 +729,8 @@ class TestGracefulSparsity:
     """SPEC §11 #16: no conditions anywhere gives honest broad results, never false matches."""
 
     NONE_STATED = (
-        "None of these 3 reports mention growing conditions, so none can be compared with your "
-        "garden. All are shown below."
+        "None of these 3 reports mention comparable growing conditions, so none can be compared "
+        "with your garden. All are shown below."
     )
 
     @staticmethod
@@ -653,15 +750,15 @@ class TestGracefulSparsity:
 
     def test_message_for_a_single_report_is_singular(self) -> None:
         assert build_result(self.bare(1), ask()).limitation_message == (
-            "The 1 report found does not mention growing conditions, so it cannot be compared "
-            "with your garden. It is shown below."
+            "The 1 report found does not mention comparable growing conditions, so it cannot be "
+            "compared with your garden. It is shown below."
         )
 
     @pytest.mark.parametrize(
         ("n_with", "n", "message"),
         [
-            (1, 3, "Only 1 of 3 reports mentions growing conditions."),
-            (2, 3, "Only 2 of 3 reports mention growing conditions."),
+            (1, 3, "Only 1 of 3 reports mentions comparable growing conditions."),
+            (2, 3, "Only 2 of 3 reports mention comparable growing conditions."),
             (3, 3, None),
             (1, 1, None),
         ],
@@ -684,6 +781,20 @@ class TestGracefulSparsity:
         assert result.n_with_conditions == 0
         assert not any(r.has_conditions for r in shown(result))
 
+    def test_display_only_conditions_are_not_called_absent(self) -> None:
+        """F19: the message speaks of comparable conditions, so it stays true for these."""
+        views = [
+            reporting("vague", fact("soil", None, written="rocky hillside dirt")),
+            reporting("pots", CONTAINER, order=1),
+        ]
+        result = build_result(views, ask(soil="loam"))
+        assert result.limitation_message == (
+            "Only 1 of 2 reports mentions comparable growing conditions."
+        )
+        assert card(result, "vague").explanation == (
+            'Soil mentioned as "rocky hillside dirt" (not comparable).'
+        )
+
     def test_a_region_or_heatwave_counts_as_a_growing_condition(self) -> None:
         views = [
             reporting("ct", fact("region", "US-CT")),
@@ -692,6 +803,102 @@ class TestGracefulSparsity:
         result = build_result(views, ask(method="container"))
         assert result.n_with_conditions == 2
         assert result.limitation_message is None
+
+
+class TestNotYetAnalysed:
+    """F20: never-extracted comments are counted apart and never said to lack conditions."""
+
+    @staticmethod
+    def unanalysed(n: int, start: int = 0) -> list[CommentView]:
+        return [
+            comment(f"u{i}", status=None, order=i, text="Zone 6b here, Sungold in containers.")
+            for i in range(start, start + n)
+        ]
+
+    def test_all_unanalysed(self) -> None:
+        result = build_result(self.unanalysed(3), SPEC_GARDEN)
+        assert (result.n_candidates, result.n_with_conditions, result.n_not_analysed) == (3, 0, 3)
+        assert layout(result) == {"not_stated": ["u0", "u1", "u2"]}
+        assert result.limitation_message == (
+            "None of these 3 reports have been analysed for growing conditions yet, so none can "
+            "be compared with your garden. All are shown below."
+        )
+
+    def test_one_unanalysed(self) -> None:
+        assert build_result(self.unanalysed(1), ask()).limitation_message == (
+            "The 1 report found has not been analysed for growing conditions yet, so it cannot "
+            "be compared with your garden. It is shown below."
+        )
+
+    def test_unanalysed_and_unstated(self) -> None:
+        views = [*self.unanalysed(1), UNRESOLVED, reporting("bare", order=5)]
+        result = build_result(views, ask())
+        assert result.n_not_analysed == 1
+        assert result.limitation_message == (
+            "None of these 3 reports can be compared with your garden: 2 do not mention "
+            "comparable growing conditions and 1 has not been analysed yet. All are shown below."
+        )
+        mostly_new = build_result([*self.unanalysed(2), UNRESOLVED], ask())
+        assert mostly_new.limitation_message == (
+            "None of these 3 reports can be compared with your garden: 1 does not mention "
+            "comparable growing conditions and 2 have not been analysed yet. All are shown below."
+        )
+
+    def test_some_with_conditions_and_some_unanalysed(self) -> None:
+        views = [reporting("pots", CONTAINER), *self.unanalysed(1, start=1), UNRESOLVED]
+        result = build_result(views, SPEC_GARDEN)
+        assert (result.n_with_conditions, result.n_not_analysed) == (1, 1)
+        assert result.limitation_message == (
+            "Only 1 of 3 reports mentions comparable growing conditions (1 not yet analysed)."
+        )
+
+    def test_mention_filters_leave_no_unanalysed_candidates(self) -> None:
+        result = build_result(
+            [*self.unanalysed(2), reporting("pots", CONTAINER)], ask(crop="tomato")
+        )
+        assert (result.n_candidates, result.n_not_analysed) == (1, 0)
+
+
+class TestStrictAwareLimitation:
+    """F30: with reports hidden by strict mode the message never says they are shown below."""
+
+    HIDDEN = 'hidden by "Only show stated matches"'
+
+    def test_every_report_hidden(self) -> None:
+        views = [reporting("c0"), reporting("c1", order=1)]
+        result = build_result(views, ask(method="container", only_stated=True))
+        assert result.groups == ()
+        assert result.limitation_message == (
+            "None of these 2 reports mention comparable growing conditions, so none can be "
+            f"compared with your garden. All 2 are {self.HIDDEN}; untick it to see them."
+        )
+
+    def test_the_only_report_hidden(self) -> None:
+        unanalysed = comment("new", status=None)
+        result = build_result([unanalysed], ask(method="container", only_stated=True))
+        assert result.limitation_message == (
+            "The 1 report found has not been analysed for growing conditions yet, so it cannot "
+            f"be compared with your garden. It is {self.HIDDEN}; untick it to see it."
+        )
+
+    def test_strict_mode_without_a_selection_still_shows_everything(self) -> None:
+        result = build_result([reporting("c0"), reporting("c1", order=1)], ask(only_stated=True))
+        assert result.limitation_message is not None
+        assert result.limitation_message.endswith("All are shown below.")
+
+    @settings(deadline=None, max_examples=150)
+    @given(views=view_lists(), query=queries())
+    def test_message_never_claims_hidden_reports_are_shown(
+        self, views: list[CommentView], query: SearchQuery
+    ) -> None:
+        result = build_result(views, query)
+        message = result.limitation_message or ""
+        if result.n_hidden_by_strict:
+            assert "shown below" not in message
+        if "shown below" in message:
+            assert result.n_hidden_by_strict == 0
+        if result.n_with_conditions == 0 and result.n_hidden_by_strict and message:
+            assert self.HIDDEN in message
 
 
 class TestRegionPreference:
@@ -713,6 +920,42 @@ class TestRegionPreference:
             "maine": "elsewhere",
             "ct-ground": "same",
         }
+
+    def test_a_country_prefers_its_own_states_and_provinces(self) -> None:
+        """F34: picking Canada sorts Canadian reports first without changing their tier."""
+        views = [
+            reporting("minnesota", CONTAINER, fact("region", "US-MN"), order=0),
+            reporting("alberta", CONTAINER, fact("region", "CA-AB"), order=1),
+            reporting("ontario", IN_GROUND, fact("region", "CA-ON"), order=2),
+            reporting("canada", CONTAINER, fact("region", "CA"), order=3),
+            reporting("silent", CONTAINER, order=4),
+        ]
+        result = build_result(views, ask(method="container", region="CA"))
+        assert layout(result) == {
+            "match": ["canada", "alberta", "minnesota", "silent"],
+            "different": ["ontario"],
+        }
+        statuses = {r.comment.comment_id: r.region_status for r in shown(result)}
+        assert statuses == {
+            "canada": "same",
+            "alberta": "same_country",
+            "ontario": "same_country",
+            "minnesota": "elsewhere",
+            "silent": "not_stated",
+        }
+
+    def test_comment_region_status_prefers_same_then_same_country(self) -> None:
+        two = comment(
+            "two",
+            mention("two#m0", variety="A", facts=(fact("region", "GB"),)),
+            mention("two#m1", variety="B", facts=(fact("region", "US-CT"),)),
+            mention("two#m2", variety="C", facts=(fact("region", "US"),)),
+        )
+        assert card(build_result([two], ask(region="US")), "two").region_status == "same"
+        three = comment("three", *two.mentions[:2])
+        assert card(build_result([three], ask(region="US")), "three").region_status == (
+            "same_country"
+        )
 
     def test_comment_region_status_prefers_same_then_elsewhere(self) -> None:
         two = comment(
@@ -862,6 +1105,9 @@ class TestDeterminism:
         assert result.n_candidates == len(kept)
         assert len(ids) + result.n_hidden_by_strict == result.n_candidates
         assert 0 <= result.n_with_conditions <= result.n_candidates
+        assert result.n_with_conditions + result.n_not_analysed <= result.n_candidates
+        kept_views = [v for v in views if v.comment_id in kept]
+        assert result.n_not_analysed == sum(v.parse_status is None for v in kept_views)
         keys = [g.key for g in result.groups]
         assert keys == [key for key in GROUP_ORDER if key in keys]
         for group in result.groups:
@@ -1127,8 +1373,17 @@ class TestSearchDatabase:
             "partial": ["p-trio"],
             "not_stated": ["p-split", "p-trellis", "p-thanks"],
         }
-        assert result.n_with_conditions == 3
-        assert result.limitation_message == "Only 3 of 5 reports mention growing conditions."
+        assert (result.n_with_conditions, result.n_not_analysed) == (3, 1)
+        assert result.limitation_message == (
+            "Only 3 of 5 reports mention comparable growing conditions (1 not yet analysed)."
+        )
+
+    def test_searching_a_variety_compares_that_variety(self, conn: sqlite3.Connection) -> None:
+        """F15 end to end: "Roma" puts the greenhouse-pepper comment under Different."""
+        roma = search(conn, "public", ask(text="Roma", shelter="greenhouse"), NOW)
+        assert layout(roma) == {"different": ["p-split"]}
+        pepper = search(conn, "public", ask(text="jalapeno", shelter="greenhouse"), NOW)
+        assert layout(pepper) == {"match": ["p-split"]}
 
     def test_filters_use_stored_facts(self, conn: sqlite3.Connection) -> None:
         by_year = search(conn, "public", ask(year="2024"), NOW)
@@ -1139,20 +1394,57 @@ class TestSearchDatabase:
         assert search(conn, "private", ask(year="2022"), NOW).n_candidates == 1
 
 
+def support(n_any: int, n_all: int) -> ChipSupport:
+    return ChipSupport(n_any=n_any, n_all=n_all)
+
+
 class TestChipSupport:
     def test_counts_distinct_visible_comments_per_chip(self, conn: sqlite3.Connection) -> None:
         assert chip_support(conn, "public", NOW, CHIPS) == {
-            "Containers": 2,
-            "Hot & humid": 1,
-            "Greenhouse": 1,
-            "Short season": 0,
+            "Containers": support(2, 2),
+            "Hot & humid": support(1, 0),
+            "Greenhouse": support(1, 1),
+            "Short season": support(0, 0),
         }
 
     def test_private_reports_only_count_in_private_scope(self, conn: sqlite3.Connection) -> None:
         private = chip_support(conn, "private", NOW, CHIPS)
-        assert (private["Containers"], private["Hot & humid"]) == (3, 2)
+        assert (private["Containers"], private["Hot & humid"]) == (support(3, 3), support(2, 0))
         public = chip_support(conn, "public", NOW, CHIPS)
-        assert (public["Containers"], public["Hot & humid"]) == (2, 1)
+        assert (public["Containers"], public["Hot & humid"]) == (support(2, 2), support(1, 0))
+
+    def test_all_conditions_must_hold_for_one_mention(self, conn: sqlite3.Connection) -> None:
+        """F18: hot peppers next to humid tomatoes state both, but no mention matches both."""
+        hot = vfact("summer_heat", "hot summer", "hot")
+        humid = vfact("humidity", "muggy", "humid")
+        shared_humid = vfact("humidity", "muggy", "humid", applicability="whole_comment")
+        store(
+            conn,
+            source_record("chip-demo"),
+            {
+                "split": "My peppers had a hot summer; my tomatoes were muggy.",
+                "both": "My peppers had a hot summer and it was muggy for my tomatoes.",
+            },
+            [
+                validated(
+                    "split",
+                    vmention("peppers", crop="pepper", facts=(hot,)),
+                    vmention("tomatoes", crop="tomato", facts=(humid,)),
+                ),
+                validated(
+                    "both",
+                    vmention("peppers", crop="pepper", facts=(hot,)),
+                    vmention("tomatoes", crop="tomato", facts=(shared_humid,)),
+                ),
+            ],
+        )
+        counts = chip_support(conn, "public", NOW, CHIPS)
+        assert counts["Hot & humid"] == support(3, 1)
+
+    @pytest.mark.parametrize(("n_any", "n_all"), [(1, 2), (-1, -1), (0, -1)])
+    def test_support_counts_are_consistent(self, n_any: int, n_all: int) -> None:
+        with pytest.raises(ValidationError):
+            ChipSupport(n_any=n_any, n_all=n_all)
 
     def test_no_chips_gives_an_empty_mapping(self, conn: sqlite3.Connection) -> None:
         assert chip_support(conn, "public", NOW, ()) == {}
@@ -1247,16 +1539,29 @@ class TestSyntheticFixtures:
 
     def test_coverage_message_and_counts(self, synthetic: sqlite3.Connection) -> None:
         result = search(synthetic, "public", ask(), NOW)
-        assert result.n_candidates == 69
-        assert result.limitation_message == "Only 35 of 69 reports mention growing conditions."
+        assert (result.n_candidates, result.n_not_analysed) == (69, 3)
+        assert result.limitation_message == (
+            "Only 35 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+        )
 
     def test_quick_chip_support(self, synthetic: sqlite3.Connection) -> None:
         assert chip_support(synthetic, "public", NOW, CHIPS) == {
-            "Containers": 8,
-            "Hot & humid": 6,
-            "Greenhouse": 5,
-            "Short season": 4,
+            "Containers": support(8, 8),
+            "Hot & humid": support(6, 2),
+            "Greenhouse": support(5, 5),
+            "Short season": support(4, 4),
         }
+
+    def test_searching_roma_compares_the_roma_mention(self, synthetic: sqlite3.Connection) -> None:
+        """F15: syn-0007 grows Jalapeño in a greenhouse and Roma outside."""
+        roma = search(synthetic, "public", ask(text="Roma", shelter="greenhouse"), NOW)
+        assert card(roma, "syn-0007").tier == "different"
+        strict = search(
+            synthetic, "public", ask(text="Roma", shelter="greenhouse", only_stated=True), NOW
+        )
+        assert "syn-0007" not in [r.comment.comment_id for r in shown(strict)]
+        pepper = search(synthetic, "public", ask(text="Jalapeño", shelter="greenhouse"), NOW)
+        assert card(pepper, "syn-0007").tier == "match"
         assert chip_support(synthetic, "private", NOW, CHIPS) == chip_support(
             synthetic, "public", NOW, CHIPS
         )

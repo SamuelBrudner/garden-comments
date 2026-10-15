@@ -9,6 +9,10 @@ viewer:
   scope: public
   # Quick-condition chips appear only when at least this many visible reports support them.
   min_reports_for_chip: 3
+  # The search box accepts at most this many characters (bounds full-text search cost).
+  max_query_chars: 200
+  # Result cards shown per page.
+  page_size: 20
 
 map:
   # Public-scope region cells with fewer distinct comments than this are suppressed.
@@ -37,6 +41,23 @@ extraction:
     - "plan to"
     - "going to try"
     - "want to try"
+    # Unpunctuated and plan/wish phrasings (apostrophes ' ’ ‘ ʼ ´ ` are interchangeable).
+    - "id try"
+    - "ill try"
+    - "id grow"
+    - "would"
+    - "wish"
+    - "if i had"
+    - "if only"
+    - "gonna"
+    - "hoping to"
+    - "hope to"
+    - "thinking of"
+    - "maybe"
+    - "we'll"
+    - "we'd"
+    - "you'd"
+    - "anyone"
 
 quick_chips:
   - label: Containers
@@ -71,8 +92,10 @@ outside_context:
     note: Gridded long-term climatology; coarse spatial resolution.
   - title: Cornell Vegetable Varieties for Gardeners
     url: https://vegvariety.cce.cornell.edu/
-    label: published external trial
-    note: Independent gardener variety evaluations hosted by Cornell Cooperative Extension.
+    label: community report
+    note: >-
+      Variety ratings by outside home gardeners, hosted by Cornell Cooperative Extension. These
+      are not this channel's comments and not a controlled trial.
   - title: Nebraska Vegetable Variety Navigator
     url: https://agronomy.unl.edu/vegetable-variety-navigator/
     label: published external trial

@@ -15,8 +15,10 @@ from pydantic import ValidationError
 
 from crop_explorer.schemas import (
     SCOPE_TO_RIGHTS,
+    ColumnMapping,
     CommentRecord,
     EnvironmentFact,
+    ImportStats,
     ParsedComment,
     to_utc_iso,
     utc_now_iso,
@@ -110,3 +112,44 @@ def test_private_import_scope_maps_to_the_unverified_rights_status() -> None:
         "synthetic": "synthetic",
         "cleared": "cleared",
     }
+
+
+def test_column_mapping_defaults_treat_optional_columns_as_optional() -> None:
+    mapping = ColumnMapping()
+    assert (mapping.permalink_col, mapping.permalink_required) == ("permalink", False)
+    assert (mapping.date_col, mapping.date_required) == ("created_at", False)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"permalink_col": None, "permalink_required": True},
+        {"date_col": None, "date_required": True},
+    ],
+)
+def test_a_required_optional_column_must_be_named(fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="required"):
+        ColumnMapping.model_validate(fields)
+
+
+def test_import_stats_carry_the_effective_rights_state() -> None:
+    stats = ImportStats(
+        source_id="s",
+        inserted=1,
+        updated=0,
+        unchanged=0,
+        deleted=0,
+        rights_status="cleared",
+        expires_at="2030-01-01T00:00:00Z",
+    )
+    assert list(stats.model_dump()) == [
+        "source_id",
+        "inserted",
+        "updated",
+        "unchanged",
+        "deleted",
+        "rights_status",
+        "expires_at",
+    ]
+    with pytest.raises(ValidationError):
+        ImportStats.model_validate({**stats.model_dump(), "rights_status": "public"})

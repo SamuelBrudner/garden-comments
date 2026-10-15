@@ -2,8 +2,11 @@
 
 The map answers "where did gardeners explicitly say they grew this?" (SPEC §6). Each comment
 counts once per U.S. state named by a normalized ``region`` fact applicable to one of its
-relevant mentions. Zones never produce a region, no coordinates are ever produced, and small
-cells are suppressed so a sparse map cannot single out a report.
+relevant mentions. Zones never produce a region and no coordinates are ever produced.
+
+Small-cell suppression only coarsens the map display (its shading, hover text and the state
+selector's labels). It is not a privacy control for the reports themselves: every visible card
+still shows its comment text and region line, and filtering by a state lists its reports.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final, Literal
 
 import pandas as pd
@@ -31,6 +35,14 @@ _DTYPES: Final = {
     "suppressed": "bool",
 }
 _US_COUNTRY: Final = "US"
+_LAYOUT: Final = MappingProxyType(
+    {
+        "geo": {"scope": "usa", "bgcolor": "rgba(0,0,0,0)"},
+        "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+        "dragmode": False,
+    }
+)
+"""Figure layout: the U.S. states only, transparent, no margins, no panning."""
 _SEQUENTIAL_BLUE: Final = (
     (0.0, "#cde2fb"),
     (0.25, "#86b6ef"),
@@ -115,7 +127,7 @@ def region_counts(results: Sequence[CommentResult], min_cell_count: int) -> Regi
     min_cell_count : int
         Cells with ``0 < n_comments < min_cell_count`` are reported as ``0`` and flagged
         ``suppressed``. Pass ``cfg.map.public_min_cell_count`` in public scope, ``1`` in
-        private scope (suppresses nothing).
+        private scope (suppresses nothing). This coarsens the map display only.
 
     Returns
     -------
@@ -180,22 +192,8 @@ def choropleth(counts: RegionCounts) -> go.Figure:
         postal-code locations in table order. Hover shows the count, or "fewer than k
         reports" for suppressed cells. Renders (as an empty map) when the table is empty.
     """
-    table = counts.table
-    hover = [
-        f"{name}: {count_label(n, suppressed=s, min_cell_count=counts.min_cell_count)}"
-        for name, n, s in zip(
-            table["region_name"],
-            table["n_comments"].tolist(),
-            table["suppressed"].tolist(),
-            strict=True,
-        )
-    ]
-    figure = go.Figure(data=[_trace(table, hover)])
-    figure.update_layout(
-        geo={"scope": "usa", "bgcolor": "rgba(0,0,0,0)"},
-        margin={"l": 0, "r": 0, "t": 0, "b": 0},
-        dragmode=False,
-    )
+    figure = go.Figure(data=[_trace(counts.table, _hover_text(counts))])
+    figure.update_layout(**_LAYOUT)
     return figure
 
 
@@ -255,6 +253,21 @@ def _row(code: str, n_comments: int, min_cell_count: int) -> tuple[str, str, str
     suppressed = 0 < n_comments < min_cell_count
     shown = 0 if suppressed else n_comments
     return (code, region_name(code), us_postal(code), shown, suppressed)
+
+
+def _hover_text(counts: RegionCounts) -> list[str]:
+    """Return one hover label per table row; a suppressed cell never shows its count."""
+    table = counts.table
+    rows = zip(
+        table["region_name"],
+        table["n_comments"].tolist(),
+        table["suppressed"].tolist(),
+        strict=True,
+    )
+    return [
+        f"{name}: {count_label(n, suppressed=s, min_cell_count=counts.min_cell_count)}"
+        for name, n, s in rows
+    ]
 
 
 def _trace(table: pd.DataFrame, hover: list[str]) -> go.Choropleth:

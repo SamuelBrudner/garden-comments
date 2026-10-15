@@ -4,16 +4,21 @@ Implements SPEC §5. Candidates come from scope-gated SQL/FTS reads in :mod:`cro
 everything after that is the pure, deterministic :func:`build_result`. Reports are grouped by how
 well their *stated* circumstances match the viewer's garden (match, partial, not stated,
 different), never by predicted quality: outcome words and comment text play no part in a tier or
-in the order. A region is a location preference that sorts same-region reports first within a
-group; it never changes a tier. Counts are of distinct comments, never of mentions.
+in the order. A search text that names a variety or crop makes those mentions the ones compared
+(SPEC §4: the variety mention is the query unit). A region is a location preference that sorts
+same-region (then same-country) reports first within a group; it never changes a tier. Counts are
+of distinct comments, never of mentions.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
+import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 from loguru import logger
@@ -27,12 +32,13 @@ from crop_explorer.environment_match import (
     match_context,
     region_status,
 )
-from crop_explorer.normalization import normalize_crop
+from crop_explorer.normalization import mentions_crop, normalize_crop, variety_key
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import EnvKey, Topic
 from crop_explorer.views import (
     GROUP_TITLES,
     TIER_ORDER,
+    ChipSupport,
     CommentResult,
     CommentView,
     FactView,
@@ -65,10 +71,18 @@ _GROUP_ORDER: Final[tuple[GroupKey, ...]] = ("all", *_TIERS)
 _STRICT_HIDDEN: Final[frozenset[GroupKey]] = frozenset({"not_stated", "different"})
 """Groups hidden by "Only show stated matches"."""
 _COLLAPSED: Final[frozenset[GroupKey]] = frozenset({"different"})
-_REGION_PREFERENCE: Final[tuple[RegionStatus, ...]] = ("same", "elsewhere")
+_REGION_PREFERENCE: Final[tuple[RegionStatus, ...]] = ("same", "same_country", "elsewhere")
+"""A comment's region status is the first of these that any relevant mention has."""
+_REGION_RANKS: Final[Mapping[RegionStatus | None, int]] = MappingProxyType(
+    {"same": 0, "same_country": 1}
+)
+_OTHER_REGION_RANK: Final = 2
+"""Display rank of ``elsewhere``, ``not_stated`` and no garden region."""
 _CONDITION_KEYS: Final[frozenset[EnvKey]] = frozenset((*COMPARABLE_KEYS, "region"))
-"""Keys whose normalized facts count as "mentions growing conditions"."""
+"""Keys whose normalized facts count as "mentions comparable growing conditions"."""
 _UNNAMED_MENTION: Final = "Unidentified variety"
+_SEARCH_WORD: Final = re.compile(r"[^\W_]+")
+"""A word of search text or of a name: letters/digits; anything else separates words."""
 
 _SortKey = tuple[int, str, int, str]
 
@@ -101,6 +115,8 @@ class _MentionFilter:
     topics: frozenset[Topic]
     year: str | None
     region: str | None
+    text_words: tuple[str, ...]
+    """Words of the search text; they pick the relevant mentions only when nothing else is set."""
 
     def is_set(self) -> bool:
         return any((self.crop, self.topics, self.year, self.region))
@@ -119,6 +135,30 @@ def _states(facts: Iterable[FactView], key: EnvKey, value: str) -> bool:
     return any(fact.key == key and fact.normalized_value == value for fact in facts)
 
 
+def _words(text: str) -> tuple[str, ...]:
+    """Casefold, drop diacritics and split into words: ``"Jalapeño-ish"`` -> jalapeno, ish."""
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    plain = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return tuple(_SEARCH_WORD.findall(plain))
+
+
+def _contains(words: Sequence[str], phrase: Sequence[str]) -> bool:
+    """Whether the non-empty ``phrase`` occurs in ``words`` as consecutive words."""
+    size = len(phrase)
+    return size > 0 and any(
+        tuple(words[i : i + size]) == tuple(phrase) for i in range(len(words) - size + 1)
+    )
+
+
+def _names(words: tuple[str, ...], mention: MentionView) -> bool:
+    """Whether search ``words`` name the mention's whole variety name, or its crop."""
+    variety = mention.variety_as_written
+    if variety is not None and _contains(words, _words(variety_key(variety))):
+        return True
+    crop = mention.crop
+    return crop is not None and mentions_crop(" ".join(words), " ".join(_words(crop)))
+
+
 def _mention_filter(query: SearchQuery) -> _MentionFilter:
     """Validate and normalize the query's mention-level filters.
 
@@ -133,7 +173,8 @@ def _mention_filter(query: SearchQuery) -> _MentionFilter:
     if query.region_filter is not None and query.region_filter not in REGION_NAMES:
         raise ValueError(f"Unknown region_filter code {query.region_filter!r}")
     crop = None if query.crop is None else normalize_crop(query.crop)
-    return _MentionFilter(crop, frozenset(query.topics), query.year, query.region_filter)
+    words = _words(query.text or "")
+    return _MentionFilter(crop, frozenset(query.topics), query.year, query.region_filter, words)
 
 
 def _relevant(
@@ -145,9 +186,10 @@ def _relevant(
         for mention, facts in with_facts
         if mention_filter.passes(mention, facts)
     )
-    if mention_filter.is_set() and not kept:
-        return None
-    return kept
+    if mention_filter.is_set():
+        return kept or None
+    named = tuple(match for match in kept if _names(mention_filter.text_words, match.mention))
+    return named or kept
 
 
 def relevant_mentions(view: CommentView, query: SearchQuery) -> tuple[MentionMatch, ...] | None:
@@ -159,15 +201,20 @@ def relevant_mentions(view: CommentView, query: SearchQuery) -> tuple[MentionMat
         A visible comment.
     query : SearchQuery
         The viewer's query. ``crop``, ``topics``, ``year`` and ``region_filter`` are
-        mention-level filters; ``text`` is applied by the database read and ignored here.
+        mention-level filters. ``text`` picks candidates in the database read; here it only
+        chooses among mentions, and only when no mention-level filter is set.
 
     Returns
     -------
     tuple[MentionMatch, ...] or None
         ``None`` when a mention-level filter is set and no single mention passes all of them.
-        Otherwise the passing mentions (all mentions when no filter is set, so a comment
-        without mentions gives ``()``), in mention order, each with its applicable facts and
+        Otherwise the passing mentions in mention order, each with its applicable facts and
         its match against the garden (``None`` when no comparable condition is selected).
+        With no mention-level filter: the mentions whose whole variety name (by
+        :func:`~crop_explorer.normalization.variety_key`) or crop (by
+        :func:`~crop_explorer.normalization.mentions_crop`) is named by consecutive words of
+        ``text`` (casefolded, diacritics ignored), or every mention when ``text`` names none
+        (so a comment without mentions gives ``()``).
 
     Raises
     ------
@@ -250,7 +297,7 @@ def _group_key(result: CommentResult) -> GroupKey:
 
 def _display_key(result: CommentResult) -> _SortKey:
     view = result.comment
-    region_rank = 0 if result.region_status == "same" else 1
+    region_rank = _REGION_RANKS.get(result.region_status, _OTHER_REGION_RANK)
     return (region_rank, view.source_id, view.source_order, view.comment_id)
 
 
@@ -278,35 +325,113 @@ def _tier_counts(results: Sequence[CommentResult], garden: GardenContext) -> dic
     return {tier: counts[tier] for tier in _TIERS}
 
 
-def _limitation_message(n_with_conditions: int, n_candidates: int) -> str | None:
-    """Say plainly how few reports describe growing conditions (``None`` when all or none)."""
-    if n_candidates in (0, n_with_conditions):
+@dataclass(frozen=True)
+class _Coverage:
+    """Distinct-comment counts behind the limitation message."""
+
+    n: int
+    """Candidates."""
+    n_with: int
+    """Candidates stating a comparable condition or a region."""
+    n_new: int
+    """Candidates never analysed (``parse_status is None``); disjoint from ``n_with``."""
+    n_hidden: int
+    """Candidates hidden by "Only show stated matches"."""
+
+
+def _coverage(
+    results: Sequence[CommentResult],
+    grouped: Mapping[GroupKey, Sequence[CommentResult]],
+    hidden: frozenset[GroupKey],
+) -> _Coverage:
+    return _Coverage(
+        n=len(results),
+        n_with=sum(result.has_conditions for result in results),
+        n_new=sum(result.comment.parse_status is None for result in results),
+        n_hidden=sum(len(group) for key, group in grouped.items() if key in hidden),
+    )
+
+
+_HIDDEN_BY_STRICT: Final = 'hidden by "Only show stated matches"'
+_ONE_NOT_ANALYSED: Final = (
+    "The 1 report found has not been analysed for growing conditions yet, so it cannot be "
+    "compared with your garden."
+)
+_ONE_NOT_COMPARABLE: Final = (
+    "The 1 report found does not mention comparable growing conditions, so it cannot be "
+    "compared with your garden."
+)
+_NONE_ANALYSED: Final = (
+    "None of these {n} reports have been analysed for growing conditions yet, so none can be "
+    "compared with your garden."
+)
+_NONE_COMPARABLE: Final = (
+    "None of these {n} reports mention comparable growing conditions, so none can be compared "
+    "with your garden."
+)
+_SOME_NOT_ANALYSED: Final = (
+    "None of these {n} reports can be compared with your garden: {stated} not mention "
+    "comparable growing conditions and {new} not been analysed yet."
+)
+
+
+def _count(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def _uncomparable(coverage: _Coverage) -> str:
+    """Say why no candidate can be compared, never calling an unanalysed one condition-free."""
+    n, n_new = coverage.n, coverage.n_new
+    if n == 1:
+        return _ONE_NOT_ANALYSED if n_new else _ONE_NOT_COMPARABLE
+    if n_new in (0, n):
+        return (_NONE_ANALYSED if n_new else _NONE_COMPARABLE).format(n=n)
+    return _SOME_NOT_ANALYSED.format(
+        n=n, stated=_count(n - n_new, "does", "do"), new=_count(n_new, "has", "have")
+    )
+
+
+def _where_shown(coverage: _Coverage) -> str:
+    """Say where the candidates are: below, or hidden by strict mode (never both claimed)."""
+    n, n_hidden = coverage.n, coverage.n_hidden
+    if n_hidden == 0:
+        return "It is shown below." if n == 1 else "All are shown below."
+    if n == 1:
+        return f"It is {_HIDDEN_BY_STRICT}; untick it to see it."
+    who = f"All {n} are" if n_hidden == n else _count(n_hidden, "of them is", "of them are")
+    return f"{who} {_HIDDEN_BY_STRICT}; untick it to see {'it' if n_hidden == 1 else 'them'}."
+
+
+def _limitation_message(coverage: _Coverage) -> str | None:
+    """Say plainly how few reports describe comparable conditions (``None`` when all do).
+
+    Unanalysed reports are counted apart and never said to lack conditions; reports hidden by
+    "Only show stated matches" are never said to be shown below.
+    """
+    if coverage.n in (0, coverage.n_with):
         return None
-    if n_with_conditions == 0 and n_candidates == 1:
-        return (
-            "The 1 report found does not mention growing conditions, so it cannot be compared "
-            "with your garden. It is shown below."
-        )
-    if n_with_conditions == 0:
-        return (
-            f"None of these {n_candidates} reports mention growing conditions, so none can be "
-            "compared with your garden. All are shown below."
-        )
-    verb = "mentions" if n_with_conditions == 1 else "mention"
-    return f"Only {n_with_conditions} of {n_candidates} reports {verb} growing conditions."
+    if coverage.n_with == 0:
+        return f"{_uncomparable(coverage)} {_where_shown(coverage)}"
+    verb = "mentions" if coverage.n_with == 1 else "mention"
+    pending = f" ({coverage.n_new} not yet analysed)" if coverage.n_new else ""
+    return (
+        f"Only {coverage.n_with} of {coverage.n} reports {verb} comparable growing conditions"
+        f"{pending}."
+    )
 
 
 def _assemble(results: Sequence[CommentResult], query: SearchQuery) -> SearchResult:
     hidden = _STRICT_HIDDEN if query.only_stated_matches else frozenset()
     grouped = _grouped(results)
-    n_with_conditions = sum(result.has_conditions for result in results)
+    coverage = _coverage(results, grouped, hidden)
     return SearchResult(
         groups=tuple(_result_group(k, group) for k, group in grouped.items() if k not in hidden),
-        n_candidates=len(results),
-        n_with_conditions=n_with_conditions,
-        n_hidden_by_strict=sum(len(group) for k, group in grouped.items() if k in hidden),
+        n_candidates=coverage.n,
+        n_with_conditions=coverage.n_with,
+        n_not_analysed=coverage.n_new,
+        n_hidden_by_strict=coverage.n_hidden,
         tier_counts=_tier_counts(results, query.garden),
-        limitation_message=_limitation_message(n_with_conditions, len(results)),
+        limitation_message=_limitation_message(coverage),
     )
 
 
@@ -326,22 +451,24 @@ def build_result(views: Sequence[CommentView], query: SearchQuery) -> SearchResu
     Parameters
     ----------
     views : Sequence[CommentView]
-        Visible candidate comments, already text-filtered by the caller (``query.text`` is not
-        applied here). Their order does not matter.
+        Visible candidate comments, already text-filtered by the caller. Their order does not
+        matter.
     query : SearchQuery
-        Mention-level filters, the viewer's garden and the strict-matching toggle.
+        Mention-level filters, the search text (which only chooses the relevant mentions, see
+        :func:`relevant_mentions`), the viewer's garden and the strict-matching toggle.
 
     Returns
     -------
     SearchResult
         Without a selected comparable condition, one ``all`` group; otherwise the non-empty
         groups ``match``, ``partial``, ``not_stated`` and ``different`` (collapsed by default),
-        in that order. Within a group, same-region reports come first, then
-        ``(source_id, source_order, comment_id)``. ``only_stated_matches`` hides the
-        ``not_stated`` and ``different`` groups and counts their comments in
+        in that order. Within a group, same-region reports come first, then same-country
+        ones, then ``(source_id, source_order, comment_id)``. ``only_stated_matches`` hides
+        the ``not_stated`` and ``different`` groups and counts their comments in
         ``n_hidden_by_strict``; without a selected condition there is nothing to match, so it
         hides nothing. ``tier_counts`` (empty without a selected condition),
-        ``n_candidates`` and ``n_with_conditions`` count distinct comments before hiding.
+        ``n_candidates``, ``n_with_conditions`` and ``n_not_analysed`` count distinct comments
+        before hiding.
 
     Raises
     ------
@@ -398,13 +525,26 @@ def search(
     return result
 
 
-def _stated_pairs(view: CommentView) -> frozenset[tuple[str, str]]:
-    """Return every ``(key, normalized_value)`` applicable to some mention of the comment."""
-    return frozenset(
-        (fact.key, fact.normalized_value)
+_Pairs = frozenset[tuple[str, str]]
+
+
+def _mention_pairs(view: CommentView) -> tuple[_Pairs, ...]:
+    """Return, per mention, every applicable ``(key, normalized_value)``."""
+    return tuple(
+        frozenset(
+            (fact.key, fact.normalized_value)
+            for fact in applicable_facts(mention, view.mentions)
+            if fact.normalized_value is not None
+        )
         for mention in view.mentions
-        for fact in applicable_facts(mention, view.mentions)
-        if fact.normalized_value is not None
+    )
+
+
+def _support(chip: QuickChip, comments: Sequence[tuple[_Pairs, ...]]) -> ChipSupport:
+    wanted = frozenset(chip.conditions.items())
+    return ChipSupport(
+        n_any=sum(any(not wanted.isdisjoint(pairs) for pairs in c) for c in comments),
+        n_all=sum(any(wanted <= pairs for pairs in c) for c in comments),
     )
 
 
@@ -417,7 +557,7 @@ def _require_unique_labels(chips: Sequence[QuickChip]) -> None:
 
 def chip_support(
     conn: sqlite3.Connection, scope: ViewerScope, now: str, chips: Sequence[QuickChip]
-) -> dict[str, int]:
+) -> dict[str, ChipSupport]:
     """Count the visible reports that support each quick-condition chip.
 
     Parameters
@@ -433,10 +573,12 @@ def chip_support(
 
     Returns
     -------
-    dict[str, int]
-        ``label -> n`` in chip order, where ``n`` is the number of distinct visible comments
-        having at least one mention whose applicable facts state any of the chip's
-        ``(key, value)`` conditions.
+    dict[str, ChipSupport]
+        ``label -> support`` in chip order. ``n_any`` is the number of distinct visible
+        comments having a mention whose applicable facts state any of the chip's
+        ``(key, value)`` conditions (the display gate); ``n_all`` the number having a single
+        mention whose applicable facts state all of them (the reports the chip would match).
+        A heatwave never supports "hot".
 
     Raises
     ------
@@ -444,12 +586,8 @@ def chip_support(
         If two chips share a label, or ``scope`` or ``now`` is invalid.
     """
     _require_unique_labels(chips)
-    stated = [_stated_pairs(view) for view in db.load_comment_views(conn, scope, now, None)]
-    support: dict[str, int] = {}
-    for chip in chips:
-        wanted = frozenset(chip.conditions.items())
-        support[chip.label] = sum(not wanted.isdisjoint(pairs) for pairs in stated)
-    return support
+    comments = [_mention_pairs(view) for view in db.load_comment_views(conn, scope, now, None)]
+    return {chip.label: _support(chip, comments) for chip in chips}
 
 
 def filter_options(conn: sqlite3.Connection, scope: ViewerScope, now: str) -> FilterOptions:

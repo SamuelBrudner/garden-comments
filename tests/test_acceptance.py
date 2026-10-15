@@ -537,3 +537,155 @@ def test_ambiguous_or_untrusted_statements_stay_text_only(
 
     assert not [f for m in comment.mentions for f in m.facts if f.key in {"region", "zone"}]
     assert comment_id in db.visible_comment_ids(demo_conn, "public", NOW, None)
+
+
+# --------------------------------------------------------------------------- validator, end to end
+#
+# The demo extractions contain nothing the validator rejects, so these cases push extractor
+# output that breaks the rules through the real `load-extractions` command and check that the
+# viewer (search, map) never shows the rejected fact. Each starts from the demo fixture line,
+# which carries the comment's correct `text_hash`.
+
+
+def fixture_line(comment_id: str) -> dict[str, Any]:
+    lines = EXTRACTIONS.read_text(encoding="utf-8").splitlines()
+    (line,) = [row for row in map(json.loads, lines) if row["comment_id"] == comment_id]
+    return dict(line)
+
+
+def with_extra_fact(comment_id: str, *facts: dict[str, Any]) -> dict[str, Any]:
+    """The demo line of ``comment_id`` with ``facts`` appended to its first mention."""
+    line = fixture_line(comment_id)
+    first = line["mentions"][0]
+    line["mentions"] = [{**first, "environment": [*first["environment"], *facts]}]
+    return line
+
+
+def env_fact(key: str, written: str, quote: str, normalized: str | None) -> dict[str, Any]:
+    return {
+        "key": key,
+        "value_as_written": written,
+        "normalized_value": normalized,
+        "evidence_quote": quote,
+        "applicability": "this_mention",
+        "basis": "reported_garden_context",
+    }
+
+
+def load_lines(env: CliEnv, directory: Path, *lines: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """Run ``load-extractions`` on ``lines``; return (id, mention, fact, reason) per rejection."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "tampered.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    out = directory / "rejections.jsonl"
+    loaded = env.run("load-extractions", path, "--rejections-out", out)
+    assert loaded.code == 0, loaded.err
+    rows = [json.loads(row) for row in out.read_text(encoding="utf-8").splitlines()]
+    return [(r["comment_id"], r["mention_index"], r["fact_index"], r["reason"]) for r in rows]
+
+
+def test_validator_e2e_hypothetical_zone_never_reaches_search(
+    demo_env: CliEnv, demo_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """SPEC §11 #5 through the loader: "I'd try these in zone 5" is not a zone-5 report."""
+    tampered = with_extra_fact(
+        "syn-0009", env_fact("zone", "zone 5", "I'd try these in zone 5", "5")
+    )
+
+    rejected = load_lines(demo_env, tmp_path, tampered)
+
+    assert rejected == [("syn-0009", 0, 0, "hypothetical_context")]
+    assert normalized(view(demo_conn, "syn-0009").mentions[0].facts, "zone") == set()
+    result = run(demo_conn, garden=GardenContext(zone="5"))
+    assert result.tier_counts["match"] == result.tier_counts["partial"] == 0
+    assert group_of(result, "syn-0009") == "not_stated"
+
+
+def test_validator_e2e_residence_and_growing_region_conflict_reaches_no_map_cell(
+    demo_env: CliEnv, demo_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """SPEC §11 #4 through the loader: Florida (residence) next to Maine rejects both."""
+    tampered = with_extra_fact(
+        "syn-0008", env_fact("region", "Florida", "I live in Florida", "US-FL")
+    )
+
+    rejected = load_lines(demo_env, tmp_path, tampered)
+
+    assert rejected == [
+        ("syn-0008", 0, 0, "conflicting_region"),
+        ("syn-0008", 0, 1, "conflicting_region"),
+    ]
+    assert normalized(view(demo_conn, "syn-0008").mentions[0].facts, "region") == set()
+    assert run(demo_conn, region_filter="US-FL").n_candidates == 0
+    assert "syn-0008" not in ids(run(demo_conn, region_filter="US-ME"))
+    states = state_counts(run(demo_conn))
+    assert "US-FL" not in states and "US-ME" not in states
+
+
+@pytest.mark.parametrize("claimed", ["US-CT", None])
+def test_validator_e2e_a_zone_written_as_a_region_reaches_no_map_cell(
+    demo_env: CliEnv, demo_conn: sqlite3.Connection, tmp_path: Path, claimed: str | None
+) -> None:
+    """SPEC §11 #3 through the loader: "Zone 6b" is never a region, labelled or not."""
+    tampered = with_extra_fact("syn-0001", env_fact("region", "Zone 6b", "Zone 6b here", claimed))
+
+    rejected = load_lines(demo_env, tmp_path, tampered)
+
+    assert rejected == [("syn-0001", 0, 4, "strict_key_mismatch")]
+    facts = view(demo_conn, "syn-0001").mentions[0].facts
+    assert (normalized(facts, "region"), normalized(facts, "zone")) == (set(), {"6b"})
+    assert "syn-0001" not in ids(run(demo_conn, region_filter="US-CT"))
+    assert state_counts(run(demo_conn))["US-CT"] == len(CONNECTICUT)
+
+
+def test_validator_e2e_an_extraction_of_edited_text_is_stale_and_reexported(
+    demo_env: CliEnv,
+    demo_conn: sqlite3.Connection,
+    add_private_source: SourceImporter,
+    tmp_path: Path,
+) -> None:
+    """An extraction made before the comment was edited is never attached to the new text."""
+    original = "Sungold did great in pots in zone 6b."
+    edited = f"{original} EDIT: wrong video, that was my neighbour's garden."
+    add_private_source(
+        demo_conn, source_id="edits", comments=[{"comment_id": "p-edit", "text": original}]
+    )
+    export = tmp_path / "to_extract.jsonl"
+    assert demo_env.run("export-for-extraction", "--out", export, "--only-unparsed").code == 0
+    exported = {
+        row["comment_id"]: row
+        for row in map(json.loads, export.read_text(encoding="utf-8").splitlines())
+    }
+    add_private_source(
+        demo_conn, source_id="edits", comments=[{"comment_id": "p-edit", "text": edited}]
+    )
+    stale = {
+        "comment_id": "p-edit",
+        "text_hash": exported["p-edit"]["text_hash"],
+        "extractor_version": "acceptance-v1",
+        "status": "parsed",
+        "mentions": [
+            {
+                "crop": "tomato",
+                "variety_as_written": "Sungold",
+                "evidence_quote": "Sungold did great in pots in zone 6b",
+                "environment": [
+                    env_fact("method", "pots", "in pots", "container"),
+                    env_fact("zone", "zone 6b", "in zone 6b", "6b"),
+                ],
+            }
+        ],
+    }
+
+    rejected = load_lines(demo_env, tmp_path / "load", stale)
+
+    assert rejected == [("p-edit", None, None, "stale_text")]
+    garden = GardenContext(zone="6b", method="container")
+    assert group_of(run(demo_conn, "private", garden=garden, text="neighbour"), "p-edit") == (
+        "not_stated"
+    )
+    again = tmp_path / "again.jsonl"
+    assert demo_env.run("export-for-extraction", "--out", again, "--only-unparsed").code == 0
+    assert "p-edit" in [
+        json.loads(row)["comment_id"] for row in again.read_text(encoding="utf-8").splitlines()
+    ]

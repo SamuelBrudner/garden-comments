@@ -36,6 +36,9 @@ packages = ["src/crop_explorer"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+markers = [
+    "browser: drives the running viewer in headless Chromium with Playwright (deselect with -m 'not browser')",
+]
 
 [tool.coverage.run]
 source = ["crop_explorer"]

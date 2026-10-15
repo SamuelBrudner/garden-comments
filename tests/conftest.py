@@ -14,6 +14,7 @@ No fixture here is autouse, so other test modules are unaffected.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sqlite3
@@ -188,6 +189,27 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> Path:
     return path
 
 
+def text_hash(text: str) -> str:
+    """The lowercase sha256 hex of ``text`` encoded as UTF-8, as the export writes it."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def with_text_hashes(
+    extractions: Sequence[Mapping[str, Any]], comments: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Give each extraction line the ``text_hash`` of its comment unless it already has one.
+
+    This is what an extractor does when it copies ``text_hash`` from the export line.
+    """
+    texts = {row["comment_id"]: row["text"] for row in comments}
+    return [
+        {"text_hash": text_hash(texts[line["comment_id"]]), **line}
+        if "text_hash" not in line and line.get("comment_id") in texts
+        else dict(line)
+        for line in extractions
+    ]
+
+
 def import_source(
     conn: sqlite3.Connection,
     directory: Path,
@@ -201,7 +223,8 @@ def import_source(
     """Import ``comments`` (JSONL rows) as one source, then load ``extractions`` for them.
 
     Both go through the production code (``ingest.import_file``, then
-    ``extraction.load_extractions`` with the repository's validation config). Any extraction
+    ``extraction.load_extractions`` with the repository's validation config). Each extraction
+    line gets its comment's ``text_hash`` unless it already carries one. Any extraction
     rejection fails the calling test, so helper data can never silently lose facts.
     """
     directory.mkdir(parents=True, exist_ok=True)
@@ -219,7 +242,9 @@ def import_source(
     stats = import_file(conn, comments_path, ColumnMapping(), source)
     if not extractions:
         return SourceImport(stats=stats, report=None)
-    extraction_path = _write_jsonl(directory / f"{source_id}.extractions.jsonl", extractions)
+    extraction_path = _write_jsonl(
+        directory / f"{source_id}.extractions.jsonl", with_text_hashes(extractions, rows)
+    )
     report = load_extractions(conn, extraction_path, load_config().extraction, IMPORTED_AT)
     assert report.rejections == (), report.rejections
     return SourceImport(stats=stats, report=report)

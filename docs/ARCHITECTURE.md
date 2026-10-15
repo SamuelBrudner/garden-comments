@@ -9,8 +9,8 @@ rules so modules can be built and tested independently. Shared types live in:
 | `schemas.py` | Extraction contract (`EnvironmentFact`, `VarietyMention`, `ParsedComment`), validated forms (`ValidatedFact`, `ValidatedMention`, `ValidatedComment`, `Rejection`), raw records (`ColumnMapping`, `CommentRecord`, `SourceRecord`, `ImportStats`), literals (`Topic`, `EnvKey`, `RightsStatus`, `ImportScope`, `SCOPE_TO_RIGHTS`), `to_utc_iso`, `utc_now_iso` |
 | `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
 | `regions.py` | `US_STATES`, `CA_PROVINCES`, `COUNTRIES`, `REGION_NAMES`, `is_us_state`, `us_postal`, `region_name` |
-| `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView`, `DimensionMatch`, `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult`, literals `ViewerScope`, `MatchStatus`, `Tier`, `RegionStatus`, `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` |
-| `config.py` | `AppConfig` and sub-models, `load_config(path)` |
+| `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus`, `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` |
+| `config.py` | `AppConfig` and sub-models, `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`) |
 | `logging_setup.py` | `configure_logging(cfg)` |
 
 ## Engineering rules (all modules)
@@ -41,7 +41,7 @@ rules so modules can be built and tested independently. Shared types live in:
 ```
 CSV/JSONL export --ingest.read_comments--> CommentRecord[] --db.sync_source_comments--> SQLite
                                                                      |
-db.iter_comments_for_extraction --CLI export-for-extraction--> {comment_id, text} JSONL (0600)
+db.iter_comments_for_extraction --CLI export-for-extraction--> {comment_id, text, text_hash} JSONL (0600)
 model step (offline, docs/EXTRACTION_PROMPT.md) --> ParsedComment JSONL
    --extraction.load_extractions (validate vs stored text)--> db.replace_extraction
                                                                      |
@@ -53,8 +53,14 @@ No model call happens at request time.
 
 ## Storage (`db.py`)
 
-SQLite via stdlib `sqlite3`. `PRAGMA foreign_keys = ON` on every connection (verified; otherwise
-`RuntimeError`). Connections use SQLite autocommit (`isolation_level=None`); every write runs in
+SQLite via stdlib `sqlite3`. `PRAGMA foreign_keys = ON` and `PRAGMA secure_delete = ON` on every
+connection (verified; otherwise `RuntimeError`). A missing database file is created owner-only
+(mode 0600, before SQLite opens it) in a parent directory created 0700 when missing; existing
+files and directories keep their modes (the database holds comment text verbatim). A fresh
+database gets `PRAGMA user_version = SCHEMA_VERSION` (1) and FTS5 `secure-delete`; `connect`
+refuses (`sqlite3.DatabaseError`, nothing written) a database with tables but another
+`user_version` (including 0, i.e. not created by this module) or without the `ON DELETE
+CASCADE` foreign keys that deletion relies on. Connections use SQLite autocommit (`isolation_level=None`); every write runs in
 its own `SAVEPOINT`, so writes nest safely inside a caller's transaction. Connections keep
 sqlite3's default `check_same_thread=True`: open one connection per thread / script run (the
 viewer opens one per Streamlit run). Tables (spec §8), plus a small `parses` table for
@@ -99,15 +105,22 @@ re-raises):
 ```python
 MEMORY_PATH = Path(":memory:")
 SUMMARY_KEYS = ("sources", "comments", "parsed_comments", "mentions", "facts")
+SCHEMA_VERSION = 1                     # PRAGMA user_version of a database created here
+MAX_FTS_TOKENS = 32                    # distinct words fts_query keeps (bounds FTS cost)
+class ExtractableComment(NamedTuple): comment_id: str; text: str; text_hash: str
 def connect(path: Path) -> sqlite3.Connection
-    # mkdir parents (not for MEMORY_PATH), foreign_keys ON, row_factory=sqlite3.Row, init_schema
-def init_schema(conn: sqlite3.Connection) -> None            # idempotent
-def sync_source_comments(conn, source: SourceRecord, comments: Sequence[CommentRecord]) -> ImportStats
+    # private file/dir creation (not for MEMORY_PATH), foreign_keys + secure_delete ON,
+    # row_factory=sqlite3.Row, init_schema
+def init_schema(conn: sqlite3.Connection) -> None   # create when empty, else check version (idempotent)
+def sync_source_comments(conn, source: SourceRecord, comments: Sequence[CommentRecord], *,
+                         replace: bool = False, clear_expiry: bool = False) -> ImportStats
 def replace_extraction(conn, validated: ValidatedComment, loaded_at: str) -> None
 def delete_source(conn, source_id: str) -> int                # #comments removed; KeyError if unknown
 def purge_expired(conn, now: str) -> list[str]                # deletes sources with expires_at <= now
-def stored_texts(conn, comment_ids: Sequence[str]) -> dict[str, str]   # pipeline-internal (no scope)
-def iter_comments_for_extraction(conn, only_unparsed: bool, now: str) -> list[tuple[str, str]]
+def stored_texts(conn, comment_ids: Sequence[str]) -> dict[str, str]   # pipeline-internal (no scope, no expiry)
+def extractable_texts(conn, comment_ids: Sequence[str], now: str) -> dict[str, tuple[str, str]]
+    # id -> (text, text_hash) for existing, not soft-deleted comments of unexpired sources
+def iter_comments_for_extraction(conn, only_unparsed: bool, now: str) -> list[ExtractableComment]
 def fts_query(text: str) -> str | None                         # pure sanitizer, see below
 def visible_comment_ids(conn, scope: ViewerScope, now: str, text: str | None) -> list[str]
 def load_comment_views(conn, scope: ViewerScope, now: str, comment_ids: Sequence[str] | None) -> list[CommentView]
@@ -116,9 +129,18 @@ def summary_counts(conn, scope: ViewerScope, now: str) -> dict[str, int]
 
 `sync_source_comments` semantics (idempotent re-import):
 
-- Validates first (nothing written on failure): duplicate ids within one call and
-  non-canonical `imported_at` / `expires_at` / `created_at` raise `ValueError`.
-- Upserts the `sources` row (updates `dataset_hash`, `imported_at`, rights, expiry, url, kind).
+- Validates first (nothing written on failure): duplicate ids within one call,
+  non-canonical `imported_at` / `expires_at` / `created_at`, and `clear_expiry` combined with an
+  `expires_at` raise `ValueError`.
+- Refuses (`ValueError`, ids and counts only, nothing written) to re-import an existing source
+  whose stored `expires_at <= source.imported_at` ("run purge-expired or delete-source first"),
+  whatever the flags. Unless `replace=True` it also refuses a re-import that would change the
+  stored `rights_status`, or one that shares **no** comment id with the source's stored
+  comments (a different dataset under the same source id, e.g. two files both named
+  `comments.csv`; an empty `comments` counts). A refresh that drops some comments is fine.
+- Upserts the `sources` row (updates `dataset_hash`, `imported_at`, rights, url, kind). The
+  expiry is **kept** when `source.expires_at` is `None`, replaced when one is given, and removed
+  only with `clear_expiry=True` — leaving out an expiry never loosens it.
 - A `comment_id` already owned by a *different* source → `ValueError` (collision; the message
   lists ids and owning source ids, never text).
 - New comment → insert. Same id, same `text_hash` (sha256 of UTF-8 text) → unchanged (keeps its
@@ -128,7 +150,14 @@ def summary_counts(conn, scope: ViewerScope, now: str) -> dict[str, int]
 - Comments of this source absent from the new import → deleted (cascade). An empty `comments`
   sequence is allowed and deletes them all (ingest never passes one: an empty file is an error).
 - A soft-deleted comment (`deleted_at` set) stays soft-deleted across re-imports.
-- Returns `ImportStats(source_id, inserted, updated, unchanged, deleted)`.
+- When any comment was deleted or had its text changed, the FTS index is optimised
+  (`'optimize'` command) in the same transaction, so old words leave no residue.
+- Returns `ImportStats(source_id, inserted, updated, unchanged, deleted, rights_status,
+  expires_at)`; the last two are the values stored after the import.
+
+`delete_source` and `purge_expired` also optimise the FTS index after deleting (with
+`secure_delete` and FTS5 `secure-delete`, no deleted word stays in `comments_fts_data` or in the
+database file).
 
 `replace_extraction` deletes the comment's existing `parses`/`mentions` (facts cascade) and
 inserts the validated ones in one transaction. Re-loading identical JSONL is a no-op in effect.
@@ -140,9 +169,15 @@ not stored; they are reported by the loader.
 `iter_comments_for_extraction` is pipeline-internal: it ignores rights status (extraction runs
 on private data) but excludes soft-deleted comments **and comments of sources whose
 `expires_at <= now`** (permission to process them has ended even before `purge_expired` runs).
-Ordered `(source_id, source_order, comment_id)`.
+Each item carries the stored `text_hash` (sha256 of the UTF-8 text) so the loader can tell
+which version of the text an extraction was made from. Ordered `(source_id, source_order,
+comment_id)`. `extractable_texts` applies the same filter to a list of ids (ordered by id); the
+extraction loader uses it instead of `stored_texts`, which ignores expiry and soft deletion.
 
-`fts_query(text)`: extract `\w+` tokens (Unicode); none → `None` (no text filter); otherwise
+`fts_query(text)`: NFC-normalise, then take words = runs of Unicode word characters (`\w`)
+together with the combining marks inside them (a mark never starts a word; a decomposed
+`n` + U+0303 stays one word, as in FTS5's tokenizer); drop repeated words (first-seen order) and
+keep at most `MAX_FTS_TOKENS`; none → `None` (no text filter); otherwise
 `" ".join(f'"{tok}"*' for tok in tokens)` (implicit AND, prefix match). User text is never
 passed to `MATCH` unsanitized.
 
@@ -188,7 +223,8 @@ def read_comments(path: Path, mapping: ColumnMapping) -> list[CommentRecord]
 def dataset_hash(path: Path) -> str                       # sha256 hex of file bytes
 def build_source(path: Path, *, source_id: str, kind: str, rights_status: RightsStatus,
                  source_url: str | None, expires_at: str | None, imported_at: str) -> SourceRecord
-def import_file(conn, path: Path, mapping: ColumnMapping, source: SourceRecord) -> ImportStats
+def import_file(conn, path: Path, mapping: ColumnMapping, source: SourceRecord, *,
+                replace: bool = False, clear_expiry: bool = False) -> ImportStats
 ```
 
 - Format from the suffix, case-insensitively: `.csv` or `.jsonl`; other → `IngestError` (checked
@@ -200,14 +236,20 @@ def import_file(conn, path: Path, mapping: ColumnMapping, source: SourceRecord) 
   longer comments fail loudly.
 - JSONL: split on `\n` only (raw U+2028/U+2029 are legal inside JSON strings; CRLF is fine);
   whitespace-only lines are skipped. Each line must be one JSON object without duplicate keys;
-  mapped values must be JSON strings (or null / absent for optional fields).
+  mapped values must be JSON strings (or null / absent for optional fields). A cell holding
+  invalid Unicode (an escaped lone surrogate, e.g. a truncated emoji) → `IngestError` naming
+  file, line and column; any other record validation error is re-raised the same way.
 - Required: id and text present; every row has a non-blank id without surrounding whitespace
-  and non-blank text. Duplicate ids → `IngestError` naming every duplicated id with its rows.
+  and non-blank text. Duplicate ids → `IngestError` naming the id column and the rows/lines of
+  each duplicate group (at most 10 groups / 10 numbers each), never the ids themselves.
   Empty input (zero bytes, whitespace, BOM only, header-only CSV) → `IngestError`, because
   importing it would delete every stored comment of the source. The mapping must name distinct
   columns.
 - Optional permalink/date columns: unmapped or absent → `None` for all rows; blank cells →
-  `None` (cells are trimmed before this check). Dates → `to_utc_iso` (`IngestError` with
+  `None` (cells are trimmed before this check). `ColumnMapping.permalink_required` /
+  `date_required` (set by the CLI when the operator names `--permalink-col` / `--date-col`)
+  make the column mandatory: missing from the CSV header, or from every JSONL object →
+  `IngestError`. Dates → `to_utc_iso` (`IngestError` with
   row/line and column). Permalinks must match `https?://` followed by non-space characters.
 - `source_order` = 0-based row order (CSV row numbers in errors are 1-based data rows, JSONL
   line numbers are 1-based physical lines).
@@ -218,53 +260,112 @@ def import_file(conn, path: Path, mapping: ColumnMapping, source: SourceRecord) 
   `rights_status`, `imported_at`/`expires_at` normalised with `to_utc_iso`.
 - `import_file` reads the file **once**, checks that the SHA-256 of those bytes equals
   `source.dataset_hash` (`IngestError` otherwise: the file changed after `build_source` hashed
-  it), parses the same bytes and calls `db.sync_source_comments`. Nothing is written on error.
+  it), parses the same bytes and calls `db.sync_source_comments` (passing `replace` and
+  `clear_expiry` through). Nothing is written on error.
 - Error messages name the file, row/line and column but never a cell value (a swapped mapping
-  would otherwise echo comment text); exceptions whose own text contains a cell are re-raised
-  `from None`. The one exception is duplicate-id errors, which name the ids. Only
-  `Read N comments from <file name>` is logged.
+  would otherwise echo comment text — this includes duplicated ids); exceptions whose own text
+  contains a cell (`UnicodeEncodeError`, pydantic `ValidationError`, ...) are re-raised
+  `from None`. Only `Read N comments from <file name>` is logged.
 
 ## Normalization (`normalization.py`)
 
 ```python
 STRICT_KEYS: frozenset[EnvKey] = frozenset({"region", "zone", "growing_year"})
+SpanKind = Literal["value", "negated", "blocked"]
+@dataclass(frozen=True)
+class WrittenSpan: start: int; end: int; value: str | None; kind: SpanKind
+def resolve_spans(key: EnvKey, text: str) -> tuple[WrittenSpan, ...]
 def normalize_written(key: EnvKey, written: str) -> str | None
 def normalize_crop(crop: str) -> str
+CROP_SYNONYMS: Mapping[str, str]          # casefolded word -> normalized crop ("cukes" -> "cucumber")
+def mentions_crop(text: str, crop: str) -> bool
 def variety_key(variety: str) -> str
 def parse_zone(value: str) -> tuple[int, str | None]      # "6b" -> (6, "b"); "6" -> (6, None)
 ```
 
 `normalize_written` maps an as-written phrase to a normalized vocabulary value deterministically
-using small explicit synonym tables; it returns `None` when nothing is recognised or the phrase
-is ambiguous (fail-safe: an unnormalized fact stays display-only, it is never mislabelled).
-`ValueError` for a key that is not an `EnvKey`. Rules:
+using small explicit synonym tables; it returns `None` when nothing is recognised, the only
+match is negated or blocked, or the phrase is ambiguous (fail-safe: an unnormalized fact stays
+display-only, it is never mislabelled). `ValueError` for a key that is not an `EnvKey`.
+
+`resolve_spans` returns the spans the rules keep for one key over any text (e.g. a fact's
+evidence quote): resolved longest-first, non-overlapping, in text order, with offsets into the
+**original** text (`text[start:end]` is exactly the matched phrase, even where whitespace was
+collapsed for matching). `kind` is `"value"` (the phrase states `value`), `"negated"` (a
+negation or low-quantity cue precedes it in its clause; `value` is what it would name) or
+`"blocked"` (a look-alike; `value` is `None`). For a `"value"`/`"negated"` span, `value` is
+`None` when the phrase names something outside the vocabulary: a range or list ("zones 6-7",
+"zone 6b/7a", "2022-2023") or an out-of-range zone ("zone 14"). `normalize_written` is computed
+from these spans, so the two never disagree: `None` if there is no `"value"` span or any has
+value `None`; otherwise the single distinct value (for region, one subdivision may absorb its
+own country). A validator can therefore judge a short value at its position inside a quote:
+"humid" in "it wasn't humid" lies in a `"negated"` span, "Virginia" in "West Virginia" in a
+`US-WV` span, "Kansas" in "Kansas City" in a `"blocked"` span, "zone 6b" in "zone 6b/7a" in a
+range span.
+
+Rules:
 
 - Matching: typographic apostrophes/hyphens unified, whitespace collapsed, case-insensitive
   (except postal codes and dotted abbreviations). Phrases are bounded by non-word characters and
   a hyphen counts as part of a word ("non-humid", "semi-arid" never match "humid"/"arid"; a
   trailing "-grown" is allowed). Inside a phrase, words may be joined by a space, a hyphen or
   nothing ("heat wave" / "heat-wave" / "heatwave"). Overlaps are resolved **longest phrase
-  first**.
+  first**; on a tie (same start and length) a blocker wins.
 - Negation: a phrase is dropped when one of the 3 words before it in the same clause (clauses
   split on `, ; : . ! ?` and brackets) is a negation cue (no, not, never, without, didn't,
-  isn't, ...). "not humid" → `None`; phrases that start with the negation ("no rain" →
-  `dry_season`) still match.
-- Blockers: look-alike phrases consume their text without yielding a value ("hot peppers",
-  "heat mat", "clay pots", "shade cloth", "humidity dome", "rain barrel", "started indoors",
-  ...; for regions the city names "Kansas City" and "Nevada City", so "Kansas City, Missouri"
-  is `US-MO` while a bare "Kansas City" stays `None`).
+  isn't, ...) or a low-quantity cue (less, lack, lacked, lacking, insufficient, rarely, seldom,
+  zero). "not humid", "less humid", "it rarely rained" → `None`; phrases that start with the
+  negation ("no rain", "lack of rain" → `dry_season`) still match.
+- Bare dimension nouns name no value: "humidity", "heat", "rain"/"rains" → `None`, so "Humidity
+  was in the single digits", "lack of heat" and "it rarely rains" stay display-only. Explicit
+  forms still map: "humid", "high humidity", "muggy" → `humid`; "low humidity" → `dry_air`;
+  "hot", "brutal/extreme/intense/high heat" → `hot`; "rained", "rainy", "lots of rain", "heavy
+  rains", "too much rain", "downpours" → `rainy`; "no rain", "little rain", "not enough rain",
+  "low rainfall" → `dry_season`.
+- Blockers: look-alike phrases consume their text without yielding a value.
+  - Categorical: "hot peppers", "heat mat", "heat tolerant", "clay pots", "shade cloth" (also
+    "light/partial/... shade cloth"), "humidity dome", "rain barrel", "drought tolerant",
+    "container mix" (method); seed starting ("started indoors", "started (them/seeds) under
+    (grow) lights", "seedlings under lights"); overwintering ("overwintered indoors", "brought
+    them inside"); season extenders ("cold frame", "inside the cold frame", "low tunnel");
+    structures near a greenhouse ("next to / beside / behind / near / in front of the
+    greenhouse"); other seasons ("cool/mild spring, fall, autumn, winter"); hand work that is
+    not watering ("pollinated/planted/seeded/thinned/picked off/... by hand").
+  - Region: places named after a region they are not (only) in — cities ("Kansas City",
+    "Nevada City", "Michigan City", "Virginia City", "Missouri City", "Arkansas City"),
+    neighbourhoods ("Washington Heights", "Jamaica Plain"), lakes ("Lake Michigan/Ontario/
+    Erie/Huron/Superior/Champlain/Tahoe"), valleys and rivers ("Ohio/Tennessee/Delaware/
+    Mississippi/Missouri/Hudson Valley", "Ohio/.../Colorado/Connecticut River"), waters
+    ("Gulf of Mexico", "Georgia Strait", "Strait of Georgia", "Colorado Desert") and
+    "Tbilisi, Georgia". So "Kansas City, Missouri" is `US-MO` and "Chicago, Illinois near Lake
+    Michigan" is `US-IL`, while a bare "Kansas City" or "Lake Michigan" stays `None`; "New
+    York City", "Oklahoma City", "Iowa City", "Mexico City" and "Quebec City" still resolve.
+    "West VA" (usually West Virginia) → `None`. Non-North-American "City, XX" forms whose code
+    is also a U.S./Canadian postal code are blocked (comma optional, city case-insensitive):
+    "Perth/Fremantle/Bunbury/Broome, WA", "Darwin/Alice Springs, NT", "Catania, CT",
+    "Palermo/Belém, PA", "Milano/Milan, MI", "Varese, VA", "Como, CO", "Messina, ME",
+    "Chennai, TN", "Monterrey, NL", "Cagliari, CA", "Florianópolis, SC", "Recife, PE",
+    "Tijuana, BC", ... → `None`; "Perth, WA, Australia" → `AU`.
+  - Zone: other zone systems ("Sunset (Western Garden) zone 9", "heat zone 9", "AHS (heat)
+    zone 7", "Canadian/Canada zone 5a", "Australian (climate) zone 5", "climate zone 3",
+    "RHS zone 4") → `None`; they are never stored as USDA zones.
 - Region: full state/province/country names and aliases anywhere in the phrase
   ("in Connecticut" → `US-CT`; "New England" → `US`; "New South Wales" → `AU`, not Wales;
   Washington DC forms → `US-DC`). Dotted abbreviations ("Conn.", "Calif.", "N.Y.") match
-  case-sensitively ("a huge mass." is not Massachusetts). Two-letter postal codes only as the
-  whole phrase ("CT") or right after a comma and followed by the end, punctuation, a ZIP code or
-  a country ("Hartford, CT 06103"); "in it" never → `US-IN`; "US"/"GB" alone → `None`.
-  Hierarchy: one subdivision plus only its own country gives the subdivision
-  ("Ontario, Canada" → `CA-ON`); any other mix of places is ambiguous → `None` ("Toronto, ON,
-  USA", "I live in Florida but grew these in Maine").
-- Zone: "zone 6b", "Zone 6B", "z6b", "USDA 7a", "hardiness zone 5" → `6b`/`7a`/`5`; a bare value
-  ("6b") only when it is the whole phrase. Ranges, lists, split subzones ("zones 6-7", "6b/7a"),
-  out-of-range zones and two different zones → `None`; the same zone repeated is fine.
+  case-sensitively ("a huge mass." is not Massachusetts). Uppercase two-letter postal codes only
+  (a) as the whole phrase ("CT"), (b) right after a comma and followed by the end, punctuation,
+  a ZIP code or a country ("Hartford, CT 06103"), or (c) right after a directional/area
+  qualifier: upstate, downstate, central, north(ern), south(ern), east(ern), west(ern),
+  northeast(ern) and the other compass points, NE/NW/SE/SW, north/south central, middle, mid,
+  coastal ("upstate NY", "SE PA", "middle TN", "mid-MI", "northern CA" → the state). A bare
+  "City ST" without a comma ("Austin TX") stays `None`; "north OR south" is not Oregon; "in it"
+  never → `US-IN`; "US"/"GB" alone → `None`. Hierarchy: one subdivision plus only its own
+  country gives the subdivision ("Ontario, Canada" → `CA-ON`); any other mix of places is
+  ambiguous → `None` ("Toronto, ON, USA", "I live in Florida but grew these in Maine").
+- Zone: "zone 6b", "Zone 6B", "z6b", "zn 5", "Zn5", "zone: 6b", "zone - 7a", "USDA 7a",
+  "usda7a", "USDA zone: 7a", "hardiness zone 5" → `6b`/`5`/`7a`; a bare value ("6b") only when
+  it is the whole phrase. Ranges, lists, split subzones ("zones 6-7", "6b/7a"), out-of-range
+  zones and two different zones → `None`; the same zone repeated is fine.
 - Year: exactly one distinct 19xx/20xx year (repeats allowed; "mid-2021" → `2021`); two years or
   a range ("2022-2023", "2023/24") → `None`.
 - Categorical examples: "pots", "containers", "grow bags", "5 gallon buckets" → `container`;
@@ -272,13 +373,32 @@ is ambiguous (fail-safe: an unnormalized fact stays display-only, it is never mi
   "high tunnel", "polytunnel" (and "inside the greenhouse") → `greenhouse`; "outside the
   greenhouse" → `outdoors`; "muggy", "humid" → `humid`; "hot summers", "brutal heat" → `hot`;
   "heat wave" → `heatwave`; "short season" → `short_season`; "clay" → `clay`; "drip" → `drip`.
+  Sun: qualified shade is `part_shade` ("part/partial/some/a bit of/a little/light/filtered/
+  half/semi/dappled/morning/afternoon shade", "shade in the afternoon/morning", "shade (for)
+  part of the day", "shade after/until ...", "part/partly/partially shaded", "part sun",
+  "morning sun"); only unqualified "shade", "shady", "full shade", "deep shade" are `shade`.
   Two conditions in one phrase ("sandy loam", "full sun with afternoon shade") → `None`.
 - Never infer region from a zone, or humidity from a region.
 
-`normalize_crop`: casefold, strip, collapse whitespace, singularise the **last word** only
-("brussels sprouts" → "brussels sprout"): `-sses`→`-ss`, `-ches`→`-ch`, `-shes`→`-sh`,
-`-oes`→`-o`, `-ies`→`-y` (words of 5+ letters), otherwise drop a final `-s`; words shorter than 4
-letters and words ending in `ss`/`us`/`is` are unchanged. Idempotent. Empty → `ValueError`.
+`normalize_crop`: casefold, unify typographic apostrophes/hyphens, strip, collapse whitespace,
+singularise the **last word** only ("brussels sprouts" → "brussels sprout"): drop a trailing
+`'s` ("tomato's" → "tomato"); explicit irregular plurals first (`chilies`→`chili`,
+`chillies`→`chilli`, `irises`→`iris`); then `-sses`→`-ss`, `-ches`→`-ch`, `-shes`→`-sh`,
+`-oes`→`-o`, `-ies`→`-y` (words of 5+ letters), otherwise drop a final `-s` ("zucchinis" →
+"zucchini", "kiwis" → "kiwi"). Words shorter than 4 letters, words ending in `ss`/`us`, and a
+small explicit set of singular `-is` words (iris, cannabis, clematis, physalis, ...) are
+unchanged. Idempotent. Empty → `ValueError`.
+
+`CROP_SYNONYMS`: a small explicit map from casefolded as-written crop words to the normalized
+crop they also name: cuke(s) → cucumber, courgette(s) → zucchini, aubergine(s) → eggplant,
+spud(s) → potato, toms/tomatos → tomato, capsicum/chile/chili/chilli (and plurals) → pepper.
+Every value is a `normalize_crop` fixed point (checked at import).
+
+`mentions_crop(text, crop)`: `True` iff some window of 1–3 consecutive words of `text` (words
+split on whitespace, hyphens and punctuation; inner apostrophes kept), after `normalize_crop` or
+via `CROP_SYNONYMS`, equals `crop` normalized the same way. Word-bounded ("pepperoni" does not
+name pepper, "Tom" does not name tomato); a synonym adds a name, it never replaces one
+("chillies" names both `chilli` and `pepper`). A crop with no letters or digits → `ValueError`.
 
 `variety_key`: casefold; typographic apostrophes/hyphens → ASCII; keep hyphens and apostrophes
 only between two word characters; every other quote/punctuation mark becomes a space; collapse
@@ -292,71 +412,122 @@ green`, `"Mr. Stripey"` → `mr stripey`). Empty result → `ValueError`.
 
 ```python
 class ExtractionReport(BaseModel):  # frozen pydantic model
-    lines_read, schema_errors, unknown_comment_ids, duplicate_comment_ids, comments_loaded,
-    status_counts: dict[ParseStatus, int], mentions_accepted, mentions_rejected,
-    facts_accepted, facts_rejected, unresolved_identities, rejections: tuple[Rejection, ...]
+    lines_read, schema_errors, unknown_comment_ids, duplicate_comment_ids, expired_comment_ids,
+    stale_texts, comments_loaded, status_counts: dict[ParseStatus, int], mentions_accepted,
+    mentions_rejected, facts_accepted, facts_rejected, unresolved_identities,
+    rejections: tuple[Rejection, ...]
 def read_extraction_jsonl(path: Path) -> tuple[list[tuple[int, ParsedComment]], list[Rejection]]
 def validate_parsed_comment(parsed: ParsedComment, text: str, cfg: ExtractionConfig) -> ValidatedComment
-def load_extractions(conn, path: Path, cfg: ExtractionConfig, loaded_at: str) -> ExtractionReport
+def load_extractions(conn, path: Path, cfg: ExtractionConfig, loaded_at: str,
+                     *, now: str | None = None) -> ExtractionReport
 ```
 
-Validation rules. Each failure appends a `Rejection` with a machine-readable reason:
-`schema_error`, `unknown_comment_id`, `duplicate_comment_id`, `mention_quote_not_substring`,
-`variety_not_in_quote`, `invalid_crop`, `invalid_variety`, `fact_quote_not_substring`,
-`value_not_in_quote`, `invalid_normalized_value`, `strict_key_mismatch`,
-`normalized_value_mismatch`, `hypothetical_context`, `conflicting_region`, `conflicting_zone`.
-Rejection `mention_index`/`fact_index` are positions in the extractor's input lists.
+The extraction contract (`schemas.py`): `ParsedComment` requires `text_hash`, the lowercase
+SHA-256 hex digest of the UTF-8 comment text, copied from the `export-for-extraction` line
+(pattern `^[0-9a-f]{64}$`). `EnvironmentFact.value_as_written` is at most 200 characters
+(`MAX_VALUE_CHARS`), and every evidence quote (mention or fact) at most 2000
+(`MAX_QUOTE_CHARS`); longer lines are `schema_error`s, which bounds the validator's work.
+
+Validation rules. Each failure appends a `Rejection` with a machine-readable reason. Line
+level: `schema_error`, `unknown_comment_id`, `duplicate_comment_id`, `source_expired`,
+`stale_text`. Mention level: `mention_quote_not_substring`, `variety_not_in_quote`,
+`crop_not_in_quote`, `invalid_crop`, `invalid_variety`. Fact level:
+`fact_quote_not_substring`, `value_not_in_quote`, `value_in_variety_name`,
+`invalid_normalized_value`, `negated_value`, `blocked_value`, `strict_key_mismatch`,
+`normalized_value_mismatch`, `hypothetical_context`, `question_context`, `conflicting_region`,
+`conflicting_zone`. Rejection `mention_index`/`fact_index` are positions in the extractor's
+input lists.
+
+"Whole words" below means: case-insensitive, not preceded or followed by a word character or a
+hyphen (a hyphen counts as part of a word, as in normalisation), optionally followed by a plural
+`s`/`es` (`(?<![\w-])value(?:s|es)?(?![\w-])`). When the value occurs with its exact case, only
+those occurrences count; otherwise every case-insensitive one does.
 
 1. Mention `evidence_quote` must be an **exact** (case-sensitive) substring of the comment text,
    else the mention and all its facts are rejected (one mention-level rejection covers them).
-2. `variety_as_written`, when present, must occur case-insensitively within the mention quote.
+2. `variety_as_written`, when present, must occur in the mention quote as whole words
+   (`variety_not_in_quote`: "Roma" is not in "aroma"; "Sungolds" holds "Sungold"). A mention
+   with a `crop` and no variety must name its crop in the quote:
+   `normalization.mentions_crop(quote, crop)` (word, plural or `CROP_SYNONYMS` entry), else
+   `crop_not_in_quote` ("Great video" cannot carry a pepper mention).
 3. `crop` is normalised with `normalize_crop` and `variety_key` from `variety_key()`; a value
-   they reject (blank crop, variety "--") rejects the mention (`invalid_crop` /
+   they reject (blank crop, crop "--", variety "--") rejects the mention (`invalid_crop` /
    `invalid_variety`). Topics are de-duplicated in first-seen order.
-4. Fact `evidence_quote` must be an exact substring of the comment text; `value_as_written` must
-   occur case-insensitively within the fact's `evidence_quote`. Normalisation (rule 5) runs on
-   the value **as spelled in the quote** (the exact-case occurrence if there is one), so an
-   extractor writing "IN" for a quote containing only the word "in" cannot create `US-IN`.
-   The stored `value_as_written` stays as the extractor wrote it.
-5. Normalised value: if provided it must satisfy `vocab.is_valid_normalized`
-   (`invalid_normalized_value`); for `STRICT_KEYS` it must equal `normalize_written(key,
-   value)` (`strict_key_mismatch`), so "zone 6b" can never become a region and a residence-only
-   phrase cannot be re-labelled; for every other key it must not contradict a non-null
-   `normalize_written` result (`normalized_value_mismatch`: "pots" marked `raised_bed`), while a
-   value the loader cannot derive ("balcony railing" → `container`) is accepted. If not provided,
-   use `normalize_written`; it may stay `None` (a display-only fact such as "Cape Cod"), except
-   that a strict-key fact whose phrase is really another strict key's value (region "zone 6b",
-   zone "Connecticut", region "2023") is rejected (`strict_key_mismatch`).
-6. Hypothetical/advice guard: split the comment text into sentences; `!`, `?` and line breaks
-   always end a sentence, `.` ends one only when followed by whitespace, a closing quote or
-   bracket, or the end of the text, and not after a known abbreviation (Mr, Mrs, Dr, St, e.g,
-   i.e, vs, var, cv, gal, lb, oz, ...). Each delimiter belongs to the sentence it ends. If any
+4. Fact `evidence_quote` must be an exact substring of the comment text
+   (`fact_quote_not_substring`); `value_as_written` must occur in it as whole words
+   (`value_not_in_quote`: "Maine" is not in "remained", "pot" is not in "potatoes"). Every such
+   occurrence, at every occurrence of the quote in the text, is a **position** of the value.
+   If any position lies wholly inside an occurrence in the comment text (whole words, any
+   case) of any mention's `variety_as_written` → `value_in_variety_name` ("Arkansas" of
+   "Arkansas Traveler", "Hot" of "Hot Portugal", "Shade" of "Shade Star"), for every key and
+   also for a display-only fact. The stored `value_as_written` stays as the extractor wrote it.
+5. Normalised value. `null` always means display-only: the loader never derives a value for
+   it. The only check on a `null` fact is that a strict-key phrase is not really another strict
+   key's value (region "zone 6b", zone "Connecticut", region "2023" → `strict_key_mismatch`).
+   A given value must satisfy `vocab.is_valid_normalized` (`invalid_normalized_value`). Then
+   the quote is read with `normalization.resolve_spans(key, evidence_quote)` and every position
+   of the value in the quote is judged by the resolved spans that overlap it:
+   - any overlapping span is `"negated"` → `negated_value` ("humid" in "it wasn't humid", "not
+     humid", "no greenhouse");
+   - a `"blocked"` span extends past the position, or the overlapping spans are all blocked →
+     `blocked_value` ("clay" in "clay pots", "Hot" in "Hot peppers", "Kansas" in "Kansas
+     City", "Perth, WA", "Lake Michigan", "Sunset zone 9"); a blocker wholly inside the value
+     next to a value span is fine ("Kansas City, Missouri" → `US-MO`);
+   - otherwise the `"value"` spans must name the given value, and nothing else except, for a
+     region, its own country ("Maine, USA" → `US-ME`), else `normalized_value_mismatch`
+     ("Virginia" in "West Virginia" for `US-VA`, "zone 6b" in "zone 6b/7a", "Zones 6-7" for
+     `6`, "pots" for `raised_bed`);
+   - no span overlaps the position → the occurrence is normalised on its own
+     (`normalize_written(key, occurrence)`): a non-null result that differs →
+     `normalized_value_mismatch`; `None` is accepted for non-strict keys (the extractor may
+     normalise what the loader cannot: "balcony railing" → `container`) and rejected for
+     `STRICT_KEYS` (`strict_key_mismatch`): region, zone and year must be derivable where they
+     are quoted ("upstate NY" with value "NY" → `US-NY`; "CT" alone → `US-CT`; region "zone
+     6b" → rejected).
+6. Hypothetical/advice/question guard: split the comment text into sentences; `!`, `?` and line
+   breaks always end a sentence, `.` ends one only when followed by whitespace, a closing quote
+   or bracket, or the end of the text, and not after a known abbreviation (Mr, Mrs, Dr, St,
+   e.g, i.e, vs, var, cv, gal, lb, oz, ...; looked for within the 32 characters before the full
+   stop, which keeps splitting linear). Each delimiter belongs to the sentence it ends. If any
    sentence overlapping **any occurrence** of the fact's evidence quote contains a configured
    marker (`cfg.hypothetical_markers`: case-insensitive, word-bounded, a space in a marker
-   matches any whitespace, apostrophes `'` `’` `‘` `ʼ` interchangeable) → reject the fact
-   (`hypothetical_context`). Joining sentences can only make the guard stricter, so
-   "I'd try Mr. Stripey in zone 5" and "I'd space them 2.5 feet apart in zone 5" are rejected.
-   A blank configured marker is a config error (`ValueError`).
-7. Within one mention, accepted facts with key `region` (or `zone`) and two or more distinct
-   non-null normalised values → reject every fact of that key in that mention
-   (`conflicting_region` / `conflicting_zone`). The same value repeated is not a conflict.
+   matches any whitespace, apostrophes `'` `’` `‘` `ʼ` `´` and the backtick interchangeable) →
+   reject the fact (`hypothetical_context`); otherwise, if such a sentence ends with `?` →
+   `question_context`. Joining sentences can only make the guard stricter, so "I'd try Mr.
+   Stripey in zone 5" and "I'd space them 2.5 feet apart in zone 5" are rejected. A blank
+   configured marker is a config error (`ValueError`).
+7. Conflicts. Within one mention, accepted facts with key `region` (or `zone`) and two or more
+   distinct non-null normalised values → reject every fact of that key in that mention. Then,
+   across the comment, if the accepted `whole_comment` facts of key `region` (or `zone`) on all
+   mentions carry two or more distinct non-null values → reject every `whole_comment` fact of
+   that key (`conflicting_region` / `conflicting_zone`), so a sibling never inherits two zones.
+   The same value repeated is not a conflict; `this_mention` facts never conflict across
+   mentions.
 8. Status: keep the extractor's status, but downgrade `parsed` → `partial` if anything was
    rejected. A comment with zero mentions is valid.
 
 `read_extraction_jsonl`: lines split on `\n` only (a trailing `\r` is tolerated, a leading BOM
 ignored), numbered by physical line, blank lines skipped. A line that is not UTF-8, not JSON,
-repeats a key, nests too deeply or does not match `ParsedComment` becomes a `schema_error`
-rejection that keeps only its `comment_id` (when readable). An unreadable file → `ValueError`.
+repeats a key, nests too deeply or does not match `ParsedComment` (including a missing or
+malformed `text_hash` and an over-long value or quote) becomes a `schema_error` rejection that
+keeps only its `comment_id` (when readable). An unreadable file → `ValueError`.
 
-`load_extractions`: checks `loaded_at` and the markers, reads the file, then — inside **one**
-savepoint, all-or-nothing — looks up stored text via `db.stored_texts`, rejects ids repeated in
-the file (`duplicate_comment_id`, every copy, including a malformed copy's readable id) and ids
-not in the database (`unknown_comment_id`), validates the rest and calls
-`db.replace_extraction` per comment. Every non-blank line lands in exactly one of
-`schema_errors`, `duplicate_comment_ids`, `unknown_comment_ids`, `comments_loaded`.
-`status_counts` always lists parsed, partial, unresolved. Mention and fact counts cover loaded
-comments only; `unresolved_identities` = accepted mentions with neither crop nor variety. Logs
-one INFO line of counts and one WARNING with per-reason counts (file name only, never text).
+`load_extractions`: checks `loaded_at`, `now` (default: `loaded_at`, the time a load happens)
+and the markers, reads the file, then — inside **one** savepoint, all-or-nothing — looks up
+the known ids via `db.stored_texts` and the processable ones via `db.extractable_texts(conn,
+ids, now)` (not soft-deleted, source not expired at `now`). Each valid line is checked in
+order: an id repeated in the file → `duplicate_comment_id` (every copy, including a malformed
+copy's readable id); an id not in the database → `unknown_comment_id`; a stored comment that
+may no longer be processed → `source_expired`; a `text_hash` that differs from the stored
+hash → `stale_text` (the extraction was made from another version of the text). A rejected
+line writes nothing, so a comment without a previous extraction stays in `export-for-extraction
+--only-unparsed`, and a previous extraction stays as it was. The rest are validated and stored
+with `db.replace_extraction`. Every non-blank line lands in exactly one of `schema_errors`,
+`duplicate_comment_ids`, `unknown_comment_ids`, `expired_comment_ids`, `stale_texts`,
+`comments_loaded`. `status_counts` always lists parsed, partial, unresolved. Mention and fact
+counts cover loaded comments only; `unresolved_identities` = accepted mentions with neither
+crop nor variety. Logs one INFO line of counts and one WARNING with per-reason counts (file
+name only, never text).
 
 ## Environment matching (`environment_match.py`) — pure, no I/O
 
@@ -365,6 +536,7 @@ def applicable_facts(mention: MentionView, siblings: Sequence[MentionView]) -> t
 def compare_dimension(key: ComparableKey, viewer_value: str, facts: Sequence[FactView]) -> DimensionMatch
 def match_context(garden: GardenContext, facts: Sequence[FactView]) -> MatchResult | None
 def tier_of(statuses: Sequence[MatchStatus]) -> Tier
+def values_with(dimension: DimensionMatch, status: MatchStatus) -> tuple[str, ...]
 def region_status(garden_region: str | None, facts: Sequence[FactView]) -> RegionStatus | None
 def explain(result: MatchResult | None) -> str
 ```
@@ -383,29 +555,46 @@ def explain(result: MatchResult | None) -> str
     `r == "heatwave"` otherwise → ignored (not comparable); else `different`.
   - every other key: equal → match, else `different`.
   Aggregate over values: any match → `match`; else any imprecise → `imprecise`; else any
-  different → `different`; else `not_stated`. `reported_values` = distinct normalized values
-  (first-seen order); `evidence` = facts of that key with non-null normalized value.
+  different → `different`; else `not_stated` (so a mild-summer report with a heatwave is
+  `imprecise` for a hot-summer viewer: the precedence is deliberate). `reported_values` =
+  distinct normalized values (first-seen order); `written_values` = distinct `value_as_written`
+  of that key's facts whose `normalized_value` is null (first-seen order; display only,
+  untrusted text, never compared, so the status stays `not_stated` when only these exist);
+  `evidence` = facts of that key with non-null normalized value.
   `ValueError` for a non-comparable key (e.g. `region`), a viewer value not in
   `VIEWER_VALUES[key]`, or a stored normalized value that fails `is_valid_normalized`.
+- `values_with(dimension, status)`: the `reported_values` (in order) whose **own** comparison
+  with the viewer value gives `status`, so a card labels only the values that produced a
+  dimension's status (mild + heatwave vs hot: `imprecise` → `("heatwave",)`, `different` →
+  `("mild",)`; `not_stated` selects values that are not comparable, e.g. a heatwave vs mild).
+  `ValueError` for an unknown status.
 - `match_context`: `None` when `garden.selected()` is empty; otherwise one `DimensionMatch` per
   selected key (canonical `COMPARABLE_KEYS` order) and the tier.
 - `tier_of`: any `different` → `different`; all `match` → `match`; any `match`/`imprecise` →
   `partial`; else `not_stated`. Empty input or an unknown status → `ValueError`.
   Outcome words (failure, success, great, died) **never** influence tier or order.
 - `region_status`: `None` if no garden region; `same` if any fact with key `region` has
-  `normalized_value == garden_region`; `elsewhere` if other normalized region facts exist;
-  else `not_stated`. Unknown region codes → `ValueError`. Region is never part of the tier
-  (states differing ≠ climates differing).
+  `normalized_value == garden_region`; else `same_country` if the garden region is a country
+  and a reported region is one of its subdivisions (code prefix `"<country>-"`: `US` vs
+  `US-CT`, `CA` vs `CA-ON`; never the reverse, so `US-CT` vs `US` is `elsewhere`); else
+  `elsewhere` if other normalized region facts exist; else `not_stated`. Unknown region codes →
+  `ValueError`. Region is never part of the tier (states differing ≠ climates differing).
 - `explain`: short, honest sentences built only from dimension statuses, in canonical key
   order: an optional `"Different: <reported> (you: <yours>), ..."` sentence, then one sentence
-  joining the matched, imprecise, not-comparable and not-stated clauses with `"; "`. Examples:
+  joining the matched, imprecise, not-comparable, display-only and not-stated clauses with
+  `"; "`. Each clause names only the values whose own status it describes (`values_with`).
+  Examples:
   `"Matches your zone 6b, containers and humid."`,
   `"Matches your containers; hardiness zone and humidity not stated."`,
   `"Zone 6 reported (subzone unknown); growing method not stated."`,
-  `"None of your selected conditions were stated."` (only when nothing selected was reported),
+  `"None of your selected conditions were stated."` (only when nothing selected was reported,
+  not even a display-only phrase),
   `"Different: in the ground (you: containers). Humidity not stated."`,
-  and `"summer heat not comparable (a heatwave reported)"` for a heatwave against mild/cool
-  summers. `None` → `""`. Never mentions success/quality/scores/recommendations.
+  `"summer heat not comparable (a heatwave reported)"` for a heatwave against mild/cool
+  summers, and `'soil mentioned as "rocky hillside dirt" (not comparable)'` for a selected key
+  whose only statements are display-only `written_values` (quoted, whitespace collapsed, joined
+  with "and"). Such quotes are untrusted comment text: render the explanation as plain text.
+  `None` → `""`. Never mentions success/quality/scores/recommendations in its own words.
 
 ## Search (`search.py`)
 
@@ -414,51 +603,85 @@ class FilterOptions(BaseModel): crops: tuple[str, ...]; topics: tuple[Topic, ...
 def search(conn, scope: ViewerScope, query: SearchQuery, now: str) -> SearchResult
 def build_result(views: Sequence[CommentView], query: SearchQuery) -> SearchResult   # pure core
 def relevant_mentions(view: CommentView, query: SearchQuery) -> tuple[MentionMatch, ...] | None
-def chip_support(conn, scope, now, chips: Sequence[QuickChip]) -> dict[str, int]
+def chip_support(conn, scope, now, chips: Sequence[QuickChip]) -> dict[str, ChipSupport]
 def filter_options(conn, scope, now) -> FilterOptions   # distinct, sorted, visible data only
 ```
 
 1. Candidates: `db.visible_comment_ids(conn, scope, now, query.text)` → `db.load_comment_views`.
-   Text search works for comments with no extraction at all. `build_result` ignores
-   `query.text`.
+   Text search works for comments with no extraction at all. In `build_result`, `query.text`
+   never adds or drops a comment; it only chooses the relevant mentions (rule 2).
 2. Mention-level filters — `crop` (`normalize_crop(query.crop)` equals the stored mention crop
    exactly), `topics` (non-empty intersection), `year` (an applicable `growing_year` fact equals
    it), `region_filter` (an applicable `region` fact equals it). If any of these is set, a
    comment is kept only if ≥ 1 mention passes **all** set filters; those are its relevant
-   mentions (`relevant_mentions` returns `None` otherwise). If none is set, all mentions are
-   relevant and comments with zero mentions are kept (`()`). Invalid filters fail loudly
-   (`ValueError`): a year not matching `YEAR_PATTERN`, an unknown region code, a blank crop, and
-   duplicate comment ids in the `build_result` input.
+   mentions (`relevant_mentions` returns `None` otherwise) and the text plays no part. If none
+   is set, comments with zero mentions are kept (`()`) and the **text names the relevant
+   mentions** (SPEC §4: the variety mention is the query unit): a mention is relevant when its
+   whole `variety_as_written` (via `normalization.variety_key`) occurs as consecutive words of
+   the text, or the text names its crop (`normalization.mentions_crop`: 1-3 word windows via
+   `normalize_crop` or `CROP_SYNONYMS`, so "tomatoes" names `tomato` and "chillies" names
+   `pepper`). Both sides are casefolded, stripped of diacritics (NFKD, like the FTS
+   `remove_diacritics`) and split into letter/digit words, so "Black-Krim" names "Black Krim"
+   and "jalapeno" names "Jalapeño"; "Krim" alone does not. **If the text names no mention (or
+   there is no text), every mention stays relevant** — a documented rule, not a fallback for
+   errors: "hornworms" or "pots" behave as before. So "Roma" makes a greenhouse-pepper /
+   outdoor-tomato comment `different` for a greenhouse garden, and strict mode hides it.
+   Invalid filters fail loudly (`ValueError`): a year not matching `YEAR_PATTERN`, an unknown
+   region code, a blank crop, and duplicate comment ids in the `build_result` input.
 3. For each relevant mention: `facts = applicable_facts(...)`, `match = match_context(...)`.
+   Every relevant mention's `MentionMatch` (with its own `match.tier`) is on
+   `CommentResult.mention_matches`, so the viewer can state each mention's tier line.
 4. Comment tier = best (lowest `TIER_ORDER`) relevant-mention tier, ties to the earlier mention;
    a comment with no relevant mentions under a selected garden gets `match_context(garden, ())`
    (tier `not_stated`). Comment `region_status` = `same` if any relevant mention is `same`, else
-   `elsewhere` if any, else `not_stated`. `explanation` = `explain` of the best mention's match,
-   prefixed with `"<variety_as_written, else crop, else 'Unidentified variety'>: "` when the
-   comment has > 1 relevant mention and the explanation is not empty. `has_conditions` = an
-   applicable fact of a relevant mention has a non-null normalized value for a comparable key or
-   `region` (a growing year alone or a display-only fact does not count).
+   `same_country` if any, else `elsewhere` if any, else `not_stated`. `explanation` = `explain`
+   of the best mention's match, prefixed with `"<variety_as_written, else crop, else
+   'Unidentified variety'>: "` when the comment has > 1 relevant mention and the explanation is
+   not empty. `has_conditions` = an applicable fact of a relevant mention has a non-null
+   normalized value for a comparable key or `region` (a growing year alone or a display-only
+   fact does not count).
 5. Groups: no comparable selection → single group `all`. Otherwise groups `match`, `partial`,
    `not_stated`, `different` (in that order; `different` has `collapsed_by_default=True`). Empty
    groups are always omitted, including `all` (zero candidates → `groups == ()`). Within a group
-   (including `all`) sort by `(region rank: same=0 else 1, source_id, source_order,
-   comment_id)`; region never changes a tier.
+   (including `all`) sort by `(region rank: same=0, same_country=1, else 2, source_id,
+   source_order, comment_id)`; region never changes a tier.
 6. `only_stated_matches=True` hides the `not_stated` and `different` groups and
    `n_hidden_by_strict` counts their comments; with no comparable condition selected there is
    nothing to match, so it hides nothing. `tier_counts` has all four tiers (zeros included) when
-   a comparable condition is selected, else `{}`. Counts are distinct comments before hiding,
-   never mentions.
-7. `limitation_message`: `n_candidates == 0` or every candidate has conditions → `None`;
-   no candidate has conditions → `"None of these {n} reports mention growing conditions, so none
-   can be compared with your garden. All are shown below."` (for exactly one: `"The 1 report
-   found does not mention growing conditions, so it cannot be compared with your garden. It is
-   shown below."`); otherwise `"Only {n_with} of {n} reports mention growing conditions."`
-   ("mentions" when `n_with == 1`). Independent of whether a garden is selected.
-8. `chip_support`: for each chip (labels must be distinct, else `ValueError`), the number of
-   distinct visible comments having ≥ 1 mention whose applicable facts state **any** of the
-   chip's (key, value) pairs; a heatwave does not support "hot". Result in chip order.
-   `chip_support` and `filter_options` load every visible view (fine at MVP size; move to SQL
-   aggregates that keep `visibility_clause` if the corpus grows a lot).
+   a comparable condition is selected, else `{}`. `n_not_analysed` counts candidates with
+   `parse_status is None` (never extracted; disjoint from `n_with_conditions` because such a
+   view has no mentions; always 0 when a mention-level filter is set). Counts are distinct
+   comments before hiding, never mentions.
+7. `limitation_message` (independent of whether a garden is selected; "comparable" because a
+   display-only phrase is a mention but cannot be compared; an unanalysed report is never said
+   to lack conditions; reports hidden by strict mode are never said to be shown below):
+   - `n_candidates == 0` or every candidate has conditions → `None`.
+   - Some but not all have conditions → `"Only {n_with} of {n} reports mention comparable
+     growing conditions."` ("mentions" when `n_with == 1`), with `" ({k} not yet analysed)"`
+     before the full stop when `k = n_not_analysed > 0`, e.g. `"Only 34 of 69 reports mention
+     comparable growing conditions (1 not yet analysed)."`.
+   - None has conditions → a reason sentence, then a where sentence. Reason: none analysed →
+     `"None of these {n} reports have been analysed for growing conditions yet, so none can be
+     compared with your garden."`; none unanalysed → `"None of these {n} reports mention
+     comparable growing conditions, so none can be compared with your garden."`; mixed →
+     `"None of these {n} reports can be compared with your garden: {a} do not mention comparable
+     growing conditions and {k} have not been analysed yet."` ("does"/"has" for 1); exactly one
+     report → `"The 1 report found has not been analysed for growing conditions yet, so it
+     cannot be compared with your garden."` or `"The 1 report found does not mention comparable
+     growing conditions, so it cannot be compared with your garden."`. Where: nothing hidden →
+     `"All are shown below."` (`"It is shown below."`); all hidden by strict mode →
+     `'All {n} are hidden by "Only show stated matches"; untick it to see them.'` (`'It is
+     hidden by "Only show stated matches"; untick it to see it.'`); some hidden (not reachable
+     today) → `'{h} of them are hidden by "Only show stated matches"; untick it to see them.'`.
+8. `chip_support`: for each chip (labels must be distinct, else `ValueError`), a
+   `ChipSupport(n_any, n_all)` of distinct visible comments: `n_any` = comments having ≥ 1
+   mention whose applicable facts state **any** of the chip's (key, value) pairs (the display
+   gate `>= min_reports_for_chip`); `n_all` = comments having **one** mention whose applicable
+   facts state **all** of them (the reports the chip would put under "Matching reported
+   conditions"; whole-comment facts count through inheritance). A heatwave does not support
+   "hot". Result in chip order. `chip_support` and `filter_options` load every visible view
+   (fine at MVP size; move to SQL aggregates that keep `visibility_clause` if the corpus grows a
+   lot).
 
 ## Geography (`geography.py`)
 
@@ -488,10 +711,16 @@ def choropleth(counts: RegionCounts) -> plotly.graph_objects.Figure
   message names ids, never the value). `RegionCounts` validates its own shape.
 - `choropleth`: one `go.Choropleth`, `locationmode="USA-states"`, `geo.scope="usa"`, postal
   codes, single-hue sequential blue scale, hover text from `count_label` (the raw `z` is never
-  shown), no lat/lon, no comment text. Never plots points.
-- Privacy limit: suppression is per cell. With `min_cell_count > 1`, a suppressed count can
-  sometimes be derived by subtraction from the bucket totals; add complementary suppression
-  before publishing real cleared data with small cells.
+  shown), no lat/lon, no comment text, a static borderless layout (`dragmode=False`, zero
+  margins, transparent background). Never plots points. Plotly draws the state outlines from
+  topojson it fetches from `cdn.plot.ly`, so an offline browser shows the counts and selector
+  but an empty map.
+- Privacy limit: small-cell suppression only **coarsens the map display** (shading, hover text
+  and the state selector's labels). It does not protect the reports: every visible card shows
+  its comment text and region line, and filtering by a suppressed state lists its reports and
+  their exact count. It is also per cell, so with `min_cell_count > 1` a suppressed count can
+  sometimes be derived by subtraction from the bucket totals. Real small-cell protection would
+  have to cover the cards too (a design change, not a threshold).
 
 ## CLI (`__main__.py`) — `uv run python -m crop_explorer ...`
 
@@ -507,17 +736,26 @@ before or after the command (a relative `--db` resolves against the current dire
 
 ```
 ingest PATH --scope {private,synthetic,cleared} [--source-id ID (default: file stem)]
-            [--kind KIND (default: comments_export)] [--source-url URL] [--expires-at ISO]
+            [--kind KIND (default: comments_export)] [--source-url URL]
+            [--expires-at ISO | --clear-expiry] [--replace]
             [--id-col] [--text-col] [--permalink-col] [--date-col]
 load-extractions PATH [--rejections-out PATH]   # report counts; rejections written as JSONL
-export-for-extraction --out PATH [--only-unparsed]   # JSONL of {comment_id, text}; private data
+export-for-extraction --out PATH [--only-unparsed]   # JSONL of {comment_id, text, text_hash}; private
 delete-source SOURCE_ID
 purge-expired
 summary [--scope {public,private}]               # default: viewer.scope from the config
 demo                                             # ingest fixtures as synthetic + load extractions
 ```
 
-- Success: exactly one line of JSON on stdout, exit 0. `ingest` → `ImportStats`;
+- `ingest`: without `--expires-at` the stored expiry is kept; `--clear-expiry` removes it
+  (mutually exclusive with `--expires-at`, a usage error). `--replace` is needed to replace a
+  source wholesale (no comment id in common with what is stored) or to change its rights
+  status (`--scope`); re-importing an expired source is refused until `purge-expired` or
+  `delete-source`. `--permalink-col` / `--date-col` default to none: when given, the column
+  must exist (`ColumnMapping.*_required`); when not, `permalink` / `created_at` are used if
+  present.
+- Success: exactly one line of JSON on stdout, exit 0. `ingest` → `ImportStats` (counts plus
+  the effective `rights_status` and `expires_at`);
   `load-extractions` → the report counts with `rejections` as a number; `export-for-extraction`
   → `{"exported", "out"}`; `delete-source` → `{"source_id", "comments_deleted"}`;
   `purge-expired` → `{"purged_sources": [...]}`; `summary` → `{"scope", ...SUMMARY_KEYS}`;
@@ -528,9 +766,15 @@ demo                                             # ingest fixtures as synthetic 
   `--help` exits 0. Output and logs carry only ids and counts — never comment text.
 - `load-extractions` exits 0 even with rejections (they are recorded and counted);
   `--rejections-out` is always written (one `Rejection` per line, possibly empty).
-- `export-for-extraction` makes the output owner-only (mode 0600) before writing, writes
-  `ensure_ascii=False` JSON with U+0085/U+2028/U+2029 escaped (one record per physical line for
-  any splitter), and skips soft-deleted comments and expired sources.
+- Output files (`--out`, `--rejections-out`) are checked and opened **before** the database is
+  touched, so a bad path exits 2 with nothing loaded. Refused: an existing directory (no mode
+  change), a symlink (`O_NOFOLLOW`), the database file or its `-wal`/`-journal`/`-shm` files,
+  and (for `--rejections-out`) the command's input file; another regular file is overwritten.
+  Files are opened with `os.open(O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW)`.
+- `export-for-extraction` makes the output owner-only (mode 0600, `fchmod`) before writing,
+  writes `{comment_id, text, text_hash}` lines (`text_hash` = sha256 of the UTF-8 text, as
+  stored) as `ensure_ascii=False` JSON with U+0085/U+2028/U+2029 escaped (one record per
+  physical line for any splitter), and skips soft-deleted comments and expired sources.
 - `demo` ingests `fixtures/synthetic_comments.jsonl` as source `synthetic-demo` (kind
   `synthetic_fixture`, rights `synthetic`, no expiry) and loads
   `fixtures/synthetic_extractions.jsonl`; re-running it is idempotent. The fixtures are found
@@ -540,59 +784,135 @@ demo                                             # ingest fixtures as synthetic 
 ## Viewer (`app.py`, thin) + `ui.py` (pure helpers)
 
 `uv run streamlit run app.py [-- --scope private --db PATH --config PATH]`. One Browse screen
-(`layout="centered"`, phone-friendly; Streamlit stacks columns on narrow screens):
+(`layout="centered"`, phone-friendly; Streamlit stacks columns on narrow screens). Every
+function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
+(`tests/test_code_standards.py`).
 
+- **Startup guards** (each shows `st.error` and calls `st.stop()`, never a traceback):
+  `ui.parse_app_args` uses `parse_args` (not `parse_known_args`, `allow_abbrev=False`), so an
+  unknown, abbreviated or invalid option (`--database`, `--confg`, `--scope everyone`) raises
+  `ValueError("Invalid viewer options: ...")` instead of silently opening the default database
+  or config; Streamlit passes only the arguments after `--`. A **private** scope runs only
+  when `st.get_option("server.address")` is a loopback address (`ui.is_loopback_address`:
+  `localhost`, `127.0.0.0/8`, `::1`; unset/empty = every interface = refused), because the
+  viewer has no authentication; the error (`ui.private_bind_error`) gives the command
+  `uv run streamlit run app.py --server.address localhost -- --scope private`. The shipped
+  `.streamlit/config.toml` binds `localhost`. If the database file does not exist, the app
+  shows how to build it (`uv run python -m crop_explorer demo`); if `db.connect` raises
+  `sqlite3.DatabaseError` (not a database, or an unsupported schema version) it shows the
+  reason and the same command. It never creates an empty database.
 - Header "What Gardeners Are Saying", subtitle "Find real experiences from gardens like yours.",
   "About / Sources" expander (visible sources with rights labels and summary counts). A banner
   states the scope: public → "Demo data: synthetic comments, not real gardener reports" when
   only synthetic sources are visible (a mixed notice when synthetic and cleared are both
   visible; none for cleared only); private → "Private local view — includes unverified imported
   comments. Do not publish or share." A `private_unverified` row in public scope raises.
-- If the database file does not exist, the app shows how to build it
-  (`uv run python -m crop_explorer demo`) and stops; it never creates an empty database.
-- **My growing conditions** panel (always visible, works with nothing selected): Region
-  (selectbox: "Not set", then U.S. states, Canadian provinces, countries, each by name), Zone
-  (`VIEWER_VALUES["zone"]`, with a note on what zones do not describe), Growing method,
-  Setting (shelter), Summer heat; "More conditions" expander: humidity, rainfall, season length,
-  sun, soil, watering, growing year. Clear resets every condition and filter (session state
-  only; nothing persisted server-side).
-- Quick chips from config, shown only when `chip_support >= min_reports_for_chip`; a chip sets
-  its conditions and is highlighted while they are all set.
-- Search box ("Search crops, varieties, or anything people mentioned"), Crop selectbox, Topics
-  multiselect, "Only show stated matches" checkbox; a caption always says how many reports the
-  checkbox hides (or would hide). Filter values that vanish from the visible data mid-session
-  are reset (`ui.stale_state_fixes`).
-- Tabs: **Comments** | **Map**; plus an "Optional outside context" expander listing config links,
-  each tagged with its label badge (`regional climate reference`, `published external trial`).
-- The limitation message and per-group counts are always visible. Each card: title
-  `"{variety} {crop}, ... · {topics}"` (fallback "Comment"), the comment text rendered as
-  **plain text** through `ui.escape_markdown`, then one caption with the condition lines from
-  `ui.condition_lines(result, garden)` ("Relevant: …" incl. imprecise matches with both values,
-  "Not stated: …", "Different: …", led by "Shown for X (1 of n mentions)" when several mentions
-  are relevant; without a selection "Reported: …" or "Growing conditions not stated") and the
-  region line; an "Evidence" expander listing each fact's exact `evidence_quote` with the label
-  `community report · reported conditions`, its basis and what it applies to. Source link
-  (`st.link_button("Source ↗")`) only when a permalink exists; synthetic rows say "Synthetic demo
-  comment — no source link". `CommentResult.explanation` is not shown separately because the
-  condition lines carry the same information in structured form.
-- Map tab: choropleth built from the same query **without** `region_filter` (so it stays usable
-  as a selector) over the shown groups, plus an accessible "Filter by reported state" selectbox
+- **My growing conditions** panel (always visible, works with nothing selected), laid out per
+  SPEC §2 "Which controls are prominent?": Region (selectbox: "Not set", then U.S. states,
+  Canadian provinces, countries, each by name) and `ui.ALWAYS_VISIBLE_KEYS` = zone (with a
+  note on what zones do not describe), growing method, setting; the "More conditions"
+  expander holds `ui.MORE_KEYS` = summer heat, humidity, rainfall, season length, sun, soil,
+  watering. The expander's label names the conditions set inside it
+  (`ui.more_conditions_label(ui.active_more_conditions(state))`, e.g. "More conditions (hot
+  summers, humid)") and it opens whenever one is set, so a chip never leaves a condition active
+  out of sight. Clear resets every condition and filter (session state only; nothing persisted
+  server-side).
+- Every select whose first option is `None` starts unselected (`index=None`) and has
+  `placeholder=` its `None` label ("Not set", "Any crop", "Any year", `ui.ALL_STATES`), so
+  first load, Clear, "Show all states" and "Any year" all look the same (never "Choose an
+  option"). Resets stay in `on_click` callbacks.
+- Quick chips from config, shown only when `chip_support[label].n_any >= min_reports_for_chip`
+  (`ui.visible_chips`); a chip sets its conditions and is highlighted while they are all set.
+  Its tooltip (`ui.chip_help`) states what is counted: one condition → "Set this condition
+  (8 reports state it)"; several → both counts, e.g. "6 reports mention hot summers or humid;
+  2 mention both".
+- Search box ("Search crops, varieties, or anything people mentioned",
+  `max_chars=cfg.viewer.max_query_chars`; `ui.query_from_state(state, max_query_chars=...)`
+  also cuts the text, as defence in depth), then the filter row **Crop | Topics | Year grown**
+  (hard mention-level filters, unlike the garden conditions), then "Only show stated
+  matches"; a caption always says how many reports the checkbox hides (or would hide). With
+  only a Region set it says Region only lists reports from your area first and a condition
+  such as zone or growing method is needed (`ui.strict_note`). Filter values that vanish from
+  the visible data mid-session are reset (`ui.stale_state_fixes`).
+- "Optional outside context" expander directly before the tabs (SPEC §2 mockup), listing
+  config links each tagged with its label badge (`regional climate reference`, `published
+  external trial`, `community report` for outside gardeners' ratings).
+- Tabs: **Comments** | **Map**. The Comments tab starts with the active hard-filter notes, each
+  with its reset button: "Showing only reports that say they grew in YEAR." + "Any year"
+  (`ui.year_filter_note`), and the reported-state note + "Show all states". Then the
+  limitation message and the count summary, which are always visible. When no group has a
+  report, `ui.empty_state(result)` gives "No reports to show. Try a different search, or
+  remove a filter or condition." or, when strict mode hid everything, "All N reports are
+  hidden by "Only show stated matches". Untick it to see them." (`None`, i.e. no second box,
+  when no report states a comparable condition, because the limitation message then already
+  says so).
+- **Paging:** each group renders at most `cfg.viewer.page_size` cards
+  (`ui.cards_to_show(state, group, page_size)`) with a "Show N more" button
+  (`ui.show_more_label`) that adds a page; headings keep the full count. Page counts live in
+  session state (`ui.page_key(group)`) and reset to one page whenever the query changes
+  (`ui.paging_fixes(state, query)` compares a `SearchQuery.model_dump_json()` fingerprint).
+  The map always counts every shown result, not only the rendered page.
+- **Cards:** heading `ui.card_heading(result)` = bold escaped title
+  `"{variety} {crop}, ... · {topics}"` (fallback "Comment") plus a `community report` badge;
+  the comment text rendered as **plain text** through `ui.escape_markdown`; then one caption,
+  `ui.condition_caption(result, garden)`: the escaped `ui.condition_lines` plus (for an analysed
+  comment) the region line, led by a `reported conditions` badge when any shown line states a
+  condition the commenter gave (a normalized or written value, or a region). Condition lines:
+  - never extracted (`parse_status is None`) → only "Not yet analysed for growing conditions"
+    (no region line, no badge);
+  - with a selection, for the best relevant mention: "Relevant: …" (matches, and imprecise
+    matches with both values), "Not stated: …", "Mentioned as written, not comparable: soil
+    "rocky hillside dirt"" (a selected key whose only facts are display-only, phrases quoted
+    with whitespace collapsed) and "Different: …"; each labels only the reported values whose
+    own comparison produced that status (`environment_match.values_with`), so mild summers +
+    a heatwave for a hot-summer viewer reads "Relevant: a heatwave (you: hot summers)";
+  - several relevant mentions: led by "Shown for X (1 of n mentions)" and followed by one
+    "Y: <tier line>" per other mention whose tier differs from the best, e.g. "Roma:
+    Different: outdoors (you: greenhouse / tunnel)";
+  - without a selection: "Reported: …" (or "Reported for X: …" per mention), then "Mentioned
+    as written, not comparable: …" for display-only comparable-key phrases, else "Growing
+    conditions not stated".
+  Then an "Evidence" expander listing each fact's exact `evidence_quote` with the label
+  `community report · reported conditions`, its basis and what it applies to.
+  `CommentResult.explanation` is not shown separately because the condition lines carry the
+  same information in structured form.
+- **Source links:** `st.link_button("Source ↗")` only for a non-synthetic comment with a
+  permalink (`ui.source_link` returns `None` for synthetic rows: fiction never links out, and a
+  non-http(s) permalink raises). `ui.provenance_note` checks rights first: a synthetic row
+  always says "Synthetic demo comment — no source link"; a real one without a permalink says
+  "No source link available".
+- Map tab: `community report` and `reported conditions` badges and its intro caption, then the
+  choropleth built from the same query **without** `region_filter` (so it stays usable as a
+  selector) over the shown groups, plus an accessible "Filter by reported state" selectbox
   (alphabetical, labelled with `geography.count_label`, so suppressed counts never show; the
   current filter stays selectable). Selecting a state, or clicking it on the map, sets
   `region_filter`. The chart's widget key is `ui.map_key(region_filter)`, so it remounts
   without a stale click selection whenever the filter changes. "Region not reported: N",
   "Outside the U.S.: N" and (when non-zero) "In the U.S., state not reported: N" are shown
-  separately.
+  separately. Suppression coarsens this display only (see Geography).
 - Logging is configured once per server process (`st.cache_resource` around
-  `configure_logging` only); a database connection is opened per script run.
+  `configure_logging` only); a database connection is opened per script run. Visible views are
+  loaded by `_browse`, `search.filter_options` and `search.chip_support` separately (each
+  takes a connection); paging removes the per-card rendering cost that dominated.
 - `ui.escape_markdown` backslash-escapes every ASCII punctuation character, inserts an invisible
   U+2060 word joiner after every `:` and before every `.` (so emoji/icon shortcodes and GFM
   autolink literals cannot form), turns leading spaces/tabs into NBSP and line breaks into hard
   breaks. Copied text therefore contains invisible U+2060 characters.
 - `ui.py` pure helpers (unit tested), main ones: `escape_markdown`, `card_title`,
-  `condition_lines(result, garden)`, `region_line`, `evidence_rows` (`EvidenceRow`),
-  `scope_banner`, `region_options`, `reset_values`/`reset_state_keys`, `garden_from_state`,
-  `query_from_state`, `stale_state_fixes`, `visible_chips`/`chip_state`/`chip_is_active`,
-  `count_summary`, `group_heading`, `strict_note`, `source_link`, `provenance_note`,
-  `source_rows`, `summary_line`, `outside_link_markdown`, `label_badge`, `min_cell_count`,
-  `map_key`, `map_notes`, `map_colorbar`, `state_choices`, `selected_state`, `parse_app_args`.
+  `card_heading`, `condition_lines(result, garden)`, `condition_caption`, `region_line`,
+  `evidence_rows` (`EvidenceRow`), `scope_banner`, `region_options`,
+  `reset_values`/`reset_state_keys`, `garden_from_state`, `query_from_state`,
+  `stale_state_fixes`, `visible_chips`/`chip_help`/`chip_state`/`chip_is_active`,
+  `active_more_conditions`/`more_conditions_label`, `count_summary`, `group_heading`,
+  `strict_note`, `empty_state`, `year_filter_note`, `region_filter_note`,
+  `paging_fixes`/`cards_to_show`/`show_more_label`/`page_key`, `source_link`,
+  `provenance_note`, `source_rows`, `summary_line`, `outside_link_markdown`, `label_badge`,
+  `min_cell_count`, `map_key`, `map_notes`, `map_colorbar`, `state_choices`,
+  `selected_state`, `parse_app_args`, `is_loopback_address`, `private_bind_error`.
+- Tests: `tests/test_ui.py` (pure helpers), `tests/test_app.py` (AppTest end to end, incl. a
+  cleared comment's "Source ↗" URL, the synthetic/no-link notes, the loopback guard and
+  invalid options) and `tests/test_browser.py` (marker `browser`: `streamlit run` headless on a
+  free loopback port, Playwright Chromium at 390x844 — no horizontal overflow, search box and
+  always-visible selects shown, zone 6b regroups, Clear restores the first-load values and
+  placeholders, the Source link's href — then a 1280x900 smoke test; CI runs
+  `uv run playwright install --with-deps chromium` first).

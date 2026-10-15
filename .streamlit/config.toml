@@ -1,5 +1,11 @@
 # Streamlit settings for the viewer (app.py). Never put secrets in this file.
 
+[server]
+# Listen on this machine only. The viewer has no authentication, and a private-scope viewer
+# shows unverified imported comments, so it must never be reachable from the network. Override
+# deliberately (e.g. --server.address 0.0.0.0) only to host a public-scope demo.
+address = "localhost"
+
 [browser]
 gatherUsageStats = false
 

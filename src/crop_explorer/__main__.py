@@ -2,12 +2,14 @@
 
 Commands (docs/ARCHITECTURE.md, "CLI"):
 
-``ingest PATH --scope {private,synthetic,cleared}``
-    Import a CSV/JSONL comments export as one source (idempotent re-import).
+``ingest PATH --scope {private,synthetic,cleared} [--expires-at ISO | --clear-expiry] [--replace]``
+    Import a CSV/JSONL comments export as one source (idempotent re-import; the stored expiry
+    is kept unless replaced or cleared; replacing a source wholesale or changing its rights
+    status needs ``--replace``).
 ``load-extractions PATH [--rejections-out PATH]``
     Validate extractor JSONL against stored comments and store it.
 ``export-for-extraction --out PATH [--only-unparsed]``
-    Write ``{comment_id, text}`` JSONL for the offline extractor (private data).
+    Write ``{comment_id, text, text_hash}`` JSONL for the offline extractor (private data).
 ``delete-source SOURCE_ID`` / ``purge-expired``
     Remove a source, or every expired source, with everything derived from it.
 ``summary [--scope {public,private}]``
@@ -22,20 +24,25 @@ configuration YAML (``yaml.YAMLError``) or a database that SQLite cannot use
 (``sqlite3.Error``, e.g. a file that is not a database), one ``error: ...`` line goes to stderr
 and the exit status is 2. Comment text is never printed or
 logged; only ``export-for-extraction`` writes it, to an owner-only file.
+
+Output files (``--out``, ``--rejections-out``) are checked and opened before any work: a
+directory, a symlink, the database (or its ``-wal``/``-journal``/``-shm`` files) and the
+command's own input are refused; another regular file is overwritten.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import closing
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, get_args
+from typing import Any, Final, TextIO, get_args
 
 import yaml
 
@@ -44,7 +51,13 @@ from crop_explorer.config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from crop_explorer.extraction import ExtractionReport, load_extractions
 from crop_explorer.ingest import build_source, import_file
 from crop_explorer.logging_setup import configure_logging
-from crop_explorer.schemas import SCOPE_TO_RIGHTS, ColumnMapping, ImportScope, utc_now_iso
+from crop_explorer.schemas import (
+    SCOPE_TO_RIGHTS,
+    ColumnMapping,
+    ImportScope,
+    SourceRecord,
+    utc_now_iso,
+)
 from crop_explorer.views import ViewerScope
 
 __all__ = [
@@ -72,6 +85,14 @@ DEMO_EXTRACTIONS: Final = _FIXTURES_DIR / "synthetic_extractions.jsonl"
 
 _HANDLED_ERRORS: Final = (ValueError, KeyError, OSError, yaml.YAMLError, sqlite3.Error)
 _OWNER_ONLY: Final = 0o600
+_DEFAULT_FILE_MODE: Final = 0o666
+"""Mode of other new output files before the umask applies (as for ``open()``)."""
+_OUTPUT_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+_DATABASE_FILE_SUFFIXES: Final = ("", "-wal", "-journal", "-shm")
+_REPLACE_HELP: Final = (
+    "allow replacing every stored comment of an existing source (a different export under "
+    "the same source id) or changing its rights status"
+)
 _RAW_LINE_BREAKS: Final = MappingProxyType(
     {chr(code): f"\\u{code:04x}" for code in (0x85, 0x2028, 0x2029)}
 )
@@ -186,12 +207,31 @@ def _ingest_arguments(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--source-id", help="stable id of this dataset (default: the file stem)")
     sub.add_argument("--kind", default=DEFAULT_KIND, help=f"(default: {DEFAULT_KIND})")
     sub.add_argument("--source-url", help="http(s) URL the export came from")
-    sub.add_argument("--expires-at", help="ISO-8601 time after which the source is hidden")
+    sub.add_argument("--replace", action="store_true", help=_REPLACE_HELP)
+    _expiry_arguments(sub)
+    _column_arguments(sub)
+
+
+def _expiry_arguments(sub: argparse.ArgumentParser) -> None:
+    expiry = sub.add_mutually_exclusive_group()
+    expiry.add_argument(
+        "--expires-at",
+        help="ISO-8601 time after which the source is hidden (default: keep the stored expiry)",
+    )
+    expiry.add_argument("--clear-expiry", action="store_true", help="remove the stored expiry")
+
+
+def _column_arguments(sub: argparse.ArgumentParser) -> None:
     defaults = ColumnMapping()
     sub.add_argument("--id-col", default=defaults.id_col)
     sub.add_argument("--text-col", default=defaults.text_col)
-    sub.add_argument("--permalink-col", default=defaults.permalink_col)
-    sub.add_argument("--date-col", default=defaults.date_col)
+    for flag, default in (
+        ("--permalink-col", defaults.permalink_col),
+        ("--date-col", defaults.date_col),
+    ):
+        sub.add_argument(
+            flag, help=f"(default: {default!r} if present; a column named here must exist)"
+        )
 
 
 def _load_extractions_arguments(sub: argparse.ArgumentParser) -> None:
@@ -229,9 +269,25 @@ def _open_db(cfg: AppConfig) -> closing[sqlite3.Connection]:
     return closing(db.connect(cfg.database.path))
 
 
+def _database_files(cfg: AppConfig) -> tuple[Path, ...]:
+    """Return the database file and the side files SQLite may create next to it."""
+    path = cfg.database.path
+    return tuple(path.with_name(path.name + suffix) for suffix in _DATABASE_FILE_SUFFIXES)
+
+
 def _ingest(cfg: AppConfig, args: argparse.Namespace) -> Payload:
+    source = _source_from_args(args)
+    mapping = _mapping_from_args(args)
+    with _open_db(cfg) as conn:
+        stats = import_file(
+            conn, args.path, mapping, source, replace=args.replace, clear_expiry=args.clear_expiry
+        )
+    return stats.model_dump()
+
+
+def _source_from_args(args: argparse.Namespace) -> SourceRecord:
     path: Path = args.path
-    source = build_source(
+    return build_source(
         path,
         source_id=path.stem if args.source_id is None else args.source_id,
         kind=args.kind,
@@ -240,23 +296,28 @@ def _ingest(cfg: AppConfig, args: argparse.Namespace) -> Payload:
         expires_at=args.expires_at,
         imported_at=utc_now_iso(),
     )
-    mapping = ColumnMapping(
+
+
+def _mapping_from_args(args: argparse.Namespace) -> ColumnMapping:
+    """Map the column options; an optional column named explicitly becomes required."""
+    defaults = ColumnMapping()
+    return ColumnMapping(
         id_col=args.id_col,
         text_col=args.text_col,
-        permalink_col=args.permalink_col,
-        date_col=args.date_col,
+        permalink_col=defaults.permalink_col if args.permalink_col is None else args.permalink_col,
+        permalink_required=args.permalink_col is not None,
+        date_col=defaults.date_col if args.date_col is None else args.date_col,
+        date_required=args.date_col is not None,
     )
-    with _open_db(cfg) as conn:
-        stats = import_file(conn, path, mapping, source)
-    return stats.model_dump()
 
 
 def _load_extractions(cfg: AppConfig, args: argparse.Namespace) -> Payload:
-    with _open_db(cfg) as conn:
-        report = load_extractions(conn, args.path, cfg.extraction, utc_now_iso())
-    if args.rejections_out is not None:
-        rows = (rejection.model_dump(mode="json") for rejection in report.rejections)
-        _write_jsonl(args.rejections_out, rows, owner_only=False)
+    protected = (*_database_files(cfg), args.path)
+    with _optional_output(args.rejections_out, protected) as out:
+        with _open_db(cfg) as conn:
+            report = load_extractions(conn, args.path, cfg.extraction, utc_now_iso())
+        if out is not None:
+            _write_rows(out, (item.model_dump(mode="json") for item in report.rejections))
     return _report_payload(report)
 
 
@@ -268,11 +329,11 @@ def _report_payload(report: ExtractionReport) -> Payload:
 
 
 def _export(cfg: AppConfig, args: argparse.Namespace) -> Payload:
-    with _open_db(cfg) as conn:
-        comments = db.iter_comments_for_extraction(conn, args.only_unparsed, utc_now_iso())
-    rows = ({"comment_id": comment_id, "text": text} for comment_id, text in comments)
-    _write_jsonl(args.out, rows, owner_only=True)
-    return {"exported": len(comments), "out": str(args.out)}
+    with _open_output(args.out, _database_files(cfg), owner_only=True) as out:
+        with _open_db(cfg) as conn:
+            items = db.iter_comments_for_extraction(conn, args.only_unparsed, utc_now_iso())
+        _write_rows(out, (item._asdict() for item in items))
+    return {"exported": len(items), "out": str(args.out)}
 
 
 def _delete_source(cfg: AppConfig, args: argparse.Namespace) -> Payload:
@@ -332,7 +393,7 @@ _COMMANDS: Final = (
     _CommandSpec(
         "export-for-extraction",
         _export,
-        "Write {comment_id, text} JSONL for the offline extractor (private data).",
+        "Write {comment_id, text, text_hash} JSONL for the offline extractor (private data).",
         _export_arguments,
     ),
     _CommandSpec(
@@ -360,17 +421,48 @@ def _jsonl_line(row: Mapping[str, object]) -> str:
     return line + "\n"
 
 
-def _write_jsonl(path: Path, rows: Iterable[Mapping[str, object]], *, owner_only: bool) -> None:
-    """Write ``rows`` as UTF-8 JSONL, creating parent directories.
+def _write_rows(handle: TextIO, rows: Iterable[Mapping[str, object]]) -> None:
+    handle.write("".join(_jsonl_line(row) for row in rows))
 
-    With ``owner_only`` the file is made readable by its owner only before any data is
-    written, because it holds private comment text.
+
+def _optional_output(
+    path: Path | None, protected: Sequence[Path]
+) -> AbstractContextManager[TextIO | None]:
+    if path is None:
+        return nullcontext()
+    return _open_output(path, protected, owner_only=False)
+
+
+@contextmanager
+def _open_output(path: Path, protected: Sequence[Path], *, owner_only: bool) -> Iterator[TextIO]:
+    """Open ``path`` for UTF-8 JSONL output (truncating it), creating parent directories.
+
+    Refused before any side effect: a directory, a ``protected`` file (the database and its
+    side files, the command's input) or a symlink (``O_NOFOLLOW``). With ``owner_only`` the
+    file is mode 0600 before any data is written, because it holds private comment text.
     """
+    _refuse_unsafe_output(path, protected)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if owner_only:
-        path.touch(mode=_OWNER_ONLY, exist_ok=True)
-        path.chmod(_OWNER_ONLY)
-    path.write_text("".join(_jsonl_line(row) for row in rows), encoding="utf-8", newline="\n")
+    descriptor = os.open(path, _OUTPUT_FLAGS, _OWNER_ONLY if owner_only else _DEFAULT_FILE_MODE)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        if owner_only:
+            os.fchmod(handle.fileno(), _OWNER_ONLY)
+        yield handle
+
+
+def _refuse_unsafe_output(path: Path, protected: Sequence[Path]) -> None:
+    if path.is_dir():
+        raise ValueError(f"output path {path} is a directory")
+    for other in protected:
+        if _same_file(path, other):
+            raise ValueError(f"refusing to overwrite {other} with the output file {path}")
+
+
+def _same_file(path: Path, other: Path) -> bool:
+    """Whether both name one file (also through symlinks or hard links)."""
+    if path.resolve() == other.resolve():
+        return True
+    return path.exists() and other.exists() and path.samefile(other)
 
 
 if __name__ == "__main__":

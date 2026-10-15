@@ -9,6 +9,9 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import stat
+import time
+import unicodedata
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,8 +21,11 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from crop_explorer.db import (
+    MAX_FTS_TOKENS,
+    SCHEMA_VERSION,
     connect,
     delete_source,
+    extractable_texts,
     fts_query,
     init_schema,
     iter_comments_for_extraction,
@@ -176,14 +182,28 @@ def c2_extraction() -> ValidatedComment:
     return validated("c2", (vmention("My peppers", crop="pepper", facts=facts),))
 
 
-def import_stats(inserted: int, updated: int, unchanged: int, deleted: int) -> ImportStats:
+def import_stats(
+    inserted: int,
+    updated: int,
+    unchanged: int,
+    deleted: int,
+    *,
+    rights: RightsStatus = "synthetic",
+    expires_at: str | None = None,
+) -> ImportStats:
     return ImportStats(
         source_id="garden-a",
         inserted=inserted,
         updated=updated,
         unchanged=unchanged,
         deleted=deleted,
+        rights_status=rights,
+        expires_at=expires_at,
     )
+
+
+def text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def three_records() -> list[CommentRecord]:
@@ -313,6 +333,115 @@ def test_init_schema_is_idempotent_and_preserves_data(seeded: sqlite3.Connection
     assert expected <= {row[1] for row in schema_before}
 
 
+def file_mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_connect_creates_the_database_owner_only(tmp_path: Path) -> None:
+    """F27: the database holds private comment text verbatim, like the extraction export."""
+    path = tmp_path / "fresh" / "explorer.sqlite"
+    connect(path).close()
+    assert file_mode(path) == 0o600
+    assert file_mode(path.parent) == 0o700
+
+
+def test_connect_keeps_the_mode_of_existing_files_and_directories(tmp_path: Path) -> None:
+    tmp_path.chmod(0o755)
+    path = tmp_path / "explorer.sqlite"
+    connect(path).close()
+    path.chmod(0o640)
+    connect(path).close()
+    assert (file_mode(tmp_path), file_mode(path)) == (0o755, 0o640)
+
+
+def test_connect_creates_the_file_before_sqlite_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is never briefly world-readable: it is 0600 before SQLite opens it."""
+    path = tmp_path / "explorer.sqlite"
+    seen: list[int] = []
+    real_connect = sqlite3.connect
+
+    def spy(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        seen.append(file_mode(Path(database)))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", spy)
+    connect(path).close()
+    assert seen == [0o600]
+
+
+def test_fresh_database_records_the_schema_version(tmp_path: Path) -> None:
+    path = tmp_path / "explorer.sqlite"
+    connect(path).close()
+    with sqlite3.connect(path) as raw:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 1
+    reopened = connect(path)  # a database of the current version opens again
+    reopened.close()
+
+
+def make_raw_db(path: Path, *statements: str) -> Path:
+    raw = sqlite3.connect(path)
+    try:
+        for statement in statements:
+            raw.execute(statement)
+        raw.commit()
+    finally:
+        raw.close()
+    return path
+
+
+NO_CASCADE_COMMENTS = (
+    "CREATE TABLE comments (id INTEGER PRIMARY KEY, comment_id TEXT NOT NULL UNIQUE,"
+    " source_id TEXT NOT NULL REFERENCES sources(source_id), text TEXT NOT NULL,"
+    " permalink TEXT, source_order INTEGER NOT NULL, created_at TEXT,"
+    " imported_at TEXT NOT NULL, deleted_at TEXT, text_hash TEXT NOT NULL)"
+)
+SOURCES_TABLE = (
+    "CREATE TABLE sources (source_id TEXT PRIMARY KEY, kind TEXT NOT NULL, source_url TEXT,"
+    " rights_status TEXT NOT NULL, imported_at TEXT NOT NULL, expires_at TEXT,"
+    " dataset_hash TEXT NOT NULL)"
+)
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        pytest.param((SOURCES_TABLE, NO_CASCADE_COMMENTS), id="tables-without-version"),
+        pytest.param(("CREATE TABLE notes (x TEXT)",), id="foreign-tables"),
+        pytest.param(("PRAGMA user_version = 7",), id="unknown-version"),
+        pytest.param(
+            (SOURCES_TABLE, NO_CASCADE_COMMENTS, "PRAGMA user_version = 1"),
+            id="version-1-without-cascades",
+        ),
+    ],
+)
+def test_connect_refuses_a_database_it_did_not_create(
+    tmp_path: Path, statements: tuple[str, ...]
+) -> None:
+    """F46: deletion relies on ON DELETE CASCADE; a look-alike schema would orphan private text."""
+    path = make_raw_db(tmp_path / "foreign.sqlite", *statements)
+    before = path.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError, match="schema"):
+        connect(path)
+
+    assert path.read_bytes() == before
+
+
+def test_connect_reports_a_file_that_is_not_a_database(tmp_path: Path) -> None:
+    path = tmp_path / "notes.sqlite"
+    path.write_bytes(b"plain bytes, not a database " * 100)
+    with pytest.raises(sqlite3.DatabaseError):
+        connect(path)
+
+
+def test_connection_zeroes_deleted_content(conn: sqlite3.Connection) -> None:
+    assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    secure = conn.execute("SELECT v FROM comments_fts_config WHERE k = 'secure-delete'")
+    assert secure.fetchone()[0] == 1
+
+
 # --------------------------------------------------------------------------- sync_source_comments
 
 
@@ -407,28 +536,177 @@ def test_reimporting_identical_data_never_duplicates(seeded: sqlite3.Connection)
     assert len(fts_rowids(seeded, "tomatoes")) == 1
 
 
+def source_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [dict(row) for row in conn.execute("SELECT * FROM sources ORDER BY source_id")]
+
+
 def test_sync_upserts_source_metadata(seeded: sqlite3.Connection) -> None:
     updated = make_source(
-        rights="cleared",
         expires_at=FUTURE,
         imported_at=NOW,
         dataset_hash="hash-2",
         kind="survey",
         source_url="https://example.org/export",
     )
-    sync_source_comments(seeded, updated, three_records())
-    rows = seeded.execute("SELECT * FROM sources").fetchall()
-    assert [dict(row) for row in rows] == [
+    stats = sync_source_comments(seeded, updated, three_records())
+    assert stats == import_stats(0, 0, 3, 0, expires_at=FUTURE)
+    assert source_rows(seeded) == [
         {
             "source_id": "garden-a",
             "kind": "survey",
             "source_url": "https://example.org/export",
-            "rights_status": "cleared",
+            "rights_status": "synthetic",
             "imported_at": NOW,
             "expires_at": FUTURE,
             "dataset_hash": "hash-2",
         }
     ]
+
+
+# --------------------------------------------------------------------------- expiry on re-import
+
+
+def test_reimport_without_expiry_keeps_the_stored_expiry(conn: sqlite3.Connection) -> None:
+    """F02: leaving out an expiry must never loosen the source's rights metadata."""
+    sync_source_comments(conn, make_source(expires_at=FUTURE), three_records())
+
+    stats = sync_source_comments(conn, make_source(imported_at=NOW), three_records())
+
+    assert stats == import_stats(0, 0, 3, 0, expires_at=FUTURE)
+    assert source_rows(conn)[0]["expires_at"] == FUTURE
+    assert purge_expired(conn, "2027-06-01T00:00:00Z") == ["garden-a"]
+
+
+def test_reimport_with_a_new_expiry_replaces_it(conn: sqlite3.Connection) -> None:
+    sync_source_comments(conn, make_source(expires_at=FUTURE), three_records())
+    later = "2028-01-01T00:00:00Z"
+
+    stats = sync_source_comments(conn, make_source(expires_at=later), three_records())
+
+    assert (stats.expires_at, source_rows(conn)[0]["expires_at"]) == (later, later)
+
+
+def test_clear_expiry_removes_the_stored_expiry(conn: sqlite3.Connection) -> None:
+    sync_source_comments(conn, make_source(expires_at=FUTURE), three_records())
+
+    stats = sync_source_comments(conn, make_source(), three_records(), clear_expiry=True)
+
+    assert stats == import_stats(0, 0, 3, 0, expires_at=None)
+    assert source_rows(conn)[0]["expires_at"] is None
+
+
+def test_clear_expiry_and_a_new_expiry_are_mutually_exclusive(conn: sqlite3.Connection) -> None:
+    before = snapshot(conn)
+    with pytest.raises(ValueError, match="clear_expiry"):
+        sync_source_comments(
+            conn, make_source(expires_at=FUTURE), three_records(), clear_expiry=True
+        )
+    assert snapshot(conn) == before
+
+
+@pytest.mark.parametrize("stored_expiry", [PAST, NOW])
+@pytest.mark.parametrize(
+    ("replace", "clear_expiry", "new_expiry"),
+    [(False, False, None), (True, False, None), (False, True, None), (False, False, FUTURE)],
+)
+def test_reimporting_an_expired_source_is_refused(
+    conn: sqlite3.Connection,
+    stored_expiry: str,
+    replace: bool,
+    clear_expiry: bool,
+    new_expiry: str | None,
+) -> None:
+    """Expired content is purged or deleted first; a re-import never brings it back."""
+    sync_source_comments(conn, make_source(expires_at=stored_expiry), three_records())
+    replace_extraction(conn, c1_extraction(), LOADED)
+    before = snapshot(conn)
+    source = make_source(imported_at=NOW, expires_at=new_expiry)
+
+    with pytest.raises(ValueError, match="purge-expired") as excinfo:
+        sync_source_comments(
+            conn, source, three_records(), replace=replace, clear_expiry=clear_expiry
+        )
+
+    assert "garden-a" in str(excinfo.value)
+    assert TEXT_C1 not in str(excinfo.value)
+    assert snapshot(conn) == before
+
+
+def test_a_new_source_may_be_imported_already_expired(conn: sqlite3.Connection) -> None:
+    stats = sync_source_comments(conn, make_source(imported_at=NOW, expires_at=PAST), [])
+    assert stats == import_stats(0, 0, 0, 0, expires_at=PAST)
+
+
+# --------------------------------------------------------------------------- destructive re-import
+
+
+def test_reimport_sharing_no_ids_with_the_stored_comments_is_refused(
+    seeded: sqlite3.Connection,
+) -> None:
+    """F06: a different export under the same source id must not silently replace it."""
+    before = snapshot(seeded)
+    unrelated = [rec("v2-1", "Okra in July."), rec("v2-2", "Okra in August.", 1)]
+
+    with pytest.raises(ValueError, match="replace") as excinfo:
+        sync_source_comments(seeded, make_source(dataset_hash="other"), unrelated)
+
+    message = str(excinfo.value)
+    assert "garden-a" in message
+    assert "3 stored" in message
+    assert "2 " in message
+    assert "Okra" not in message and TEXT_C1 not in message
+    assert snapshot(seeded) == before
+
+
+def test_empty_reimport_of_a_source_with_comments_is_refused(seeded: sqlite3.Connection) -> None:
+    before = snapshot(seeded)
+    with pytest.raises(ValueError, match="garden-a"):
+        sync_source_comments(seeded, make_source(), [])
+    assert snapshot(seeded) == before
+
+
+def test_replace_allows_a_reimport_sharing_no_ids(seeded: sqlite3.Connection) -> None:
+    unrelated = [rec("v2-1", "Okra in July.")]
+
+    stats = sync_source_comments(seeded, make_source(), unrelated, replace=True)
+
+    assert stats == import_stats(1, 0, 0, 3)
+    assert visible_comment_ids(seeded, "private", NOW, None) == ["v2-1"]
+    assert count(seeded, "parses") == 0
+
+
+def test_a_refresh_that_drops_some_comments_needs_no_replace(seeded: sqlite3.Connection) -> None:
+    stats = sync_source_comments(seeded, make_source(), [rec("c3", TEXT_C3), rec("c9", "New.")])
+    assert stats == import_stats(1, 0, 1, 2)
+
+
+def test_a_stored_source_without_comments_accepts_any_ids(conn: sqlite3.Connection) -> None:
+    sync_source_comments(conn, make_source(), [])
+    assert sync_source_comments(conn, make_source(), three_records()) == import_stats(3, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("stored", "new"),
+    [
+        ("private_unverified", "cleared"),
+        ("cleared", "private_unverified"),
+        ("synthetic", "cleared"),
+    ],
+)
+def test_changing_rights_status_needs_replace(
+    conn: sqlite3.Connection, stored: RightsStatus, new: RightsStatus
+) -> None:
+    sync_source_comments(conn, make_source(rights=stored), three_records())
+    before = snapshot(conn)
+
+    with pytest.raises(ValueError, match="rights_status") as excinfo:
+        sync_source_comments(conn, make_source(rights=new), three_records())
+
+    assert stored in str(excinfo.value) and new in str(excinfo.value)
+    assert snapshot(conn) == before
+    stats = sync_source_comments(conn, make_source(rights=new), three_records(), replace=True)
+    assert stats == import_stats(0, 0, 3, 0, rights=new)
+    assert source_rows(conn)[0]["rights_status"] == new
 
 
 def test_cross_source_collision_raises_and_leaves_db_unchanged(
@@ -446,7 +724,7 @@ def test_cross_source_collision_raises_and_leaves_db_unchanged(
 def test_collision_during_resync_rolls_back_source_upsert(seeded: sqlite3.Connection) -> None:
     sync_source_comments(seeded, make_source("garden-b"), [rec("b1", "Beans in garden b.")])
     before = snapshot(seeded)
-    changed_source = make_source(rights="cleared", dataset_hash="hash-2", imported_at=NOW)
+    changed_source = make_source(kind="survey", dataset_hash="hash-2", imported_at=NOW)
     records = [rec("c1", "Changed text.", 0), rec("b1", "Stolen id.", 1)]
     with pytest.raises(ValueError, match=r"b1"):
         sync_source_comments(seeded, changed_source, records)
@@ -638,6 +916,75 @@ def test_purge_expired_rejects_non_canonical_now(conn: sqlite3.Connection) -> No
         purge_expired(conn, "2026-10-15")
 
 
+# --------------------------------------------------------------------------- no residue (F14)
+
+SECRET_TOKENS = ("zorblaxian", "cheyennequux", "privtokenqx")
+SECRET_TEXT = "Zorblaxian kohlrabi in Cheyennequux, PRIVTOKENQX greenhouse."
+KEPT_TEXT = "Bush beans in clay soil."
+
+
+def fts_data(conn: sqlite3.Connection) -> bytes:
+    return b"".join(
+        bytes(row[0] or b"") for row in conn.execute("SELECT block FROM comments_fts_data")
+    )
+
+
+def assert_no_residue(conn: sqlite3.Connection, path: Path) -> None:
+    """Neither the FTS shadow tables nor the database file still hold the deleted words."""
+    blobs = fts_data(conn).lower()
+    conn.close()
+    raw = path.read_bytes().lower()
+    for token in SECRET_TOKENS:
+        assert token.encode() not in blobs
+        assert token.encode() not in raw
+    assert b"kohlrabi" not in raw
+
+
+@pytest.fixture
+def file_db(tmp_path: Path) -> tuple[sqlite3.Connection, Path]:
+    path = tmp_path / "residue.sqlite"
+    conn = connect(path)
+    sync_source_comments(conn, make_source("kept"), [rec("k1", KEPT_TEXT)])
+    sync_source_comments(
+        conn,
+        make_source("secret", "private_unverified", expires_at=FUTURE),
+        [rec("s1", SECRET_TEXT)],
+    )
+    assert SECRET_TOKENS[0].encode() in fts_data(conn).lower()  # the index held them
+    return conn, path
+
+
+def test_delete_source_leaves_no_deleted_words_in_the_file(
+    file_db: tuple[sqlite3.Connection, Path],
+) -> None:
+    conn, path = file_db
+    delete_source(conn, "secret")
+    assert visible_comment_ids(conn, "private", NOW, "beans") == ["k1"]
+    assert_fts_in_sync(conn)
+    assert_no_residue(conn, path)
+
+
+def test_purge_expired_leaves_no_deleted_words_in_the_file(
+    file_db: tuple[sqlite3.Connection, Path],
+) -> None:
+    conn, path = file_db
+    assert purge_expired(conn, "2027-06-01T00:00:00Z") == ["secret"]
+    assert_fts_in_sync(conn)
+    assert_no_residue(conn, path)
+
+
+@pytest.mark.parametrize("change", ["drop", "rewrite"])
+def test_reimport_leaves_no_dropped_or_rewritten_words_in_the_file(
+    file_db: tuple[sqlite3.Connection, Path], change: str
+) -> None:
+    conn, path = file_db
+    source = make_source("secret", "private_unverified")
+    records = [rec("s2", "Okra notes.")] if change == "drop" else [rec("s1", "Okra notes.")]
+    sync_source_comments(conn, source, records, replace=True)
+    assert_fts_in_sync(conn)
+    assert_no_residue(conn, path)
+
+
 # --------------------------------------------------------------------------- pipeline-internal
 
 
@@ -656,13 +1003,52 @@ def test_id_sequences_must_not_be_bare_strings(mixed: sqlite3.Connection) -> Non
 
 def test_iter_comments_for_extraction(mixed: sqlite3.Connection) -> None:
     every = iter_comments_for_extraction(mixed, only_unparsed=False, now=NOW)
-    assert [comment_id for comment_id, _ in every] == ["k1", "d1", "p1", "p2"]
-    assert dict(every)["p2"] == "Secret beans."
+    assert [item.comment_id for item in every] == ["k1", "d1", "p1", "p2"]
+    assert {item.comment_id: item.text for item in every}["p2"] == "Secret beans."
     assert iter_comments_for_extraction(mixed, only_unparsed=True, now=NOW) == [
-        ("p2", "Secret beans.")
+        ("p2", "Secret beans.", text_hash("Secret beans."))
     ]
     mark_deleted(mixed, "p2")
     assert iter_comments_for_extraction(mixed, only_unparsed=True, now=NOW) == []
+
+
+def test_extraction_items_carry_the_hash_of_the_exported_text(mixed: sqlite3.Connection) -> None:
+    """F12: the hash lets the loader tell which version of the text an extraction was made from."""
+    items = iter_comments_for_extraction(mixed, only_unparsed=False, now=NOW)
+    assert all(item.text_hash == text_hash(item.text) for item in items)
+    assert items[0]._asdict() == {
+        "comment_id": "k1",
+        "text": "Sun Gold tomatoes, sweet.",
+        "text_hash": text_hash("Sun Gold tomatoes, sweet."),
+    }
+
+
+def test_extractable_texts_returns_text_and_hash_of_processable_comments(
+    mixed: sqlite3.Connection,
+) -> None:
+    sync_source_comments(
+        mixed,
+        make_source("lapsed", "private_unverified", expires_at=NOW),
+        [rec("x1", "Expired okra notes.")],
+    )
+    mark_deleted(mixed, "p2")
+
+    texts = extractable_texts(mixed, ["p2", "x1", "d1", "missing", "p1"], NOW)
+
+    assert texts == {
+        "d1": ("Sun Gold tomatoes in pots.", text_hash("Sun Gold tomatoes in pots.")),
+        "p1": ("Sun Gold tomatoes, secret plot.", text_hash("Sun Gold tomatoes, secret plot.")),
+    }
+    assert list(texts) == ["d1", "p1"]  # ordered by id
+    assert list(extractable_texts(mixed, ["x1"], PAST)) == ["x1"]  # before the expiry
+    assert extractable_texts(mixed, [], NOW) == {}
+
+
+def test_extractable_texts_validates_its_arguments(mixed: sqlite3.Connection) -> None:
+    with pytest.raises(TypeError):
+        extractable_texts(mixed, "d1", NOW)
+    with pytest.raises(ValueError, match="now"):
+        extractable_texts(mixed, ["d1"], "2026-10-15")
 
 
 def test_iter_comments_for_extraction_skips_expired_sources(mixed: sqlite3.Connection) -> None:
@@ -678,11 +1064,11 @@ def test_iter_comments_for_extraction_skips_expired_sources(mixed: sqlite3.Conne
         [rec("y1", "Current okra notes.")],
     )
 
-    ids = [cid for cid, _ in iter_comments_for_extraction(mixed, only_unparsed=True, now=NOW)]
+    ids = [item.comment_id for item in iter_comments_for_extraction(mixed, True, NOW)]
     earlier = iter_comments_for_extraction(mixed, only_unparsed=True, now=PAST)
 
     assert ids == ["y1", "p2"]
-    assert [cid for cid, _ in earlier] == ["y1", "x1", "p2"]  # ordered by source_id
+    assert [item.comment_id for item in earlier] == ["y1", "x1", "p2"]  # ordered by source_id
     with pytest.raises(ValueError, match="now"):
         iter_comments_for_extraction(mixed, only_unparsed=False, now="2026-10-15")
 
@@ -710,12 +1096,44 @@ def test_fts_query_quotes_each_token_as_a_prefix_term() -> None:
     assert fts_query('tomato" OR text:foo*') == '"tomato"* "OR"* "text"* "foo"*'
 
 
+def is_combining(char: str) -> bool:
+    return unicodedata.category(char).startswith("M")
+
+
 @given(text=st.text())
 def test_fts_query_output_contains_only_quoted_prefix_terms(text: str) -> None:
     query = fts_query(text)
-    if query is not None:
-        assert re.fullmatch(r'"\w+"\*( "\w+"\*)*', query)
-        assert re.findall(r'"(\w+)"', query) == re.findall(r"\w+", text)
+    if query is None:
+        return
+    assert re.fullmatch(r'"[^"\s]+"\*( "[^"\s]+"\*)*', query)
+    tokens = re.findall(r'"([^"]+)"', query)
+    assert len(tokens) == len(set(tokens)) <= MAX_FTS_TOKENS
+    for token in tokens:
+        assert re.match(r"\w", token)  # a token starts with a word character ...
+        assert all(re.match(r"\w", c) or is_combining(c) for c in token)  # ... marks stay inside
+        assert token in unicodedata.normalize("NFC", text)
+
+
+@given(words=st.lists(st.from_regex(r"[A-Za-z0-9]{1,8}", fullmatch=True), max_size=40))
+def test_fts_query_keeps_the_first_distinct_words_in_order(words: list[str]) -> None:
+    query = fts_query(" ".join(words))
+    distinct = list(dict.fromkeys(words))[:MAX_FTS_TOKENS]
+    assert query == (" ".join(f'"{word}"*' for word in distinct) or None)
+
+
+def test_fts_query_deduplicates_and_caps_tokens() -> None:
+    """F37: repeated or numerous words cannot make full-text search cost explode."""
+    assert MAX_FTS_TOKENS == 32
+    assert fts_query("sun gold sun Sun gold") == '"sun"* "gold"* "Sun"*'
+    many = " ".join(f"w{i}" for i in range(100))
+    assert fts_query(many) == " ".join(f'"w{i}"*' for i in range(MAX_FTS_TOKENS))
+
+
+def test_fts_query_keeps_combining_marks_inside_words() -> None:
+    """F47: a decomposed (NFD) word is one token, normalised to NFC."""
+    assert fts_query("Jalapeño plants") == '"Jalapeño"* "plants"*'
+    assert fts_query("q́x") == '"q́x"*'  # no precomposed form: the mark stays inside
+    assert fts_query("́́ ok") == '"ok"*'  # marks alone never start a token
 
 
 @pytest.fixture(scope="module")
@@ -783,6 +1201,24 @@ def test_fts_prefix_stemming_and_folding(
     search_db: sqlite3.Connection, text: str, expected: list[str]
 ) -> None:
     assert visible_comment_ids(search_db, "public", NOW, text) == expected
+
+
+@pytest.mark.parametrize("stored_form", ["NFC", "NFD"])
+@pytest.mark.parametrize("query_form", ["NFC", "NFD"])
+def test_decomposed_and_composed_words_find_each_other(
+    conn: sqlite3.Connection, stored_form: Any, query_form: Any
+) -> None:
+    text = unicodedata.normalize(stored_form, "My Jalapeño plants loved the muggy summer.")
+    sync_source_comments(conn, make_source(), [rec("c1", text), rec("c2", TEXT_C3, 1)])
+    query = unicodedata.normalize(query_form, "jalapeño plants")
+    assert visible_comment_ids(conn, "public", NOW, query) == ["c1"]
+
+
+def test_a_huge_pasted_query_stays_cheap(search_db: sqlite3.Connection) -> None:
+    started = time.perf_counter()
+    for text in ("a " * 50_000, " ".join(f"x{i}" for i in range(20_000))):
+        visible_comment_ids(search_db, "public", NOW, text)
+    assert time.perf_counter() - started < 1.0
 
 
 # --------------------------------------------------------------------------- visible_comment_ids

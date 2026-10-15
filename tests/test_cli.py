@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 import subprocess
@@ -42,7 +43,15 @@ COMMANDS = (
     "summary",
     "demo",
 )
-STATS_KEYS = ["source_id", "inserted", "updated", "unchanged", "deleted"]
+STATS_KEYS = [
+    "source_id",
+    "inserted",
+    "updated",
+    "unchanged",
+    "deleted",
+    "rights_status",
+    "expires_at",
+]
 REPORT_KEYS = [
     "lines_read",
     "schema_errors",
@@ -129,6 +138,10 @@ def fixture_texts() -> dict[str, str]:
     lines = DEMO_COMMENTS.read_text(encoding="utf-8").splitlines()
     rows = [json.loads(line) for line in lines if line.strip()]
     return {row["comment_id"]: row["text"] for row in rows}
+
+
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def fixture_quotes() -> set[str]:
@@ -219,6 +232,8 @@ def test_demo_ingests_fixtures_as_synthetic_and_loads_extractions(cli_env: CliEn
         "updated": 0,
         "unchanged": 0,
         "deleted": 0,
+        "rights_status": "synthetic",
+        "expires_at": None,
     }
     report = payload["extraction"]
     assert list(report) == REPORT_KEYS
@@ -242,6 +257,8 @@ def test_demo_rerun_is_idempotent(cli_env: CliEnv) -> None:
         "updated": 0,
         "unchanged": 69,
         "deleted": 0,
+        "rights_status": "synthetic",
+        "expires_at": None,
     }
     assert second["extraction"] == first["extraction"]
     assert counts(summary(cli_env, "private")) == DEMO_SUMMARY
@@ -277,6 +294,8 @@ def test_ingest_csv_with_column_mapping_and_defaults(cli_env: CliEnv, private_cs
         "updated": 0,
         "unchanged": 0,
         "deleted": 0,
+        "rights_status": "private_unverified",
+        "expires_at": None,
     }
     row = source_row(cli_env, "my-export")
     assert row["kind"] == "comments_export"
@@ -374,6 +393,124 @@ def test_db_option_overrides_the_configured_database(cli_env: CliEnv, tmp_path: 
     assert counts(summary(cli_env)) == EMPTY_SUMMARY  # the configured database is separate
 
 
+# --------------------------------------------------------------------------- rights on re-import
+
+
+def test_reingest_without_expires_at_keeps_the_expiry(cli_env: CliEnv, tmp_path: Path) -> None:
+    """F02: re-running ingest after an update never silently drops the expiry."""
+    path = write_jsonl(tmp_path / "clip.jsonl", comment_rows(("a", "one"), ("b", "two")))
+    first = ok(cli_env.run("ingest", path, "--scope", "cleared", "--expires-at", "2030-01-01"))
+
+    again = ok(cli_env.run("ingest", path, "--scope", "cleared"))
+
+    assert (first["rights_status"], first["expires_at"]) == ("cleared", "2030-01-01T00:00:00Z")
+    assert (again["rights_status"], again["expires_at"]) == ("cleared", "2030-01-01T00:00:00Z")
+    assert source_row(cli_env, "clip")["expires_at"] == "2030-01-01T00:00:00Z"
+
+
+def test_clear_expiry_removes_the_expiry(cli_env: CliEnv, tmp_path: Path) -> None:
+    path = write_jsonl(tmp_path / "clip.jsonl", comment_rows(("a", "one")))
+    ok(cli_env.run("ingest", path, "--scope", "cleared", "--expires-at", "2030-01-01"))
+
+    payload = ok(cli_env.run("ingest", path, "--scope", "cleared", "--clear-expiry"))
+
+    assert payload["expires_at"] is None
+    assert source_row(cli_env, "clip")["expires_at"] is None
+
+
+def test_clear_expiry_and_expires_at_are_mutually_exclusive(
+    cli_env: CliEnv, private_csv: Path
+) -> None:
+    run = cli_env.run(
+        "ingest", private_csv, "--scope", "private", "--expires-at", "2030-01-01", "--clear-expiry"
+    )
+
+    assert (run.code, run.out) == (2, "")
+    assert "not allowed with" in run.err
+
+
+def test_reingesting_an_expired_source_is_refused_until_purged(
+    cli_env: CliEnv, tmp_path: Path
+) -> None:
+    path = write_jsonl(tmp_path / "old.jsonl", comment_rows(("o1", SECRET_TEXT)))
+    ok(cli_env.run("ingest", path, "--scope", "cleared", "--expires-at", "2000-01-01"))
+
+    line = failed(cli_env.run("ingest", path, "--scope", "cleared", "--clear-expiry"))
+
+    assert "old" in line and "purge-expired" in line
+    assert "Secretive" not in line
+    assert source_row(cli_env, "old")["expires_at"] == "2000-01-01T00:00:00Z"
+    ok(cli_env.run("purge-expired"))
+    assert ok(cli_env.run("ingest", path, "--scope", "cleared"))["inserted"] == 1
+
+
+def test_a_different_export_with_the_same_file_name_needs_replace(
+    cli_env: CliEnv, tmp_path: Path
+) -> None:
+    """F06: video2/comments.jsonl must not silently replace video1/comments.jsonl."""
+    (tmp_path / "video1").mkdir()
+    (tmp_path / "video2").mkdir()
+    first = write_jsonl(
+        tmp_path / "video1" / "comments.jsonl", comment_rows(("v1-a", "a"), ("v1-b", "b"))
+    )
+    second = write_jsonl(
+        tmp_path / "video2" / "comments.jsonl", comment_rows(("v2-a", SECRET_TEXT))
+    )
+    ok(cli_env.run("ingest", first, "--scope", "private"))
+
+    line = failed(cli_env.run("ingest", second, "--scope", "private"))
+
+    assert "'comments'" in line and "2 stored" in line and "--replace" in line
+    assert "Secretive" not in line
+    assert counts(summary(cli_env, "private"))["comments"] == 2
+    payload = ok(cli_env.run("ingest", second, "--scope", "private", "--replace"))
+    assert (payload["inserted"], payload["deleted"]) == (1, 2)
+
+
+def test_changing_the_scope_of_a_stored_source_needs_replace(
+    cli_env: CliEnv, private_csv: Path
+) -> None:
+    ok(cli_env.run("ingest", private_csv, "--scope", "private", *MAPPING_ARGS))
+
+    line = failed(cli_env.run("ingest", private_csv, "--scope", "cleared", *MAPPING_ARGS))
+
+    assert "private_unverified" in line and "cleared" in line and "--replace" in line
+    assert summary(cli_env)["comments"] == 0
+    args = ("ingest", private_csv, "--scope", "cleared", "--replace", *MAPPING_ARGS)
+    assert ok(cli_env.run(*args))["rights_status"] == "cleared"
+    assert summary(cli_env)["comments"] == 2
+
+
+# --------------------------------------------------------------------------- explicit columns
+
+
+@pytest.mark.parametrize("flag", ["--permalink-col", "--date-col"])
+def test_a_mistyped_optional_column_fails_instead_of_dropping_values(
+    cli_env: CliEnv, private_csv: Path, flag: str
+) -> None:
+    """F36: an explicitly named column must exist; nothing is imported otherwise."""
+    args = ("--id-col", "id", "--text-col", "body", flag, "urll")
+
+    line = failed(cli_env.run("ingest", private_csv, "--scope", "private", *args))
+
+    assert "'urll'" in line
+    assert counts(summary(cli_env, "private")) == EMPTY_SUMMARY
+
+
+def test_a_mistyped_jsonl_key_fails(cli_env: CliEnv, tmp_path: Path) -> None:
+    path = write_jsonl(tmp_path / "keys.jsonl", comment_rows(("a", "one")))
+
+    line = failed(cli_env.run("ingest", path, "--scope", "private", "--date-col", "publishd"))
+
+    assert "'publishd'" in line
+
+
+def test_implicit_optional_columns_may_be_missing(cli_env: CliEnv, tmp_path: Path) -> None:
+    path = write_csv(tmp_path / "bare.csv", ("comment_id", "text"), [("a", "one")])
+
+    assert ok(cli_env.run("ingest", path, "--scope", "private"))["inserted"] == 1
+
+
 # --------------------------------------------------------------------------- errors
 
 
@@ -388,7 +525,7 @@ def test_missing_input_file_fails_with_one_line(cli_env: CliEnv, tmp_path: Path)
     [
         ("notes.txt", "comment_id,text\na,b\n", "unsupported file type"),
         ("empty.csv", "", "empty"),
-        ("dupes.csv", f"comment_id,text\nc1,{SECRET_TEXT}\nc1,{SECRET_TEXT}\n", "c1"),
+        ("dupes.csv", f"comment_id,text\nc7,{SECRET_TEXT}\nc7,{SECRET_TEXT}\n", "rows 1, 2"),
         ("blank.csv", "comment_id,text\nc1,   \n", "row 1"),
     ],
 )
@@ -402,6 +539,7 @@ def test_invalid_export_fails_with_one_line_and_no_text(
 
     assert fragment in line
     assert "Secretive" not in line
+    assert "c7" not in line  # duplicate ids are never echoed (they may be comment text)
     assert counts(summary(cli_env, "private")) == EMPTY_SUMMARY
 
 
@@ -617,7 +755,8 @@ def test_export_for_extraction_writes_ids_and_exact_text(demo_env: CliEnv, tmp_p
 
     assert payload == {"exported": 69, "out": str(out)}
     rows = read_export(out)
-    assert all(list(row) == ["comment_id", "text"] for row in rows)
+    assert all(list(row) == ["comment_id", "text", "text_hash"] for row in rows)
+    assert all(row["text_hash"] == sha256(row["text"]) for row in rows)
     texts = fixture_texts()
     assert [row["comment_id"] for row in rows] == list(texts)  # file (source) order
     assert {row["comment_id"]: row["text"] for row in rows} == texts
@@ -680,6 +819,108 @@ def test_export_round_trips_any_text_one_record_per_line(
     data = out.read_text(encoding="utf-8")
     assert len(data.splitlines()) == len(texts)
     assert [json.loads(line)["text"] for line in data.splitlines()] == texts
+
+
+# --------------------------------------------------------------------------- output safety
+
+
+def test_export_to_a_directory_fails_without_changing_its_mode(
+    demo_env: CliEnv, tmp_path: Path
+) -> None:
+    """F17: a typo like ``--out data`` must not chmod the directory to 0600."""
+    target = tmp_path / "data"
+    target.mkdir()
+    target.chmod(0o755)
+
+    line = failed(demo_env.run("export-for-extraction", "--out", target))
+
+    assert "directory" in line
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal", "-journal", "-shm"])
+def test_export_never_overwrites_the_database(demo_env: CliEnv, suffix: str) -> None:
+    target = demo_env.db_path.with_name(demo_env.db_path.name + suffix)
+    before = target.read_bytes() if target.exists() else None
+
+    line = failed(demo_env.run("export-for-extraction", "--out", target))
+
+    assert "refusing" in line
+    assert (target.read_bytes() if target.exists() else None) == before
+    assert counts(summary(demo_env)) == DEMO_SUMMARY
+
+
+def test_export_never_overwrites_the_database_given_by_db_option(
+    demo_env: CliEnv, tmp_path: Path
+) -> None:
+    other = demo_env.db_path.parent / "copy.sqlite"
+    other.write_bytes(demo_env.db_path.read_bytes())
+    link = tmp_path / "innocent.jsonl"
+    link.symlink_to(other)
+
+    failed(demo_env.run("export-for-extraction", "--db", other, "--out", other))
+    failed(demo_env.run("export-for-extraction", "--db", other, "--out", link))
+
+    assert other.read_bytes() == demo_env.db_path.read_bytes()
+
+
+def test_export_refuses_a_symlinked_output(demo_env: CliEnv, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("keep me", encoding="utf-8")
+    link = tmp_path / "export.jsonl"
+    link.symlink_to(target)
+
+    failed(demo_env.run("export-for-extraction", "--out", link))
+
+    assert target.read_text(encoding="utf-8") == "keep me"
+
+
+def test_rejections_out_never_overwrites_the_input(cli_env: CliEnv, extraction_file: Path) -> None:
+    before = extraction_file.read_bytes()
+
+    line = failed(
+        cli_env.run("load-extractions", extraction_file, "--rejections-out", extraction_file)
+    )
+
+    assert "refusing" in line
+    assert extraction_file.read_bytes() == before
+    assert counts(summary(cli_env, "private"))["parsed_comments"] == 0  # nothing was loaded
+
+
+def test_rejections_out_never_overwrites_the_database(
+    cli_env: CliEnv, extraction_file: Path
+) -> None:
+    failed(cli_env.run("load-extractions", extraction_file, "--rejections-out", cli_env.db_path))
+
+    assert counts(summary(cli_env, "private")) == {**EMPTY_SUMMARY, "sources": 1, "comments": 1}
+
+
+@pytest.mark.parametrize("kind", ["directory", "under-a-file"])
+def test_unwritable_rejections_out_fails_before_loading(
+    cli_env: CliEnv, extraction_file: Path, tmp_path: Path, kind: str
+) -> None:
+    """F49: a bad --rejections-out exits 2 before the database changes."""
+    if kind == "directory":
+        target = tmp_path / "reports"
+        target.mkdir()
+    else:
+        (tmp_path / "plain-file").write_text("x", encoding="utf-8")
+        target = tmp_path / "plain-file" / "rejections.jsonl"
+
+    failed(cli_env.run("load-extractions", extraction_file, "--rejections-out", target))
+
+    assert counts(summary(cli_env, "private"))["parsed_comments"] == 0
+
+
+def test_output_files_are_plain_regular_files(demo_env: CliEnv, tmp_path: Path) -> None:
+    out = tmp_path / "rejections.jsonl"
+    out.write_text("stale rejections\n", encoding="utf-8")
+
+    ok(demo_env.run("load-extractions", DEMO_EXTRACTIONS, "--rejections-out", out))
+
+    assert out.read_text(encoding="utf-8") == ""  # overwriting a regular file stays allowed
+    assert not out.is_symlink()
+    assert os.access(out, os.R_OK)
 
 
 # --------------------------------------------------------------------------- delete / purge

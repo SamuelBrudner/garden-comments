@@ -20,6 +20,18 @@ ContextLabel = Literal[
     "regional climate reference",
     "published external trial",
 ]
+"""Every evidence label the viewer can show (badges accept any of them)."""
+
+OutsideLabel = Literal[
+    "regional climate reference",
+    "published external trial",
+    "community report",
+]
+"""Labels an outside-context link may carry.
+
+``"community report"`` marks outside gardeners' own ratings (not this channel's comments);
+``"reported conditions"`` describes this channel's comments only and is never allowed here.
+"""
 
 
 class DatabaseConfig(BaseModel):
@@ -30,11 +42,17 @@ class DatabaseConfig(BaseModel):
 
 
 class ViewerConfig(BaseModel):
-    """Viewer visibility scope and UI thresholds."""
+    """Viewer visibility scope, UI thresholds and input limits.
+
+    ``max_query_chars`` caps the search box (it bounds full-text search cost); ``page_size`` is
+    the number of result cards shown per page.
+    """
 
     model_config = _STRICT
     scope: ViewerScope
     min_reports_for_chip: int = Field(ge=1)
+    max_query_chars: int = Field(ge=1)
+    page_size: int = Field(ge=1)
 
 
 class MapConfig(BaseModel):
@@ -69,12 +87,12 @@ class QuickChip(BaseModel):
 
 
 class OutsideLink(BaseModel):
-    """An opt-in outbound context resource, labelled by evidence type."""
+    """An opt-in outbound context resource, labelled by evidence type (:data:`OutsideLabel`)."""
 
     model_config = _STRICT
     title: str = Field(min_length=1)
     url: str = Field(pattern=r"^https://")
-    label: ContextLabel
+    label: OutsideLabel
     note: str
 
 
@@ -107,6 +125,16 @@ def _resolve(base: Path, path: Path | None) -> Path | None:
 
 def load_config(path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     """Load and validate configuration; relative paths resolve against the file's directory.
+
+    Parameters
+    ----------
+    path
+        The YAML configuration file.
+
+    Returns
+    -------
+    AppConfig
+        The validated configuration with absolute database and log paths.
 
     Raises
     ------

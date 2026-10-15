@@ -5,20 +5,28 @@ viewer-facing read (ids, views, counts) joins ``comments c JOIN sources s`` and 
 :func:`crop_explorer.visibility.visibility_clause`, so private, expired or soft-deleted rows never
 reach a viewer who may not see them. Comment bodies and evidence quotes are never logged nor put
 into error messages; only ids and counts are.
+
+The database file is created owner-only (it holds comment text verbatim), carries a schema
+version, and deletes leave no readable residue: SQLite zeroes freed content
+(``PRAGMA secure_delete``), the FTS index removes deleted postings (FTS5 ``secure-delete``) and
+is optimised after every deletion or text change.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from itertools import groupby
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final, Literal, NamedTuple
 
 from loguru import logger
 
@@ -34,10 +42,14 @@ from crop_explorer.views import CommentView, FactView, MentionView, ViewerScope
 from crop_explorer.visibility import require_utc_iso, visibility_clause
 
 __all__ = [
+    "MAX_FTS_TOKENS",
     "MEMORY_PATH",
+    "SCHEMA_VERSION",
     "SUMMARY_KEYS",
+    "ExtractableComment",
     "connect",
     "delete_source",
+    "extractable_texts",
     "fts_query",
     "init_schema",
     "iter_comments_for_extraction",
@@ -55,6 +67,27 @@ MEMORY_PATH: Final = Path(":memory:")
 
 SUMMARY_KEYS: Final = ("sources", "comments", "parsed_comments", "mentions", "facts")
 """Keys of :func:`summary_counts`, in display order."""
+
+SCHEMA_VERSION: Final = 1
+"""``PRAGMA user_version`` of a database created by this module; checked on every connect."""
+
+MAX_FTS_TOKENS: Final = 32
+"""Most distinct words :func:`fts_query` keeps from one search text.
+
+FTS5 work grows faster than linearly with the number of prefix terms in one query, so a pasted
+wall of text could tie up the server on every rerun. De-duplicating and then capping the terms
+bounds the cost of any query; 32 words is far more than a real search uses.
+"""
+
+
+class ExtractableComment(NamedTuple):
+    """One comment as handed to the offline extractor (pipeline-internal; private text)."""
+
+    comment_id: str
+    text: str
+    text_hash: str
+    """SHA-256 hex digest of the UTF-8 text, as stored in ``comments.text_hash``."""
+
 
 _SCHEMA: Final[tuple[str, ...]] = (
     """CREATE TABLE IF NOT EXISTS sources (
@@ -122,12 +155,128 @@ _SCHEMA: Final[tuple[str, ...]] = (
     END""",
 )
 
+_FRESH_SCHEMA_SETTINGS: Final = (
+    # Deleting a row removes its postings from the FTS index instead of appending delete
+    # markers that still hold the words (FTS5 'secure-delete', SQLite >= 3.42).
+    "INSERT INTO comments_fts (comments_fts, rank) VALUES ('secure-delete', 1)",
+    f"PRAGMA user_version = {SCHEMA_VERSION}",
+)
+_CASCADES: Final = frozenset(
+    {
+        ("comments", "source_id", "sources", "CASCADE"),
+        ("parses", "comment_id", "comments", "CASCADE"),
+        ("mentions", "comment_id", "comments", "CASCADE"),
+        ("environment_facts", "mention_id", "mentions", "CASCADE"),
+    }
+)
+"""Foreign keys deletion relies on: ``(table, column, parent table, ON DELETE action)``."""
+
+_REQUIRED_PRAGMAS: Final = ("foreign_keys", "secure_delete")
+_PRIVATE_DIR_MODE: Final = 0o700
+_PRIVATE_FILE_MODE: Final = 0o600
+_HAS_TABLES: Final = "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table')"
+_SELECT_FOREIGN_KEYS: Final = (
+    'SELECT m.name, f."from", f."table", f.on_delete'
+    " FROM sqlite_master AS m, pragma_foreign_key_list(m.name) AS f WHERE m.type = 'table'"
+)
+_OPTIMIZE_FTS: Final = "INSERT INTO comments_fts (comments_fts) VALUES ('optimize')"
+
+_UPSERT_SOURCE: Final = (
+    "INSERT INTO sources (source_id, kind, source_url, rights_status, imported_at,"
+    " expires_at, dataset_hash)"
+    " VALUES (:source_id, :kind, :source_url, :rights_status, :imported_at,"
+    " :expires_at, :dataset_hash)"
+    " ON CONFLICT (source_id) DO UPDATE SET kind = excluded.kind,"
+    " source_url = excluded.source_url, rights_status = excluded.rights_status,"
+    " imported_at = excluded.imported_at, dataset_hash = excluded.dataset_hash,"
+    " expires_at = CASE WHEN :clear_expiry THEN NULL"
+    " ELSE COALESCE(excluded.expires_at, sources.expires_at) END"
+)
+_SELECT_SOURCE_STATE: Final = "SELECT rights_status, expires_at FROM sources WHERE source_id = ?"
+_SELECT_STORED_HASHES: Final = "SELECT comment_id, text_hash FROM comments WHERE source_id = ?"
 _SAVEPOINT: Final = "crop_explorer_tx"
 _ORDER: Final = "c.source_id, c.source_order, c.comment_id"
 _VISIBLE_FROM: Final = "comments c JOIN sources s ON s.source_id = c.source_id"
 _IDS_PARAM: Final = "(SELECT value FROM json_each(?))"
-_TOKEN: Final = re.compile(r"\w+")
+_SELECT_OWNERS: Final = (
+    f"SELECT comment_id, source_id FROM comments WHERE comment_id IN {_IDS_PARAM}"
+    " ORDER BY comment_id"
+)
+_INSERT_COMMENT: Final = (
+    "INSERT INTO comments (comment_id, source_id, text, permalink, source_order,"
+    " created_at, imported_at, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_UPDATE_COMMENT: Final = (
+    "UPDATE comments SET text = ?, text_hash = ?, permalink = ?, source_order = ?,"
+    " created_at = ?, imported_at = ? WHERE comment_id = ?"
+)
+_REFRESH_COMMENT: Final = (
+    "UPDATE comments SET permalink = ?, source_order = ?, created_at = ? WHERE comment_id = ?"
+)
+_INSERT_PARSE: Final = (
+    "INSERT INTO parses (comment_id, status, extractor_version, warnings_json, loaded_at)"
+    " VALUES (?, ?, ?, ?, ?)"
+)
+_INSERT_MENTION: Final = (
+    "INSERT INTO mentions (mention_id, comment_id, mention_index, crop, variety_as_written,"
+    " variety_key, topics_json, evidence_quote, extractor_version, status)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_INSERT_FACT: Final = (
+    "INSERT INTO environment_facts (fact_id, mention_id, fact_index, key, value_as_written,"
+    " normalized_value, evidence_quote, applicability, basis)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_SELECT_EXPIRED: Final = (
+    "SELECT source_id FROM sources WHERE expires_at IS NOT NULL AND expires_at <= ?"
+    " ORDER BY source_id"
+)
+_EXTRACTABLE: Final = "c.deleted_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > :now)"
+"""Comments the pipeline may still process: not soft-deleted, source permission not ended."""
+_SELECT_FOR_EXTRACTION: Final = (
+    f"SELECT c.comment_id, c.text, c.text_hash FROM {_VISIBLE_FROM}"
+    " LEFT JOIN parses p ON p.comment_id = c.comment_id"
+    f" WHERE {_EXTRACTABLE} AND (:only_unparsed = 0 OR p.comment_id IS NULL)"
+    f" ORDER BY {_ORDER}"
+)
+_SELECT_EXTRACTABLE_TEXTS: Final = (
+    f"SELECT c.comment_id, c.text, c.text_hash FROM {_VISIBLE_FROM}"
+    f" WHERE c.comment_id IN (SELECT value FROM json_each(:ids)) AND {_EXTRACTABLE}"
+    " ORDER BY c.comment_id"
+)
+_SELECT_STORED_TEXTS: Final = (
+    f"SELECT comment_id, text FROM comments WHERE comment_id IN {_IDS_PARAM} ORDER BY comment_id"
+)
+_SELECT_VIEW_COMMENTS: Final = (
+    "SELECT c.comment_id, c.source_id, s.kind AS source_kind, s.rights_status, c.text,"
+    " c.permalink, c.source_order, c.created_at, p.status AS parse_status"
+    f" FROM {_VISIBLE_FROM} LEFT JOIN parses p ON p.comment_id = c.comment_id"
+)
+_SELECT_SUMMARY: Final = (
+    "SELECT COUNT(DISTINCT c.source_id) AS sources, COUNT(DISTINCT c.comment_id) AS comments,"
+    " COUNT(DISTINCT p.comment_id) AS parsed_comments,"
+    " COUNT(DISTINCT m.mention_id) AS mentions, COUNT(DISTINCT f.fact_id) AS facts"
+    f" FROM {_VISIBLE_FROM}"
+    " LEFT JOIN parses p ON p.comment_id = c.comment_id"
+    " LEFT JOIN mentions m ON m.comment_id = c.comment_id"
+    " LEFT JOIN environment_facts f ON f.mention_id = m.mention_id"
+)
+_SELECT_VIEW_FACTS: Final = (
+    "SELECT f.fact_id, f.mention_id, f.key, f.value_as_written, f.normalized_value,"
+    " f.evidence_quote, f.applicability, f.basis FROM environment_facts f"
+    " JOIN mentions m ON m.mention_id = f.mention_id"
+    " JOIN comments c ON c.comment_id = m.comment_id"
+    " JOIN sources s ON s.source_id = c.source_id"
+)
+_SELECT_VIEW_MENTIONS: Final = (
+    "SELECT m.mention_id, m.comment_id, m.crop, m.variety_as_written, m.variety_key,"
+    " m.topics_json, m.evidence_quote, m.extractor_version FROM mentions m"
+    " JOIN comments c ON c.comment_id = m.comment_id"
+    " JOIN sources s ON s.source_id = c.source_id"
+)
+_WORD_CHAR: Final = re.compile(r"\w")
 _MAX_IDS_IN_MESSAGE: Final = 10
+_REPLACE_HINT: Final = "without replace=True (CLI: ingest --replace)"
 
 Outcome = Literal["inserted", "updated", "unchanged"]
 
@@ -137,9 +286,11 @@ Outcome = Literal["inserted", "updated", "unchanged"]
 def connect(path: Path) -> sqlite3.Connection:
     """Open (creating if needed) the database at ``path`` with the schema initialised.
 
-    Parent directories are created. The connection has foreign keys enforced, rows addressable
-    by column name (:class:`sqlite3.Row`) and SQLite-level autocommit; this module wraps each
-    write in its own transaction.
+    A missing database file is created owner-only (mode 0600) before SQLite opens it, in a
+    parent directory created owner-only (0700) when missing; existing files and directories
+    keep their modes. The connection enforces foreign keys, zeroes deleted content
+    (``PRAGMA secure_delete``), returns rows addressable by column name (:class:`sqlite3.Row`)
+    and uses SQLite-level autocommit; this module wraps each write in its own transaction.
 
     Parameters
     ----------
@@ -154,10 +305,13 @@ def connect(path: Path) -> sqlite3.Connection:
     Raises
     ------
     RuntimeError
-        If SQLite cannot enforce foreign keys.
+        If SQLite cannot enforce foreign keys or secure deletion.
+    sqlite3.DatabaseError
+        If the file is not a database, or not one created by this module (see
+        :func:`init_schema`).
     """
     if path != MEMORY_PATH:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _create_private_file(path)
     conn = sqlite3.connect(path, isolation_level=None)
     try:
         _configure(conn)
@@ -169,23 +323,63 @@ def connect(path: Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create all tables, indexes, the FTS index and its sync triggers if absent (idempotent).
+    """Create the schema in an empty database, or check that an existing one is ours.
+
+    An empty database gets every table, index, the FTS index with its sync triggers, FTS5
+    secure deletion and ``PRAGMA user_version`` :data:`SCHEMA_VERSION`. A database of this
+    version is left as it is (idempotent). Nothing is written to any other database.
 
     Parameters
     ----------
     conn
         Open connection.
+
+    Raises
+    ------
+    sqlite3.DatabaseError
+        If the database has tables but another schema version (including 0, i.e. not created
+        by this module), or lacks the ``ON DELETE CASCADE`` foreign keys that deletion relies on.
     """
     with _transaction(conn):
+        fresh = _check_schema(conn)
         for statement in _SCHEMA:
             conn.execute(statement)
+        if fresh:
+            for setting in _FRESH_SCHEMA_SETTINGS:
+                conn.execute(setting)
+
+
+def _create_private_file(path: Path) -> None:
+    """Create a missing parent directory (0700) and a missing database file (0600)."""
+    path.parent.mkdir(mode=_PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_FILE_MODE)
+    except FileExistsError:
+        return
+    os.close(descriptor)
 
 
 def _configure(conn: sqlite3.Connection) -> None:
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
-        raise RuntimeError("SQLite refused to enable foreign key enforcement")
+    for pragma in _REQUIRED_PRAGMAS:
+        conn.execute(f"PRAGMA {pragma} = ON")
+        if conn.execute(f"PRAGMA {pragma}").fetchone()[0] != 1:
+            raise RuntimeError(f"SQLite refused to enable PRAGMA {pragma}")
+
+
+def _check_schema(conn: sqlite3.Connection) -> bool:
+    """Return whether the database is empty; raise unless it was created by this module."""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version == 0 and not conn.execute(_HAS_TABLES).fetchone()[0]:
+        return True
+    missing = _CASCADES - {tuple(row) for row in conn.execute(_SELECT_FOREIGN_KEYS)}
+    if version != SCHEMA_VERSION or missing:
+        detail = "; it lacks the cascading foreign keys deletion relies on" if missing else ""
+        raise sqlite3.DatabaseError(
+            f"unsupported database schema (version {version}, expected {SCHEMA_VERSION}{detail})"
+            ": it was not created by this version of crop_explorer; use a new database file"
+        )
+    return False
 
 
 @contextmanager
@@ -205,62 +399,77 @@ def _transaction(conn: sqlite3.Connection) -> Iterator[None]:
 
 
 def sync_source_comments(
-    conn: sqlite3.Connection, source: SourceRecord, comments: Sequence[CommentRecord]
+    conn: sqlite3.Connection,
+    source: SourceRecord,
+    comments: Sequence[CommentRecord],
+    *,
+    replace: bool = False,
+    clear_expiry: bool = False,
 ) -> ImportStats:
     """Make the stored comments of ``source`` equal ``comments`` (idempotent re-import).
 
-    The ``sources`` row is upserted. New ids are inserted; ids whose text hash is unchanged keep
+    The ``sources`` row is upserted; a ``source.expires_at`` of ``None`` keeps the stored
+    expiry unless ``clear_expiry``. New ids are inserted; ids whose text hash is unchanged keep
     their extraction (permalink, ``created_at`` and ``source_order`` are refreshed); ids whose
     text changed are updated and lose their extraction, because its quotes may no longer be
     substrings; stored ids absent from ``comments`` are deleted with everything derived from
     them. A soft-deleted comment stays soft-deleted.
+
+    Re-importing an existing source is refused when its stored expiry is at or before
+    ``source.imported_at`` (purge or delete it first), and, unless ``replace``, when it would
+    change the stored ``rights_status`` or when the source has stored comments and ``comments``
+    shares none of their ids (a different dataset under the same source id).
 
     Parameters
     ----------
     conn
         Open connection.
     source
-        Provenance and rights state of the dataset.
+        Provenance and rights state of the dataset; ``imported_at`` is the current time.
     comments
         The complete current contents of the source.
+    replace
+        Allow replacing every stored comment and changing the rights status.
+    clear_expiry
+        Remove the stored expiry (``source.expires_at`` must then be ``None``).
 
     Returns
     -------
     ImportStats
-        Counts of inserted, updated, unchanged and deleted comments.
+        Counts of inserted, updated, unchanged and deleted comments, plus the effective rights
+        status and expiry stored for the source.
 
     Raises
     ------
     ValueError
-        If ``comments`` repeats an id, an id already belongs to another source, or a timestamp
-        is not canonical UTC. Nothing is written in that case.
+        If ``comments`` repeats an id, an id already belongs to another source, a timestamp is
+        not canonical UTC, ``clear_expiry`` is combined with an expiry, or the re-import is
+        refused as described above. Messages carry ids and counts, never text. Nothing is
+        written in that case.
     """
-    _check_source(source)
+    _check_source(source, clear_expiry=clear_expiry)
     _check_records(comments)
     with _transaction(conn):
-        _upsert_source(conn, source)
         existing = _stored_hashes(conn, source.source_id)
-        new_ids = [record.comment_id for record in comments if record.comment_id not in existing]
-        _check_collisions(conn, source.source_id, new_ids)
+        _check_reimport(conn, source, existing, comments, replace=replace)
+        _upsert_source(conn, source, clear_expiry=clear_expiry)
+        _check_collisions(conn, source.source_id, comments, existing)
         outcomes = _apply_records(conn, source, comments, existing)
-        absent = sorted(existing.keys() - {record.comment_id for record in comments})
-        conn.executemany("DELETE FROM comments WHERE comment_id = ?", [(i,) for i in absent])
-    stats = ImportStats(source_id=source.source_id, deleted=len(absent), **outcomes)
-    logger.info(
-        "Synced source {}: {} inserted, {} updated, {} unchanged, {} deleted",
-        stats.source_id,
-        stats.inserted,
-        stats.updated,
-        stats.unchanged,
-        stats.deleted,
-    )
+        deleted = _delete_absent(conn, existing, comments)
+        if deleted or outcomes["updated"]:
+            conn.execute(_OPTIMIZE_FTS)
+        stats = _import_stats(conn, source.source_id, outcomes, deleted)
+    _log_import(stats)
     return stats
 
 
-def _check_source(source: SourceRecord) -> None:
+def _check_source(source: SourceRecord, *, clear_expiry: bool) -> None:
     require_utc_iso(source.imported_at, "imported_at")
-    if source.expires_at is not None:
-        require_utc_iso(source.expires_at, "expires_at")
+    if source.expires_at is None:
+        return
+    require_utc_iso(source.expires_at, "expires_at")
+    if clear_expiry:
+        raise ValueError("clear_expiry and a new expires_at are mutually exclusive")
 
 
 def _check_records(records: Sequence[CommentRecord]) -> None:
@@ -273,33 +482,68 @@ def _check_records(records: Sequence[CommentRecord]) -> None:
             require_utc_iso(record.created_at, f"created_at of comment {record.comment_id!r}")
 
 
-def _upsert_source(conn: sqlite3.Connection, source: SourceRecord) -> None:
-    conn.execute(
-        "INSERT INTO sources (source_id, kind, source_url, rights_status, imported_at,"
-        " expires_at, dataset_hash)"
-        " VALUES (:source_id, :kind, :source_url, :rights_status, :imported_at,"
-        " :expires_at, :dataset_hash)"
-        " ON CONFLICT (source_id) DO UPDATE SET kind = excluded.kind,"
-        " source_url = excluded.source_url, rights_status = excluded.rights_status,"
-        " imported_at = excluded.imported_at, expires_at = excluded.expires_at,"
-        " dataset_hash = excluded.dataset_hash",
-        source.model_dump(),
-    )
+def _check_reimport(
+    conn: sqlite3.Connection,
+    source: SourceRecord,
+    existing: Mapping[str, str],
+    comments: Sequence[CommentRecord],
+    *,
+    replace: bool,
+) -> None:
+    """Refuse a re-import that would revive expired content or silently replace a source."""
+    stored = conn.execute(_SELECT_SOURCE_STATE, (source.source_id,)).fetchone()
+    if stored is None:
+        return
+    _refuse_expired(source, stored["expires_at"])
+    if not replace:
+        _refuse_rights_change(source, stored["rights_status"])
+        _refuse_disjoint(source.source_id, existing, comments)
+
+
+def _refuse_expired(source: SourceRecord, stored_expiry: str | None) -> None:
+    if stored_expiry is not None and stored_expiry <= source.imported_at:
+        raise ValueError(
+            f"source {source.source_id!r} expired at {stored_expiry}; its content may not be "
+            "re-imported: run purge-expired or delete-source first"
+        )
+
+
+def _refuse_rights_change(source: SourceRecord, stored_rights: str) -> None:
+    if stored_rights != source.rights_status:
+        raise ValueError(
+            f"source {source.source_id!r} is stored with rights_status {stored_rights!r}; "
+            f"refusing to change it to {source.rights_status!r} {_REPLACE_HINT}"
+        )
+
+
+def _refuse_disjoint(
+    source_id: str, existing: Mapping[str, str], comments: Sequence[CommentRecord]
+) -> None:
+    if existing and existing.keys().isdisjoint(record.comment_id for record in comments):
+        raise ValueError(
+            f"source {source_id!r} holds {len(existing)} stored comment(s) and the new import "
+            f"of {len(comments)} comment(s) shares none of their ids; refusing to replace them "
+            f"{_REPLACE_HINT}"
+        )
+
+
+def _upsert_source(conn: sqlite3.Connection, source: SourceRecord, *, clear_expiry: bool) -> None:
+    conn.execute(_UPSERT_SOURCE, {**source.model_dump(), "clear_expiry": int(clear_expiry)})
 
 
 def _stored_hashes(conn: sqlite3.Connection, source_id: str) -> dict[str, str]:
-    rows = conn.execute(
-        "SELECT comment_id, text_hash FROM comments WHERE source_id = ?", (source_id,)
-    )
+    rows = conn.execute(_SELECT_STORED_HASHES, (source_id,))
     return {str(row["comment_id"]): str(row["text_hash"]) for row in rows}
 
 
-def _check_collisions(conn: sqlite3.Connection, source_id: str, new_ids: Sequence[str]) -> None:
-    rows = conn.execute(
-        f"SELECT comment_id, source_id FROM comments WHERE comment_id IN {_IDS_PARAM}"
-        " ORDER BY comment_id",
-        (_json_ids(new_ids),),
-    ).fetchall()
+def _check_collisions(
+    conn: sqlite3.Connection,
+    source_id: str,
+    comments: Sequence[CommentRecord],
+    existing: Mapping[str, str],
+) -> None:
+    new_ids = [record.comment_id for record in comments if record.comment_id not in existing]
+    rows = conn.execute(_SELECT_OWNERS, (_json_ids(new_ids),)).fetchall()
     if rows:
         owners = ", ".join(sorted({str(row["source_id"]) for row in rows}))
         raise ValueError(
@@ -323,6 +567,41 @@ def _apply_records(
     return outcomes
 
 
+def _delete_absent(
+    conn: sqlite3.Connection, existing: Mapping[str, str], records: Sequence[CommentRecord]
+) -> int:
+    absent = sorted(existing.keys() - {record.comment_id for record in records})
+    conn.executemany("DELETE FROM comments WHERE comment_id = ?", [(i,) for i in absent])
+    return len(absent)
+
+
+def _import_stats(
+    conn: sqlite3.Connection, source_id: str, outcomes: dict[Outcome, int], deleted: int
+) -> ImportStats:
+    stored = conn.execute(_SELECT_SOURCE_STATE, (source_id,)).fetchone()
+    return ImportStats(
+        source_id=source_id,
+        deleted=deleted,
+        rights_status=stored["rights_status"],
+        expires_at=stored["expires_at"],
+        **outcomes,
+    )
+
+
+def _log_import(stats: ImportStats) -> None:
+    logger.info(
+        "Synced source {}: {} inserted, {} updated, {} unchanged, {} deleted; rights {}, "
+        "expires {}",
+        stats.source_id,
+        stats.inserted,
+        stats.updated,
+        stats.unchanged,
+        stats.deleted,
+        stats.rights_status,
+        stats.expires_at,
+    )
+
+
 def _classify(record: CommentRecord, stored_hash: str | None) -> Outcome:
     if stored_hash is None:
         return "inserted"
@@ -335,8 +614,7 @@ def _text_hash(text: str) -> str:
 
 def _insert_comment(conn: sqlite3.Connection, source: SourceRecord, record: CommentRecord) -> None:
     conn.execute(
-        "INSERT INTO comments (comment_id, source_id, text, permalink, source_order,"
-        " created_at, imported_at, text_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        _INSERT_COMMENT,
         (
             record.comment_id,
             source.source_id,
@@ -352,8 +630,7 @@ def _insert_comment(conn: sqlite3.Connection, source: SourceRecord, record: Comm
 
 def _update_comment(conn: sqlite3.Connection, source: SourceRecord, record: CommentRecord) -> None:
     conn.execute(
-        "UPDATE comments SET text = ?, text_hash = ?, permalink = ?, source_order = ?,"
-        " created_at = ?, imported_at = ? WHERE comment_id = ?",
+        _UPDATE_COMMENT,
         (
             record.text,
             _text_hash(record.text),
@@ -372,7 +649,7 @@ def _refresh_comment(
 ) -> None:
     del source  # unchanged text keeps its original import time
     conn.execute(
-        "UPDATE comments SET permalink = ?, source_order = ?, created_at = ? WHERE comment_id = ?",
+        _REFRESH_COMMENT,
         (record.permalink, record.source_order, record.created_at, record.comment_id),
     )
 
@@ -458,8 +735,7 @@ def _delete_extraction(conn: sqlite3.Connection, comment_id: str) -> None:
 
 def _insert_parse(conn: sqlite3.Connection, validated: ValidatedComment, loaded_at: str) -> None:
     conn.execute(
-        "INSERT INTO parses (comment_id, status, extractor_version, warnings_json, loaded_at)"
-        " VALUES (?, ?, ?, ?, ?)",
+        _INSERT_PARSE,
         (
             validated.comment_id,
             validated.status,
@@ -474,31 +750,30 @@ def _insert_mention(
     conn: sqlite3.Connection, validated: ValidatedComment, index: int, mention: ValidatedMention
 ) -> None:
     mention_id = f"{validated.comment_id}#m{index}"
-    conn.execute(
-        "INSERT INTO mentions (mention_id, comment_id, mention_index, crop, variety_as_written,"
-        " variety_key, topics_json, evidence_quote, extractor_version, status)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            mention_id,
-            validated.comment_id,
-            index,
-            mention.crop,
-            mention.variety_as_written,
-            mention.variety_key,
-            json.dumps(list(mention.topics)),
-            mention.evidence_quote,
-            validated.extractor_version,
-            validated.status,
-        ),
-    )
+    conn.execute(_INSERT_MENTION, _mention_values(validated, mention_id, index, mention))
     conn.executemany(
-        "INSERT INTO environment_facts (fact_id, mention_id, fact_index, key, value_as_written,"
-        " normalized_value, evidence_quote, applicability, basis)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        _INSERT_FACT,
         [
             (f"{mention_id}#f{j}", mention_id, j, *_fact_values(fact))
             for j, fact in enumerate(mention.facts)
         ],
+    )
+
+
+def _mention_values(
+    validated: ValidatedComment, mention_id: str, index: int, mention: ValidatedMention
+) -> tuple[str | int | None, ...]:
+    return (
+        mention_id,
+        validated.comment_id,
+        index,
+        mention.crop,
+        mention.variety_as_written,
+        mention.variety_key,
+        json.dumps(list(mention.topics)),
+        mention.evidence_quote,
+        validated.extractor_version,
+        validated.status,
     )
 
 
@@ -518,6 +793,8 @@ def _fact_values(fact: ValidatedFact) -> tuple[str | None, ...]:
 
 def delete_source(conn: sqlite3.Connection, source_id: str) -> int:
     """Delete a source and, by cascade, its comments, parses, mentions, facts and FTS entries.
+
+    The FTS index is optimised afterwards, so no deleted word stays readable in it.
 
     Parameters
     ----------
@@ -544,6 +821,7 @@ def delete_source(conn: sqlite3.Connection, source_id: str) -> int:
             ).fetchone()[0]
         )
         conn.execute("DELETE FROM sources WHERE source_id = ?", (source_id,))
+        conn.execute(_OPTIMIZE_FTS)
     logger.info("Deleted source {} with {} comment(s)", source_id, removed)
     return removed
 
@@ -556,6 +834,8 @@ def _require_source(conn: sqlite3.Connection, source_id: str) -> None:
 
 def purge_expired(conn: sqlite3.Connection, now: str) -> list[str]:
     """Delete every source whose ``expires_at`` is at or before ``now`` (with cascade).
+
+    The FTS index is optimised afterwards when anything was purged.
 
     Parameters
     ----------
@@ -576,13 +856,11 @@ def purge_expired(conn: sqlite3.Connection, now: str) -> list[str]:
     """
     require_utc_iso(now, "now")
     with _transaction(conn):
-        rows = conn.execute(
-            "SELECT source_id FROM sources WHERE expires_at IS NOT NULL AND expires_at <= ?"
-            " ORDER BY source_id",
-            (now,),
-        ).fetchall()
+        rows = conn.execute(_SELECT_EXPIRED, (now,)).fetchall()
         expired = [str(row["source_id"]) for row in rows]
         conn.executemany("DELETE FROM sources WHERE source_id = ?", [(i,) for i in expired])
+        if expired:
+            conn.execute(_OPTIMIZE_FTS)
     logger.info("Purged {} expired source(s): {}", len(expired), expired)
     return expired
 
@@ -591,7 +869,9 @@ def purge_expired(conn: sqlite3.Connection, now: str) -> list[str]:
 
 
 def stored_texts(conn: sqlite3.Connection, comment_ids: Sequence[str]) -> dict[str, str]:
-    """Return the stored text of each known id (pipeline-internal; ignores viewer scope).
+    """Return the stored text of each known id (pipeline-internal; ignores scope and expiry).
+
+    Use :func:`extractable_texts` to decide what may still be processed.
 
     Parameters
     ----------
@@ -610,18 +890,50 @@ def stored_texts(conn: sqlite3.Connection, comment_ids: Sequence[str]) -> dict[s
     TypeError
         If ``comment_ids`` is a bare string or holds non-string ids.
     """
-    rows = conn.execute(
-        f"SELECT comment_id, text FROM comments WHERE comment_id IN {_IDS_PARAM}"
-        " ORDER BY comment_id",
-        (_json_ids(comment_ids),),
-    )
+    rows = conn.execute(_SELECT_STORED_TEXTS, (_json_ids(comment_ids),))
     return {str(row["comment_id"]): str(row["text"]) for row in rows}
+
+
+def extractable_texts(
+    conn: sqlite3.Connection, comment_ids: Sequence[str], now: str
+) -> dict[str, tuple[str, str]]:
+    """Return text and text hash of each id the pipeline may still process (pipeline-internal).
+
+    Rights status is ignored, as in :func:`iter_comments_for_extraction`, but unknown and
+    soft-deleted comments and comments of sources whose ``expires_at`` is at or before ``now``
+    are absent: permission to derive anything from them has ended.
+
+    Parameters
+    ----------
+    conn
+        Open connection.
+    comment_ids
+        Ids to look up.
+    now
+        Canonical UTC current time.
+
+    Returns
+    -------
+    dict[str, tuple[str, str]]
+        ``comment_id -> (text, text_hash)``, ordered by id; ``text_hash`` is the SHA-256 hex
+        digest of the UTF-8 text.
+
+    Raises
+    ------
+    TypeError
+        If ``comment_ids`` is a bare string or holds non-string ids.
+    ValueError
+        If ``now`` is not canonical UTC.
+    """
+    require_utc_iso(now, "now")
+    rows = conn.execute(_SELECT_EXTRACTABLE_TEXTS, {"ids": _json_ids(comment_ids), "now": now})
+    return {item.comment_id: (item.text, item.text_hash) for item in map(_extractable, rows)}
 
 
 def iter_comments_for_extraction(
     conn: sqlite3.Connection, only_unparsed: bool, now: str
-) -> list[tuple[str, str]]:
-    """List ``(comment_id, text)`` to send to the offline extractor (pipeline-internal).
+) -> list[ExtractableComment]:
+    """List the comments to send to the offline extractor (pipeline-internal).
 
     Rights status is ignored (extraction runs on private data), but comments of sources whose
     ``expires_at`` is at or before ``now`` are excluded: permission to process them has ended
@@ -639,8 +951,8 @@ def iter_comments_for_extraction(
 
     Returns
     -------
-    list[tuple[str, str]]
-        Comment ids with their exact stored text.
+    list[ExtractableComment]
+        Comment ids with their exact stored text and its hash.
 
     Raises
     ------
@@ -648,15 +960,12 @@ def iter_comments_for_extraction(
         If ``now`` is not canonical UTC.
     """
     require_utc_iso(now, "now")
-    rows = conn.execute(
-        f"SELECT c.comment_id, c.text FROM {_VISIBLE_FROM}"
-        " LEFT JOIN parses p ON p.comment_id = c.comment_id"
-        " WHERE c.deleted_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ?)"
-        " AND (? = 0 OR p.comment_id IS NULL)"
-        f" ORDER BY {_ORDER}",
-        (now, int(only_unparsed)),
-    )
-    return [(str(row["comment_id"]), str(row["text"])) for row in rows]
+    params = {"now": now, "only_unparsed": int(only_unparsed)}
+    return [_extractable(row) for row in conn.execute(_SELECT_FOR_EXTRACTION, params)]
+
+
+def _extractable(row: sqlite3.Row) -> ExtractableComment:
+    return ExtractableComment(str(row["comment_id"]), str(row["text"]), str(row["text_hash"]))
 
 
 def _json_ids(comment_ids: Sequence[str]) -> str:
@@ -675,11 +984,15 @@ def _id_list(ids: Sequence[str]) -> str:
 
 
 def fts_query(text: str) -> str | None:
-    """Turn free user text into a safe FTS5 query: every word a quoted prefix term, ANDed.
+    r"""Turn free user text into a safe FTS5 query: every word a quoted prefix term, ANDed.
 
-    FTS5 syntax in the input (quotes, ``*``, ``-``, ``AND``/``OR``/``NOT``/``NEAR``, column
-    filters) is neutralised: only runs of Unicode word characters survive, each inside double
-    quotes. Matching is case-insensitive, diacritic-insensitive and porter-stemmed.
+    The text is NFC-normalised, then split into words: runs of Unicode word characters
+    (``\w``) together with the combining marks inside them (a decomposed ``n`` + U+0303 stays
+    one word, as in FTS5's own tokenizer). Repeated words are dropped and at most
+    :data:`MAX_FTS_TOKENS` distinct words are kept, in first-seen order. FTS5 syntax in the
+    input (quotes, ``*``, ``-``, ``AND``/``OR``/``NOT``/``NEAR``, column filters) is
+    neutralised: only words survive, each inside double quotes. Matching is case-insensitive,
+    diacritic-insensitive and porter-stemmed.
 
     Parameters
     ----------
@@ -691,10 +1004,28 @@ def fts_query(text: str) -> str | None:
     str | None
         The MATCH expression, or ``None`` when ``text`` has no word characters (no text filter).
     """
-    tokens = _TOKEN.findall(text)
+    tokens = _search_tokens(text)
     if not tokens:
         return None
     return " ".join(f'"{token}"*' for token in tokens)
+
+
+def _search_tokens(text: str) -> list[str]:
+    """Return the distinct words of ``text`` (NFC) in first-seen order, capped."""
+    runs = groupby(unicodedata.normalize("NFC", text), key=_is_token_char)
+    words = (_from_first_word_char("".join(chars)) for keep, chars in runs if keep)
+    return list(dict.fromkeys(word for word in words if word))[:MAX_FTS_TOKENS]
+
+
+def _is_token_char(char: str) -> bool:
+    r"""Word character (``\w``, i.e. alphanumeric or ``_``) or combining mark."""
+    return char.isalnum() or char == "_" or unicodedata.category(char).startswith("M")
+
+
+def _from_first_word_char(run: str) -> str:
+    """Drop combining marks before the first word character (a mark cannot start a word)."""
+    first = _WORD_CHAR.search(run)
+    return "" if first is None else run[first.start() :]
 
 
 def visible_comment_ids(
@@ -773,13 +1104,8 @@ def load_comment_views(
     with _transaction(conn):  # one consistent snapshot across the three reads
         facts = _facts_by_mention(conn, where, params)
         mentions = _mentions_by_comment(conn, where, params, facts)
-        rows = conn.execute(
-            "SELECT c.comment_id, c.source_id, s.kind AS source_kind, s.rights_status, c.text,"
-            " c.permalink, c.source_order, c.created_at, p.status AS parse_status"
-            f" FROM {_VISIBLE_FROM} LEFT JOIN parses p ON p.comment_id = c.comment_id"
-            f" WHERE {where} ORDER BY {_ORDER}",
-            params,
-        ).fetchall()
+        sql = f"{_SELECT_VIEW_COMMENTS} WHERE {where} ORDER BY {_ORDER}"
+        rows = conn.execute(sql, params).fetchall()
     return [_comment_view(row, mentions.get(str(row["comment_id"]), ())) for row in rows]
 
 
@@ -807,17 +1133,7 @@ def summary_counts(conn: sqlite3.Connection, scope: ViewerScope, now: str) -> di
         If ``scope`` is unknown or ``now`` is not canonical UTC.
     """
     where, params = visibility_clause(scope, now)
-    row = conn.execute(
-        "SELECT COUNT(DISTINCT c.source_id) AS sources, COUNT(DISTINCT c.comment_id) AS comments,"
-        " COUNT(DISTINCT p.comment_id) AS parsed_comments,"
-        " COUNT(DISTINCT m.mention_id) AS mentions, COUNT(DISTINCT f.fact_id) AS facts"
-        f" FROM {_VISIBLE_FROM}"
-        " LEFT JOIN parses p ON p.comment_id = c.comment_id"
-        " LEFT JOIN mentions m ON m.comment_id = c.comment_id"
-        " LEFT JOIN environment_facts f ON f.mention_id = m.mention_id"
-        f" WHERE {where}",
-        params,
-    ).fetchone()
+    row = conn.execute(f"{_SELECT_SUMMARY} WHERE {where}", params).fetchone()
     return {key: int(row[key]) for key in SUMMARY_KEYS}
 
 
@@ -833,17 +1149,9 @@ def _visible_filter(
 def _facts_by_mention(
     conn: sqlite3.Connection, where: str, params: Sequence[str]
 ) -> dict[str, tuple[FactView, ...]]:
-    rows = conn.execute(
-        "SELECT f.fact_id, f.mention_id, f.key, f.value_as_written, f.normalized_value,"
-        " f.evidence_quote, f.applicability, f.basis FROM environment_facts f"
-        " JOIN mentions m ON m.mention_id = f.mention_id"
-        " JOIN comments c ON c.comment_id = m.comment_id"
-        " JOIN sources s ON s.source_id = c.source_id"
-        f" WHERE {where} ORDER BY f.mention_id, f.fact_index",
-        params,
-    )
+    sql = f"{_SELECT_VIEW_FACTS} WHERE {where} ORDER BY f.mention_id, f.fact_index"
     grouped: defaultdict[str, list[FactView]] = defaultdict(list)
-    for row in rows:
+    for row in conn.execute(sql, params):
         grouped[str(row["mention_id"])].append(_fact_view(row))
     return {mention_id: tuple(facts) for mention_id, facts in grouped.items()}
 
@@ -854,16 +1162,9 @@ def _mentions_by_comment(
     params: Sequence[str],
     facts: Mapping[str, tuple[FactView, ...]],
 ) -> dict[str, tuple[MentionView, ...]]:
-    rows = conn.execute(
-        "SELECT m.mention_id, m.comment_id, m.crop, m.variety_as_written, m.variety_key,"
-        " m.topics_json, m.evidence_quote, m.extractor_version FROM mentions m"
-        " JOIN comments c ON c.comment_id = m.comment_id"
-        " JOIN sources s ON s.source_id = c.source_id"
-        f" WHERE {where} ORDER BY m.comment_id, m.mention_index",
-        params,
-    )
+    sql = f"{_SELECT_VIEW_MENTIONS} WHERE {where} ORDER BY m.comment_id, m.mention_index"
     grouped: defaultdict[str, list[MentionView]] = defaultdict(list)
-    for row in rows:
+    for row in conn.execute(sql, params):
         mention_facts = facts.get(str(row["mention_id"]), ())
         grouped[str(row["comment_id"])].append(_mention_view(row, mention_facts))
     return {comment_id: tuple(mentions) for comment_id, mentions in grouped.items()}

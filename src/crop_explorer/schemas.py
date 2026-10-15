@@ -6,9 +6,9 @@ Every model forbids unknown fields so malformed upstream records fail loudly.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Literal, get_args
+from typing import Literal, Self, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Topic = Literal[
     "flavor",
@@ -63,6 +63,14 @@ SCOPE_TO_RIGHTS: dict[ImportScope, RightsStatus] = {
 
 _STRICT = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=False)
 
+MAX_VALUE_CHARS = 200
+"""Longest ``value_as_written`` an extractor may emit: a value is a short phrase, and the cap
+bounds the validator's work on adversarial lines."""
+MAX_QUOTE_CHARS = 2000
+"""Longest evidence quote an extractor may emit (mention or fact)."""
+TEXT_HASH_PATTERN = r"^[0-9a-f]{64}$"
+"""A lowercase SHA-256 hex digest, as ``export-for-extraction`` writes ``text_hash``."""
+
 
 class EnvironmentFact(BaseModel):
     """One source-supported growing-environment fact attached to a variety mention."""
@@ -70,9 +78,9 @@ class EnvironmentFact(BaseModel):
     model_config = _STRICT
 
     key: EnvKey
-    value_as_written: str = Field(min_length=1)
+    value_as_written: str = Field(min_length=1, max_length=MAX_VALUE_CHARS)
     normalized_value: str | None = None
-    evidence_quote: str = Field(min_length=1)
+    evidence_quote: str = Field(min_length=1, max_length=MAX_QUOTE_CHARS)
     applicability: Applicability
     basis: Basis
 
@@ -85,16 +93,22 @@ class VarietyMention(BaseModel):
     crop: str | None = None
     variety_as_written: str | None = None
     topics: list[Topic] = Field(default_factory=list)
-    evidence_quote: str = Field(min_length=1)
+    evidence_quote: str = Field(min_length=1, max_length=MAX_QUOTE_CHARS)
     environment: list[EnvironmentFact] = Field(default_factory=list)
 
 
 class ParsedComment(BaseModel):
-    """One line of extractor output JSONL (the model step's deliverable)."""
+    """One line of extractor output JSONL (the model step's deliverable).
+
+    ``text_hash`` is copied from the export line: the SHA-256 hex digest of the UTF-8 comment
+    text the extraction was made from. The loader rejects the line when the stored text has
+    changed since (``stale_text``).
+    """
 
     model_config = _STRICT
 
     comment_id: str = Field(min_length=1)
+    text_hash: str = Field(pattern=TEXT_HASH_PATTERN)
     extractor_version: str = Field(min_length=1)
     mentions: list[VarietyMention] = Field(default_factory=list)
     status: ParseStatus
@@ -153,7 +167,13 @@ class ValidatedComment(BaseModel):
 
 
 class ColumnMapping(BaseModel):
-    """Maps columns/keys of a user-supplied export onto the comment record fields."""
+    """Maps columns/keys of a user-supplied export onto the comment record fields.
+
+    The id and text columns are always required. The permalink and date columns are optional
+    (absent → ``None``) unless ``permalink_required`` / ``date_required`` is set, which the
+    CLI does when the operator names the column explicitly: a mistyped name then fails instead
+    of silently dropping every value.
+    """
 
     model_config = _STRICT
 
@@ -161,6 +181,18 @@ class ColumnMapping(BaseModel):
     text_col: str = "text"
     permalink_col: str | None = "permalink"
     date_col: str | None = "created_at"
+    permalink_required: bool = False
+    date_required: bool = False
+
+    @model_validator(mode="after")
+    def _required_columns_are_named(self) -> Self:
+        for column, required, name in (
+            (self.permalink_col, self.permalink_required, "permalink"),
+            (self.date_col, self.date_required, "date"),
+        ):
+            if required and column is None:
+                raise ValueError(f"{name}_required needs a {name}_col")
+        return self
 
 
 class CommentRecord(BaseModel):
@@ -190,7 +222,11 @@ class SourceRecord(BaseModel):
 
 
 class ImportStats(BaseModel):
-    """Outcome counts of syncing one source's comments into the database."""
+    """Outcome of syncing one source's comments: counts and the source's effective rights.
+
+    ``rights_status`` and ``expires_at`` are the values stored after the import (an import
+    that names no expiry keeps the stored one), so the operator sees the rights state in force.
+    """
 
     model_config = _STRICT
 
@@ -199,6 +235,8 @@ class ImportStats(BaseModel):
     updated: int
     unchanged: int
     deleted: int
+    rights_status: RightsStatus
+    expires_at: str | None
 
 
 def to_utc_iso(value: str | datetime | date) -> str:

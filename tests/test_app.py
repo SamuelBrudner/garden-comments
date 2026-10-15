@@ -5,12 +5,16 @@ synthetic fixtures (public demo data), one extra synthetic comment full of Markd
 ``private_unverified`` comment with rich, matching extracted facts. Covers SPEC §2 (Browse screen,
 grouping, strict toggle, chips), §6 (state filter and map notes), §9/§11 #15 (rights isolation:
 nothing private reaches the public view), §11 #1 (text search finds unextracted comments), #16
-(limitation message) and #17 (inputs exist and Clear resets them), and that untrusted comment text
-renders literally.
+(limitation message), #17 (inputs exist, Clear resets them, source references open: a cleared
+comment's permalink becomes a "Source ↗" link while synthetic rows never link out) and #18 (every
+card and the map carry their provenance labels), that untrusted comment text renders literally,
+and that a private-scope viewer refuses to run unless it listens on this computer only. Phone
+width is covered by ``tests/test_browser.py``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -24,6 +28,7 @@ from typing import Any
 import pytest
 import yaml
 from loguru import logger
+from streamlit import config as streamlit_config
 from streamlit.testing.v1 import AppTest
 
 from crop_explorer import db, ui
@@ -46,6 +51,15 @@ MARKDOWN_TEXT = (
     "# Not a heading :smile: $x^2$ www.evil.example"
 )
 INJECTION_ID = "syn-0020"
+PAGE_SIZE = 100
+"""Cards per page in the test config: every group fits on one page unless a test lowers it."""
+CLEARED_ID = "clr-0001"
+CLEARED_TEXT = "CLEAREDLINK Moonbeam okra in containers in Omaha, Nebraska."
+CLEARED_URL = "https://www.youtube.com/watch?v=abc123&lc=Ug-cleared"
+UNLINKED_ID = "clr-0002"
+UNLINKED_TEXT = "CLEAREDNOLINK Our okra never set pods."
+SYNTH_LINK_ID = "syn-link-0001"
+SYNTH_LINK_TEXT = "SYNTHLINK A fictional demo comment about okra."
 CT_COMMENTS = ("syn-0006", "syn-0013", "syn-0036", "syn-0063")
 FULL_MATCHES = ("syn-0001", "syn-0003", "syn-0006")
 
@@ -71,6 +85,10 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> Path:
     return path
 
 
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _import(conn: Any, path: Path, source_id: str, rights: RightsStatus) -> None:
     source = build_source(
         path,
@@ -85,10 +103,11 @@ def _import(conn: Any, path: Path, source_id: str, rights: RightsStatus) -> None
 
 
 def _private_extraction() -> dict[str, Any]:
-    def fact(key: str, written: str, quote: str) -> dict[str, str]:
+    def fact(key: str, written: str, value: str, quote: str) -> dict[str, str]:
         return {
             "key": key,
             "value_as_written": written,
+            "normalized_value": value,
             "evidence_quote": quote,
             "applicability": "this_mention",
             "basis": "reported_garden_context",
@@ -96,6 +115,7 @@ def _private_extraction() -> dict[str, Any]:
 
     return {
         "comment_id": PRIVATE_ID,
+        "text_hash": _sha256(PRIVATE_TEXT),
         "extractor_version": "test-v1",
         "status": "parsed",
         "mentions": [
@@ -105,20 +125,23 @@ def _private_extraction() -> dict[str, Any]:
                 "topics": ["growing_method"],
                 "evidence_quote": "Brandywine grown in containers",
                 "environment": [
-                    fact("method", "containers", "grown in containers"),
-                    fact("zone", "zone 6b", "in zone 6b"),
-                    fact("region", "Hartford, CT", "near Hartford, CT"),
+                    fact("method", "containers", "container", "grown in containers"),
+                    fact("zone", "zone 6b", "6b", "in zone 6b"),
+                    fact("region", "Hartford, CT", "US-CT", "near Hartford, CT"),
                 ],
             }
         ],
     }
 
 
-def _write_config(root: Path, db_path: Path) -> Path:
+def _write_config(
+    root: Path, db_path: Path, *, page_size: int = PAGE_SIZE, name: str = "config.yaml"
+) -> Path:
     raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
     raw["database"]["path"] = str(db_path)
+    raw["viewer"]["page_size"] = page_size
     raw["logging"] = {"level": "WARNING", "json_path": None}
-    config = root / "config.yaml"
+    config = root / name
     config.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return config
 
@@ -173,15 +196,27 @@ def _restore_loguru() -> Iterator[None]:
     logger.add(_write_stderr, level="DEBUG")
 
 
+@pytest.fixture(autouse=True)
+def _restore_server_address() -> Iterator[None]:
+    """Tests may change Streamlit's process-wide ``server.address``; put it back afterwards."""
+    original = streamlit_config.get_option("server.address")
+    yield
+    streamlit_config.set_option("server.address", original)
+
+
 def run_app(
     monkeypatch: pytest.MonkeyPatch,
     env: AppEnv,
     *,
     scope: str = "public",
     db_path: Path | None = None,
+    config: Path | None = None,
+    address: str | None = "localhost",
+    extra_args: Sequence[str] = (),
 ) -> AppTest:
-    argv = ["app.py", "--config", str(env.config), "--db", str(db_path or env.db_path)]
-    monkeypatch.setattr(sys, "argv", [*argv, "--scope", scope])
+    streamlit_config.set_option("server.address", address)
+    argv = ["app.py", "--config", str(config or env.config), "--db", str(db_path or env.db_path)]
+    monkeypatch.setattr(sys, "argv", [*argv, "--scope", scope, *extra_args])
     at = AppTest.from_file(str(APP), default_timeout=TIMEOUT)
     return at.run()
 
@@ -233,6 +268,27 @@ def shown_ids(node: Any, env: AppEnv) -> set[str]:
     return {cid for cid, text in env.texts.items() if ui.escape_markdown(text) in rendered}
 
 
+def walk(node: Any) -> Iterator[Any]:
+    """Yield ``node`` and every descendant in display order."""
+    yield node
+    children = getattr(node, "children", None) or {}
+    for index in sorted(children):
+        yield from walk(children[index])
+
+
+def link_buttons(at: AppTest) -> list[tuple[str, str]]:
+    return [(button.proto.label, button.proto.url) for button in at.get("link_button")]
+
+
+def expander(at: AppTest, prefix: str) -> Any:
+    (found,) = [e for e in at.expander if e.label.startswith(prefix)]
+    return found
+
+
+def infos(at: AppTest) -> list[str]:
+    return [str(element.value) for element in at.info]
+
+
 def subheaders(at: AppTest) -> list[str]:
     return [element.value for element in at.subheader]
 
@@ -274,7 +330,10 @@ class TestBrowseScreen:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
-        assert "Only 35 of 70 reports mention growing conditions." in [i.value for i in at.info]
+        assert (
+            "Only 35 of 70 reports mention comparable growing conditions (4 not yet analysed)."
+            in infos(at)
+        )
 
     def test_search_and_condition_inputs_exist(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -296,7 +355,7 @@ class TestBrowseScreen:
             "Sun exposure",
             "Soil",
             "Watering",
-            "Growing year",
+            "Year grown",
             "Crop",
             "Filter by reported state",
         } <= labels
@@ -323,6 +382,7 @@ class TestBrowseScreen:
         at.text_input(key=ui.TEXT_KEY).input("kids watch").run()
         assert shown_ids(group(at, "all"), app_env) == {"syn-0025"}  # never extracted
         assert "1 report" in texts_of(at)
+        assert ui.NOT_ANALYSED_LINE in texts_of(group(at, "all"))  # F20: never "not stated"
         at.text_input(key=ui.TEXT_KEY).input("trellis").run()
         assert "syn-0033" in shown_ids(group(at, "all"), app_env)  # unresolved, no mentions
 
@@ -334,6 +394,49 @@ class TestBrowseScreen:
         crop.set_value("bean").run()
         assert shown_ids(group(at, "all"), app_env) >= {"syn-0026", "syn-0051"}
         assert not at.exception
+
+
+class TestLayout:
+    """SPEC §2 layout: F45 (prominent controls, outside context by the tabs), F31, F37."""
+
+    def test_only_the_spec_prominent_conditions_are_always_visible(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        more = expander(at, "More conditions")
+        hidden = {box.key for box in more.selectbox}
+        assert hidden == {ui.CONDITION_KEYS[key] for key in ui.MORE_KEYS}
+        assert ui.CONDITION_KEYS["summer_heat"] in hidden
+        shown = {box.key for box in at.selectbox} - hidden
+        assert {ui.REGION_KEY, *(ui.CONDITION_KEYS[k] for k in ui.ALWAYS_VISIBLE_KEYS)} <= shown
+        assert more.proto.expanded is False
+
+    def test_year_is_a_filter_beside_crop_and_topics(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        assert at.selectbox(key=ui.YEAR_KEY).label == "Year grown"
+        assert ui.YEAR_KEY not in {box.key for box in expander(at, "More conditions").selectbox}
+        order = [n.key for n in walk(at.main) if getattr(n, "key", None)]
+        crop, topics, year = (order.index(k) for k in (ui.CROP_KEY, ui.TOPICS_KEY, ui.YEAR_KEY))
+        assert crop < topics < year
+
+    def test_outside_context_sits_between_the_search_and_the_tabs(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        nodes = list(walk(at.main))
+        outside = next(
+            i for i, n in enumerate(nodes) if getattr(n, "label", "") == "Optional outside context"
+        )
+        strict = next(i for i, n in enumerate(nodes) if getattr(n, "key", "") == ui.STRICT_KEY)
+        first_tab = next(i for i, n in enumerate(nodes) if type(n).__name__ == "Tab")
+        assert strict < outside < first_tab
+
+    def test_search_box_is_capped(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
+        at = run_app(monkeypatch, app_env)
+        cfg = load_config(app_env.config)
+        assert at.text_input(key=ui.TEXT_KEY).proto.max_chars == cfg.viewer.max_query_chars
 
 
 class TestGrouping:
@@ -403,6 +506,29 @@ class TestGrouping:
             at
         )
 
+    def test_chip_tooltips_state_what_they_count(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """F18: a two-condition chip states how many reports mention any and both conditions."""
+        at = run_app(monkeypatch, app_env)
+        assert at.button(key="chip_0").proto.help == "Set this condition (8 reports state it)"
+        assert at.button(key="chip_1").proto.help == (
+            "6 reports mention hot summers or humid; 2 mention both"
+        )
+
+    def test_chip_conditions_inside_more_conditions_are_visible(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """F32: a condition set out of sight is named on the expander, which opens."""
+        at = run_app(monkeypatch, app_env)
+        at.button(key="chip_1").click().run()
+        more = expander(at, "More conditions")
+        assert more.label == "More conditions (hot summers, humid)"
+        assert more.proto.expanded is True
+        at.selectbox(key=ui.CONDITION_KEYS["summer_heat"]).set_value(None).run()
+        assert expander(at, "More conditions").label == "More conditions (humid)"
+        assert at.button(key="chip_1").proto.type == "secondary"
+
     def test_chip_applies_its_conditions(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
@@ -441,6 +567,137 @@ class TestClear:
             assert at.session_state[key] == default, key
         assert subheaders(at)[-1] == "Reports (70)"
         assert [w.value for w in at.warning] == []  # no session-state API warnings
+
+    def test_cleared_selects_show_their_first_load_labels(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """F33: a select reset to ``None`` shows its placeholder, which must match first load."""
+        at = run_app(monkeypatch, app_env)
+        expected = {
+            ui.REGION_KEY: "Not set",
+            **dict.fromkeys(ui.CONDITION_KEYS.values(), "Not set"),
+            ui.CROP_KEY: "Any crop",
+            ui.YEAR_KEY: "Any year",
+            ui.REGION_FILTER_KEY: "All states",
+        }
+        at.selectbox(key=ui.CONDITION_KEYS["zone"]).set_value("6b")
+        at.button(key="clear_all").click().run()
+        for key, label in expected.items():
+            box = at.selectbox(key=key)
+            assert box.value is None, key
+            assert box.options[0] == label, key
+            assert box.proto.placeholder == label, key
+
+
+class TestFiltersAndEmptyStates:
+    def test_year_filter_is_announced_and_can_be_reset(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """F31: the year hides every report without that year, so the page says so."""
+        at = run_app(monkeypatch, app_env)
+        assert ui.year_filter_note("2024") not in infos(at)
+        at.selectbox(key=ui.YEAR_KEY).set_value("2024").run()
+        assert ui.year_filter_note("2024") in infos(at)
+        assert at.button(key="clear_year_filter").label == "Any year"
+        at.button(key="clear_year_filter").click().run()
+        assert at.selectbox(key=ui.YEAR_KEY).value is None
+        assert ui.year_filter_note("2024") not in infos(at)
+        assert subheaders(at)[-1] == "Reports (70)"
+
+    def test_strict_mode_that_hides_everything_says_so(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """F30: the empty state names the checkbox instead of suggesting other searches."""
+        at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
+        at.text_input(key=ui.TEXT_KEY).input("Kennebec")  # states soil and region only
+        at.checkbox(key=ui.STRICT_KEY).check().run()
+        messages = infos(at)
+        assert ui.NO_RESULTS not in messages
+        assert (
+            'The 1 report found is hidden by "Only show stated matches". Untick it to see it.'
+            in messages
+        )
+
+    def test_strict_hiding_is_explained_once(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """No report states comparable conditions: the limitation message already says where
+        the reports are, so no second empty-state box repeats it."""
+        at = select_garden(run_app(monkeypatch, app_env), method="container")
+        at.text_input(key=ui.TEXT_KEY).input("thanks")
+        at.checkbox(key=ui.STRICT_KEY).check().run()
+        messages = infos(at)
+        assert ui.NO_RESULTS not in messages
+        hiding = [m for m in messages if '"Only show stated matches"' in m]
+        assert len(hiding) == 1
+        assert hiding[0].endswith("untick it to see them.")
+
+    def test_plain_empty_state(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
+        at = run_app(monkeypatch, app_env)
+        at.text_input(key=ui.TEXT_KEY).input("zzzzqqq").run()
+        assert ui.NO_RESULTS in infos(at)
+
+    def test_region_only_strict_note(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """F42: Region is chosen in the conditions panel but cannot drive strict mode."""
+        at = run_app(monkeypatch, app_env)
+        at.selectbox(key=ui.REGION_KEY).set_value("US-CT")
+        at.checkbox(key=ui.STRICT_KEY).check().run()
+        assert any(
+            t.startswith("Region only lists reports from your area first") for t in texts_of(at)
+        )
+
+
+class TestPaging:
+    """F39: each group renders one page of cards, with a button for the next page."""
+
+    def test_groups_render_one_page_at_a_time(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        config = _write_config(app_env.root, app_env.db_path, page_size=10, name="paged.yaml")
+        at = run_app(monkeypatch, app_env, config=config)
+        assert subheaders(at)[-1] == "Reports (70)"  # the heading keeps the full count
+        assert len(shown_ids(group(at, "all"), app_env)) == 10
+        assert at.button(key="more-all").label == "Show 10 more (60 not shown yet)"
+        at.button(key="more-all").click().run()
+        assert len(shown_ids(group(at, "all"), app_env)) == 20
+        at.text_input(key=ui.TEXT_KEY).input("tomato").run()  # a new query starts at page one
+        assert len(shown_ids(group(at, "all"), app_env)) == 10
+        at.text_input(key=ui.TEXT_KEY).input("")
+        at = select_garden(at, zone="6b", method="container")
+        assert "Matching reported conditions (3)" in subheaders(at)
+        assert len(shown_ids(group(at, "not_stated"), app_env)) == 10
+        assert at.button(key="more-not_stated").label.startswith("Show 10 more")
+        with pytest.raises(KeyError):
+            at.button(key="more-match")  # a group that fits on one page has no button
+
+
+class TestProvenanceLabels:
+    """F16 / SPEC §7: cards and the map are labelled outside the collapsed Evidence."""
+
+    def test_every_card_title_carries_the_community_report_badge(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        badge = ui.label_badge("community report")
+        titles = [m.value for m in group(at, "all").markdown if m.value.endswith(f"** {badge}")]
+        assert len(titles) == 70
+
+    def test_stated_conditions_carry_the_reported_conditions_badge(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
+        badge = ui.label_badge("reported conditions")
+        captions = [c.value for c in group(at, "match").caption if "Relevant" in c.value]
+        assert len(captions) == 3
+        assert all(caption.startswith(f"{badge} ") for caption in captions)
+
+    def test_map_tab_is_labelled(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
+        at = run_app(monkeypatch, app_env)
+        (_, map_tab) = at.tabs
+        badges = f"{ui.label_badge('community report')} {ui.label_badge('reported conditions')}"
+        assert badges in [m.value for m in map_tab.markdown]
 
 
 class TestMap:
@@ -515,6 +772,125 @@ class TestStaleFilters:
         assert at.selectbox(key=ui.CROP_KEY).options == ["Any crop"]
 
 
+@pytest.fixture(scope="module")
+def linked_env(app_env: AppEnv, tmp_path_factory: pytest.TempPathFactory) -> AppEnv:
+    """The viewer database plus a cleared source with permalinks and a linked synthetic row."""
+    root = tmp_path_factory.mktemp("linked")
+    db_path = root / "linked.sqlite"
+    shutil.copyfile(app_env.db_path, db_path)
+    cleared = [
+        {
+            "comment_id": CLEARED_ID,
+            "text": CLEARED_TEXT,
+            "permalink": CLEARED_URL,
+            "created_at": "2024-07-01T00:00:00Z",
+        },
+        {"comment_id": UNLINKED_ID, "text": UNLINKED_TEXT},
+    ]
+    fiction = [
+        {
+            "comment_id": SYNTH_LINK_ID,
+            "text": SYNTH_LINK_TEXT,
+            "permalink": "https://www.youtube.com/watch?v=fiction",
+        }
+    ]
+    conn = db.connect(db_path)
+    try:
+        _import(conn, _write_jsonl(root / "cleared.jsonl", cleared), "cleared-test", "cleared")
+        _import(conn, _write_jsonl(root / "fiction.jsonl", fiction), "fiction", "synthetic")
+    finally:
+        conn.close()
+    texts = {**app_env.texts, CLEARED_ID: CLEARED_TEXT, UNLINKED_ID: UNLINKED_TEXT}
+    texts[SYNTH_LINK_ID] = SYNTH_LINK_TEXT
+    return AppEnv(root=root, config=_write_config(root, db_path), db_path=db_path, texts=texts)
+
+
+class TestSourceLinks:
+    """SPEC §11 #17 "opens source references", and F13 (fiction never links out)."""
+
+    def test_cleared_permalink_is_a_source_button(
+        self, monkeypatch: pytest.MonkeyPatch, linked_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, linked_env, db_path=linked_env.db_path)
+        assert ui.MIXED_DEMO_BANNER in infos(at)
+        assert link_buttons(at) == [("Source ↗", CLEARED_URL)]  # the only real permalink
+        at.text_input(key=ui.TEXT_KEY).input("CLEAREDLINK").run()
+        assert shown_ids(group(at, "all"), linked_env) == {CLEARED_ID}
+        assert link_buttons(at) == [("Source ↗", CLEARED_URL)]
+        assert ui.escape_markdown("Posted 2024-07-01") in texts_of(group(at, "all"))
+
+    def test_cleared_comment_without_permalink_says_so(
+        self, monkeypatch: pytest.MonkeyPatch, linked_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, linked_env, db_path=linked_env.db_path)
+        at.text_input(key=ui.TEXT_KEY).input("CLEAREDNOLINK").run()
+        assert link_buttons(at) == []
+        assert ui.escape_markdown(ui.NO_LINK_NOTE) in texts_of(group(at, "all"))
+
+    def test_synthetic_comment_with_a_permalink_stays_marked_and_unlinked(
+        self, monkeypatch: pytest.MonkeyPatch, linked_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, linked_env, db_path=linked_env.db_path)
+        at.text_input(key=ui.TEXT_KEY).input("SYNTHLINK").run()
+        assert shown_ids(group(at, "all"), linked_env) == {SYNTH_LINK_ID}
+        assert link_buttons(at) == []
+        assert ui.escape_markdown(ui.SYNTHETIC_NOTE) in texts_of(group(at, "all"))
+
+
+class TestViewerStartup:
+    """F01 (private scope listens on loopback only) and F36 (no silently ignored options)."""
+
+    @pytest.mark.parametrize("address", ["0.0.0.0", "192.168.1.20", "", None])
+    def test_private_scope_refuses_a_network_address(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, address: str | None
+    ) -> None:
+        at = run_app(monkeypatch, app_env, scope="private", address=address)
+        assert not at.exception
+        (error,) = at.error
+        assert "only runs when the server listens on this computer alone" in error.value
+        assert "PRIVATEONLY" not in all_text(at)
+        assert not at.text_input
+        assert ui.PRIVATE_BANNER not in [w.value for w in at.warning]
+
+    @pytest.mark.parametrize("address", ["localhost", "127.0.0.1", "::1"])
+    def test_private_scope_runs_on_loopback(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, address: str
+    ) -> None:
+        at = run_app(monkeypatch, app_env, scope="private", address=address)
+        assert not at.error
+        assert PRIVATE_ID in shown_ids(group(at, "all"), app_env)
+
+    def test_public_scope_may_listen_on_the_network(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env, address="0.0.0.0")
+        assert not at.error
+        assert subheaders(at)[-1] == "Reports (70)"
+
+    @pytest.mark.parametrize(
+        "extra", [["--database", "other.sqlite"], ["--confg", "x.yaml"], ["--scope", "everyone"]]
+    )
+    def test_invalid_viewer_options_are_shown_and_stop_the_page(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, extra: list[str]
+    ) -> None:
+        at = run_app(monkeypatch, app_env, extra_args=extra)
+        assert not at.exception
+        (error,) = at.error
+        assert "Invalid viewer options" in error.value
+        assert not at.text_input
+
+    def test_unreadable_database_is_shown_and_stops_the_page(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, tmp_path: Path
+    ) -> None:
+        bogus = tmp_path / "bogus.sqlite"
+        bogus.write_bytes(b"this is not a database" * 100)
+        at = run_app(monkeypatch, app_env, db_path=bogus)
+        assert not at.exception
+        (error,) = at.error
+        assert "cannot be opened" in error.value
+        assert not at.text_input
+
+
 class TestRightsAndSafety:
     def test_private_source_never_appears_in_public_scope(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -579,6 +955,7 @@ class TestContext:
             assert ui.outside_link_markdown(link) in text
         assert "regional climate reference" in text
         assert "published external trial" in text
+        assert ui.label_badge("community report") in text  # outside gardeners' own ratings
 
     def test_about_explains_provenance(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv

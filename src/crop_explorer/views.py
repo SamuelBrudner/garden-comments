@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Final, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, NonNegativeInt, model_validator
 
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import (
@@ -21,7 +21,10 @@ from crop_explorer.vocab import COMPARABLE_KEYS, VIEWER_VALUES, ComparableKey
 ViewerScope = Literal["public", "private"]
 MatchStatus = Literal["match", "imprecise", "not_stated", "different"]
 Tier = Literal["match", "partial", "not_stated", "different"]
-RegionStatus = Literal["same", "elsewhere", "not_stated"]
+RegionStatus = Literal["same", "same_country", "elsewhere", "not_stated"]
+"""How a report's region relates to the viewer's: ``same`` code, ``same_country`` (the viewer
+picked a country and the report names one of its states or provinces), ``elsewhere``, or
+``not_stated``. A location preference only: it orders reports and never changes a tier."""
 GroupKey = Literal["all", "match", "partial", "not_stated", "different"]
 
 TIER_ORDER: Final = MappingProxyType({"match": 0, "partial": 1, "not_stated": 2, "different": 3})
@@ -118,8 +121,16 @@ class CommentView(BaseModel):
     source_order: int
     created_at: str | None
     parse_status: ParseStatus | None
-    """``None`` means the comment has never been through extraction."""
+    """``None`` means the comment has never been through extraction (so it has no mentions)."""
     mentions: tuple[MentionView, ...]
+
+    @model_validator(mode="after")
+    def _check_unextracted_has_no_mentions(self) -> Self:
+        if self.parse_status is None and self.mentions:
+            raise ValueError(
+                f"Comment {self.comment_id!r} has mentions but has never been through extraction"
+            )
+        return self
 
 
 class DimensionMatch(BaseModel):
@@ -132,6 +143,9 @@ class DimensionMatch(BaseModel):
     viewer_value: str
     reported_values: tuple[str, ...]
     """Distinct normalized values reported for this key (empty when not stated)."""
+    written_values: tuple[str, ...]
+    """Distinct ``value_as_written`` of this key's facts that have no normalized value, in
+    first-seen order. Display only (untrusted comment text): never compared, never a status."""
     evidence: tuple[FactView, ...]
 
 
@@ -209,6 +223,30 @@ class SearchResult(BaseModel):
     n_candidates: int
     """Distinct visible comments matching text and structured filters (before strict hiding)."""
     n_with_conditions: int
+    """Candidates whose relevant mentions state a comparable condition or a region."""
+    n_not_analysed: int
+    """Candidates that have never been through extraction (``parse_status is None``)."""
     n_hidden_by_strict: int
     tier_counts: dict[str, int]
     limitation_message: str | None
+
+
+class ChipSupport(BaseModel):
+    """How many visible reports support a quick-condition chip.
+
+    Counts are distinct comments. ``n_any`` (the display gate) counts comments with a mention
+    whose applicable facts state at least one of the chip's ``(key, value)`` conditions;
+    ``n_all`` counts comments with a single mention stating every one of them, i.e. the
+    reports the chip would put under "Matching reported conditions".
+    """
+
+    model_config = _FROZEN
+
+    n_any: NonNegativeInt
+    n_all: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _check_all_within_any(self) -> Self:
+        if self.n_all > self.n_any:
+            raise ValueError(f"n_all ({self.n_all}) cannot exceed n_any ({self.n_any})")
+        return self

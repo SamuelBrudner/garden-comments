@@ -2,16 +2,20 @@
 
 Nothing here imports Streamlit or touches I/O, so every rule the Browse screen follows can be
 unit tested: how untrusted comment text is made inert (:func:`escape_markdown`), how a card is
-titled and explained (:func:`card_title`, :func:`condition_lines`, :func:`region_line`,
-:func:`evidence_rows`), which banner a scope shows (:func:`scope_banner`), and which session
-keys the Clear button resets (:func:`reset_state_keys`). Wording follows SPEC §2 and §5: a
-condition that was not stated is never called a match, and reports are grouped by stated
-circumstances, never by variety quality.
+titled, labelled and explained (:func:`card_heading`, :func:`condition_caption`,
+:func:`condition_lines`, :func:`region_line`, :func:`evidence_rows`), which banner a scope
+shows (:func:`scope_banner`), which session keys the Clear button resets
+(:func:`reset_state_keys`), how results are paged (:func:`paging_fixes`), and which startup
+options and server addresses are accepted (:func:`parse_app_args`,
+:func:`is_loopback_address`). Wording follows SPEC §2 and §5: a condition that was not stated
+is never called a match, words that could not be mapped are shown as written, and reports are
+grouped by stated circumstances, never by variety quality.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import math
 import string
 from collections import Counter
@@ -19,22 +23,25 @@ from collections.abc import Collection, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, get_args
+from typing import Any, Final, NoReturn, cast, get_args
 
 from crop_explorer.config import DEFAULT_CONFIG_PATH, ContextLabel, OutsideLink, QuickChip
-from crop_explorer.environment_match import match_context
+from crop_explorer.environment_match import match_context, values_with
 from crop_explorer.geography import RegionCounts, count_label
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
 from crop_explorer.schemas import Basis, EnvKey, RightsStatus
 from crop_explorer.search import FilterOptions
 from crop_explorer.views import (
     TIER_ORDER,
+    ChipSupport,
     CommentResult,
     CommentView,
     DimensionMatch,
     FactView,
     GardenContext,
+    GroupKey,
     MatchResult,
+    MatchStatus,
     MentionMatch,
     MentionView,
     ResultGroup,
@@ -51,11 +58,17 @@ from crop_explorer.vocab import (
 )
 
 __all__ = [
+    "ALL_STATES",
+    "ALWAYS_VISIBLE_KEYS",
     "CONDITION_KEYS",
     "CROP_KEY",
     "DEMO_BANNER",
     "EVIDENCE_LABEL",
     "MISSING_DB_COMMAND",
+    "MORE_KEYS",
+    "NOT_ANALYSED_LINE",
+    "NO_RESULTS",
+    "PAGE_QUERY_KEY",
     "PRIVATE_BANNER",
     "REGION_FILTER_KEY",
     "REGION_KEY",
@@ -64,33 +77,45 @@ __all__ = [
     "TEXT_KEY",
     "TOPICS_KEY",
     "WORD_JOINER",
+    "WRITTEN_LABEL",
     "YEAR_KEY",
     "AppArgs",
     "EvidenceRow",
     "SourceRow",
+    "active_more_conditions",
+    "card_heading",
     "card_title",
+    "cards_to_show",
+    "chip_help",
     "chip_is_active",
     "chip_state",
     "colorbar_dtick",
+    "condition_caption",
     "condition_lines",
     "condition_options",
     "count_summary",
     "crop_label",
+    "empty_state",
     "escape_markdown",
     "evidence_rows",
     "flatten",
     "garden_from_state",
     "group_heading",
+    "is_loopback_address",
     "key_label",
     "label_badge",
     "map_colorbar",
     "map_key",
     "map_notes",
     "min_cell_count",
+    "more_conditions_label",
     "option_label",
     "outside_link_markdown",
+    "page_key",
+    "paging_fixes",
     "parse_app_args",
     "posted_line",
+    "private_bind_error",
     "provenance_note",
     "query_from_state",
     "region_filter_note",
@@ -101,6 +126,7 @@ __all__ = [
     "reset_values",
     "scope_banner",
     "selected_state",
+    "show_more_label",
     "source_link",
     "source_rows",
     "stale_state_fixes",
@@ -109,6 +135,7 @@ __all__ = [
     "summary_line",
     "topic_label",
     "visible_chips",
+    "year_filter_note",
     "year_label",
 ]
 
@@ -125,13 +152,33 @@ PRIVATE_BANNER: Final = (
     "Private local view — includes unverified imported comments. Do not publish or share."
 )
 SYNTHETIC_NOTE: Final = "Synthetic demo comment — no source link"
+"""Shown on every synthetic card: fiction is always marked and never links out."""
 NO_LINK_NOTE: Final = "No source link available"
 NOT_STATED_LINE: Final = "Growing conditions not stated"
+NOT_ANALYSED_LINE: Final = "Not yet analysed for growing conditions"
+"""Shown for a comment that has never been through extraction (``parse_status is None``)."""
+WRITTEN_LABEL: Final = "Mentioned as written, not comparable"
+"""Leads the line of display-only phrases (facts without a normalized value)."""
+NO_RESULTS: Final = "No reports to show. Try a different search, or remove a filter or condition."
+ALL_STATES: Final = "All states"
 MISSING_DB_COMMAND: Final = "uv run python -m crop_explorer demo"
+PRIVATE_COMMAND: Final = (
+    "uv run streamlit run app.py --server.address localhost -- --scope private"
+)
 WORD_JOINER: Final = "\u2060"
 """Invisible character after ``:`` and before ``.``: shortcodes and autolinks cannot form."""
 
 _NOT_SET: Final = "Not set"
+_MORE_CONDITIONS: Final = "More conditions"
+_STRICT_CHECKBOX: Final = '"Only show stated matches"'
+_STRICT_NEEDS_CONDITION: Final = (
+    "Choose at least one growing condition first: until then nothing is hidden."
+)
+_STRICT_REGION_ONLY: Final = (
+    "Region only lists reports from your area first; choose a condition such as zone or "
+    "growing method to use this filter. Until then nothing is hidden."
+)
+_LOCALHOST: Final = "localhost"
 _NBSP: Final = "\u00a0"
 _ASCII_PUNCTUATION: Final = frozenset(string.punctuation)
 _ITEM_SEPARATOR: Final = " · "
@@ -175,6 +222,16 @@ TOPICS_KEY: Final = "query_topics"
 YEAR_KEY: Final = "query_year"
 STRICT_KEY: Final = "query_strict"
 REGION_FILTER_KEY: Final = "query_region_filter"
+PAGE_QUERY_KEY: Final = "page_query"
+"""Session key holding the query the per-group page counts belong to."""
+_GROUP_KEYS: Final[tuple[GroupKey, ...]] = get_args(GroupKey)
+
+ALWAYS_VISIBLE_KEYS: Final[tuple[ComparableKey, ...]] = ("zone", "method", "shelter")
+"""Conditions always shown besides Region (SPEC §2 "Which controls are prominent?")."""
+MORE_KEYS: Final[tuple[ComparableKey, ...]] = tuple(
+    key for key in COMPARABLE_KEYS if key not in ALWAYS_VISIBLE_KEYS
+)
+"""Conditions one tap away, in the "More conditions" expander (heat, season length, ...)."""
 
 
 # --------------------------------------------------------------------------- command line
@@ -199,8 +256,16 @@ class AppArgs:
     scope: ViewerScope | None
 
 
+class _RaisingParser(argparse.ArgumentParser):
+    """An argument parser that raises :class:`ValueError` instead of printing and exiting."""
+
+    def error(self, message: str) -> NoReturn:
+        """Raise the parse error so the viewer can show it on the page."""
+        raise ValueError(f"Invalid viewer options: {message}")
+
+
 def parse_app_args(argv: Sequence[str]) -> AppArgs:
-    """Parse the viewer's own options, ignoring any others (Streamlit or pytest flags).
+    """Parse the viewer's options (Streamlit passes only the arguments after ``--``).
 
     Parameters
     ----------
@@ -214,15 +279,50 @@ def parse_app_args(argv: Sequence[str]) -> AppArgs:
 
     Raises
     ------
-    SystemExit
-        If a known option has an invalid value (for example an unknown scope).
+    ValueError
+        If an option is unknown (a typo such as ``--database`` must never silently open the
+        default database), abbreviated, missing its value, or has an invalid value.
     """
-    parser = argparse.ArgumentParser(prog="app.py", add_help=False)
+    parser = _RaisingParser(prog="app.py", add_help=False, allow_abbrev=False)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--scope", choices=get_args(ViewerScope), default=None)
-    known, _ = parser.parse_known_args(list(argv))
-    return AppArgs(config=known.config, db=known.db, scope=known.scope)
+    args = parser.parse_args(list(argv))
+    return AppArgs(config=args.config, db=args.db, scope=args.scope)
+
+
+def is_loopback_address(address: str | None) -> bool:
+    """Return whether a server address only accepts connections from this machine.
+
+    Parameters
+    ----------
+    address : str or None
+        Streamlit's ``server.address`` option; ``None`` or ``""`` (every interface) is not
+        loopback.
+
+    Returns
+    -------
+    bool
+        ``True`` for ``localhost`` and loopback IP addresses (``127.0.0.0/8``, ``::1``).
+    """
+    if not address:
+        return False
+    if address.casefold() == _LOCALHOST:
+        return True
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:  # a host name other than localhost
+        return False
+
+
+def private_bind_error(address: str | None) -> str:
+    """Explain why a private-scope viewer refuses to run on a non-loopback address."""
+    where = "every network interface" if not address else f"the address {address}"
+    return (
+        "The private view shows unverified imported comments, so it only runs when the server "
+        f"listens on this computer alone, but it is listening on {where}. Restart it with: "
+        f"{PRIVATE_COMMAND}"
+    )
 
 
 # --------------------------------------------------------------------------- escaping
@@ -381,12 +481,12 @@ def stale_state_fixes(state: Mapping[str, Any], options: FilterOptions) -> dict[
     return fixes
 
 
-def _search_text(value: object) -> str | None:
+def _search_text(value: object, max_chars: int) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
         raise TypeError(f"Search text must be a string, got {type(value).__name__}")
-    return value.strip() or None
+    return value[:max_chars].strip() or None
 
 
 def garden_from_state(state: Mapping[str, Any]) -> GardenContext:
@@ -401,19 +501,36 @@ def garden_from_state(state: Mapping[str, Any]) -> GardenContext:
     return GardenContext.model_validate({"region": state.get(REGION_KEY), **values})
 
 
-def query_from_state(state: Mapping[str, Any]) -> SearchQuery:
+def query_from_state(state: Mapping[str, Any], *, max_query_chars: int) -> SearchQuery:
     """Build the search query from session state (missing keys mean defaults).
+
+    Parameters
+    ----------
+    state : Mapping[str, Any]
+        Current session state.
+    max_query_chars : int
+        The search text is cut to this many characters before it is stripped, as the text box
+        does (``cfg.viewer.max_query_chars``); session state can be set without the widget.
+
+    Returns
+    -------
+    SearchQuery
+        The query the controls describe.
 
     Raises
     ------
+    ValueError
+        If ``max_query_chars`` is below 1.
     TypeError
         If the search text is not a string.
     pydantic.ValidationError
         If any other stored value is invalid.
     """
+    if max_query_chars < 1:
+        raise ValueError(f"max_query_chars must be at least 1, got {max_query_chars}")
     return SearchQuery.model_validate(
         {
-            "text": _search_text(state.get(TEXT_KEY)),
+            "text": _search_text(state.get(TEXT_KEY), max_query_chars),
             "crop": state.get(CROP_KEY),
             "topics": tuple(state.get(TOPICS_KEY) or ()),
             "year": state.get(YEAR_KEY),
@@ -428,16 +545,19 @@ def query_from_state(state: Mapping[str, Any]) -> SearchQuery:
 
 
 def visible_chips(
-    chips: Sequence[QuickChip], support: Mapping[str, int], minimum: int
+    chips: Sequence[QuickChip], support: Mapping[str, ChipSupport], minimum: int
 ) -> tuple[QuickChip, ...]:
     """Return the chips supported by at least ``minimum`` visible reports, in config order.
+
+    The gate is :attr:`ChipSupport.n_any`: reports stating at least one of the chip's
+    conditions (SPEC §2 "enough supported reports for those categories").
 
     Raises
     ------
     KeyError
         If ``support`` has no count for a chip.
     """
-    return tuple(chip for chip in chips if support[chip.label] >= minimum)
+    return tuple(chip for chip in chips if support[chip.label].n_any >= minimum)
 
 
 _GARDEN_STATE_KEYS: Final[Mapping[str, str]] = MappingProxyType(
@@ -461,6 +581,76 @@ def chip_is_active(chip: QuickChip, state: Mapping[str, Any]) -> bool:
     return all(state.get(key) == value for key, value in chip_state(chip).items())
 
 
+def _condition_value_label(condition: str, value: str) -> str:
+    _state_key(condition)  # validates that the condition is a garden condition
+    return value_label(cast("EnvKey", condition), value)
+
+
+def _or_join(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} or {items[-1]}"
+
+
+def _verb(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+def chip_help(chip: QuickChip, support: ChipSupport) -> str:
+    """Return a chip's tooltip, stating what its support counts really count.
+
+    Parameters
+    ----------
+    chip : QuickChip
+        A configured quick-condition chip.
+    support : ChipSupport
+        Its counts from :func:`crop_explorer.search.chip_support`.
+
+    Returns
+    -------
+    str
+        ``"Set this condition (8 reports state it)"`` for one condition; for several, both
+        counts, e.g. ``"6 reports mention hot summers or humid; 2 mention both"``.
+
+    Raises
+    ------
+    ValueError
+        If a chip condition is not a garden condition.
+    """
+    labels = [_condition_value_label(key, value) for key, value in chip.conditions.items()]
+    n_any, n_all = support.n_any, support.n_all
+    if len(labels) == 1:
+        return (
+            f"Set this condition ({_plural(n_any, 'report')} {_verb(n_any, 'states', 'state')} it)"
+        )
+    every = "both" if len(labels) == 2 else "all of them"
+    return (
+        f"{_plural(n_any, 'report')} {_verb(n_any, 'mentions', 'mention')} {_or_join(labels)}; "
+        f"{n_all} {_verb(n_all, 'mentions', 'mention')} {every}"
+    )
+
+
+def active_more_conditions(state: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the labels of the conditions set inside "More conditions", in display order."""
+    values = ((key, state.get(CONDITION_KEYS[key])) for key in MORE_KEYS)
+    return tuple(value_label(key, value) for key, value in values if value is not None)
+
+
+def more_conditions_label(active: Sequence[str]) -> str:
+    """Return the "More conditions" expander label, naming the conditions set inside it.
+
+    Parameters
+    ----------
+    active : Sequence[str]
+        Output of :func:`active_more_conditions`.
+
+    Returns
+    -------
+    str
+        ``"More conditions"``, or e.g. ``"More conditions (humid, clay soil)"``, so a condition
+        set by a chip is never active out of sight.
+    """
+    return f"{_MORE_CONDITIONS} ({', '.join(active)})" if active else _MORE_CONDITIONS
+
+
 # --------------------------------------------------------------------------- result summaries
 
 
@@ -481,12 +671,20 @@ def group_heading(group: ResultGroup) -> str:
     return f"{group.title} ({len(group.results)})"
 
 
-def strict_note(result: SearchResult, query: SearchQuery) -> str | None:
-    """Explain what "Only show stated matches" hides (or would hide) right now."""
-    if not query.garden.selected():
-        if query.only_stated_matches:
-            return "Choose at least one growing condition first: until then nothing is hidden."
+def _strict_note_without_conditions(query: SearchQuery) -> str | None:
+    if not query.only_stated_matches:
         return None
+    return _STRICT_REGION_ONLY if query.garden.region is not None else _STRICT_NEEDS_CONDITION
+
+
+def strict_note(result: SearchResult, query: SearchQuery) -> str | None:
+    """Explain what "Only show stated matches" hides (or would hide) right now.
+
+    With no comparable condition selected nothing can be hidden; a Region alone is a location
+    preference, which the note explains.
+    """
+    if not query.garden.selected():
+        return _strict_note_without_conditions(query)
     if query.only_stated_matches:
         hidden = _plural(result.n_hidden_by_strict, "report")
         return f"{hidden} hidden because their conditions were not stated or differ."
@@ -500,6 +698,91 @@ def strict_note(result: SearchResult, query: SearchQuery) -> str | None:
 def region_filter_note(code: str) -> str:
     """Describe an active reported-state filter."""
     return f"Showing only reports that name {REGION_NAMES[code]} as where they grew."
+
+
+def year_filter_note(year: str) -> str:
+    """Describe an active growing-year filter (it hides every report without that year)."""
+    return f"Showing only reports that say they grew in {year}."
+
+
+def empty_state(result: SearchResult) -> str | None:
+    """Return the message shown when no group has a report to show.
+
+    Parameters
+    ----------
+    result : SearchResult
+        A result whose ``groups`` are empty.
+
+    Returns
+    -------
+    str or None
+        Without strict hiding, a suggestion to broaden the search. When "Only show stated
+        matches" hid every report, a message saying so and how to undo it, or ``None`` when
+        no report states a comparable condition: the limitation message then already says
+        the reports are hidden by the checkbox (Search rule 7), so it is not repeated.
+    """
+    n_hidden = result.n_hidden_by_strict
+    if n_hidden == 0:
+        return NO_RESULTS
+    if result.n_with_conditions == 0 and result.limitation_message is not None:
+        return None
+    if n_hidden == 1:
+        return f"The 1 report found is hidden by {_STRICT_CHECKBOX}. Untick it to see it."
+    return f"All {n_hidden} reports are hidden by {_STRICT_CHECKBOX}. Untick it to see them."
+
+
+# --------------------------------------------------------------------------- paging
+
+
+def page_key(group_key: GroupKey) -> str:
+    """Return the session key counting how many pages of a group are shown."""
+    return f"page_count_{group_key}"
+
+
+def paging_fixes(state: Mapping[str, Any], query: SearchQuery) -> dict[str, Any]:
+    """Return session-state updates that show one page per group again after a query change.
+
+    Parameters
+    ----------
+    state : Mapping[str, Any]
+        Current session state.
+    query : SearchQuery
+        The query this run shows.
+
+    Returns
+    -------
+    dict[str, Any]
+        Empty when the page counts belong to ``query``; otherwise the new query fingerprint and
+        a count of 1 for every group.
+    """
+    fingerprint = query.model_dump_json()
+    if state.get(PAGE_QUERY_KEY) == fingerprint:
+        return {}
+    return {PAGE_QUERY_KEY: fingerprint, **{page_key(key): 1 for key in _GROUP_KEYS}}
+
+
+def cards_to_show(state: Mapping[str, Any], group: ResultGroup, page_size: int) -> int:
+    """Return how many of a group's cards to render (whole pages, at most the group size).
+
+    Raises
+    ------
+    ValueError
+        If ``page_size`` is below 1 or the stored page count is not a positive integer.
+    """
+    pages = state.get(page_key(group.key), 1)
+    if type(pages) is not int or pages < 1:
+        raise ValueError(f"Session page count for group {group.key!r} must be a positive int")
+    if page_size < 1:
+        raise ValueError(f"page_size must be at least 1, got {page_size}")
+    return min(len(group.results), pages * page_size)
+
+
+def show_more_label(n_remaining: int, page_size: int) -> str:
+    """Return the label of a group's "Show N more" button."""
+    n_next = min(n_remaining, page_size)
+    if n_remaining > page_size:
+        return f"Show {n_next} more ({n_remaining} not shown yet)"
+    return f"Show {n_next} more"
 
 
 # --------------------------------------------------------------------------- cards
@@ -536,47 +819,106 @@ def _best(matches: Sequence[MentionMatch]) -> MentionMatch | None:
     return min(matches, key=_rank, default=None)
 
 
-def _reported_labels(dimension: DimensionMatch) -> str:
-    return " / ".join(value_label(dimension.key, value) for value in dimension.reported_values)
+_RELEVANT: Final = "Relevant"
+_NOT_STATED: Final = "Not stated"
+_DIFFERENT: Final = "Different"
+_TIER_PARTS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "match": (_RELEVANT,),
+        "partial": (_RELEVANT,),
+        "not_stated": (_NOT_STATED, WRITTEN_LABEL),
+        "different": (_DIFFERENT,),
+    }
+)
+"""The condition-line part that states why a mention has its tier, in order of preference."""
+
+
+def _labels(dimension: DimensionMatch, status: MatchStatus) -> str:
+    """Label only the reported values whose own comparison gave ``status``."""
+    values = values_with(dimension, status)
+    return " / ".join(value_label(dimension.key, value) for value in values)
+
+
+def _viewer_label(dimension: DimensionMatch) -> str:
+    return value_label(dimension.key, dimension.viewer_value)
+
+
+def _quoted(phrase: str) -> str:
+    """Quote untrusted words as written, with runs of whitespace collapsed."""
+    return f'"{" ".join(phrase.split())}"'
 
 
 def _imprecise_item(dimension: DimensionMatch) -> str:
-    viewer = value_label(dimension.key, dimension.viewer_value)
-    coarse = [value for value in dimension.reported_values if value.isdigit()]
+    coarse = [value for value in values_with(dimension, "imprecise") if value.isdigit()]
     if dimension.key == "zone" and coarse:
-        return f"zone {coarse[0]}, subzone unknown (you: {viewer})"
-    return f"{_reported_labels(dimension)} (you: {viewer})"
+        return f"zone {coarse[0]}, subzone unknown (you: {_viewer_label(dimension)})"
+    return f"{_labels(dimension, 'imprecise')} (you: {_viewer_label(dimension)})"
 
 
 def _relevant_item(dimension: DimensionMatch) -> str:
     if dimension.status == "match":
-        return value_label(dimension.key, dimension.viewer_value)
+        return _viewer_label(dimension)
     return _imprecise_item(dimension)
+
+
+def _only_written(dimension: DimensionMatch) -> bool:
+    """Whether a not-stated dimension was mentioned only in words that could not be mapped."""
+    stated_in_words = not dimension.reported_values and bool(dimension.written_values)
+    return dimension.status == "not_stated" and stated_in_words
 
 
 def _not_stated_item(dimension: DimensionMatch) -> str:
     label = KEY_LABELS[dimension.key]
     if not dimension.reported_values:
         return label
-    return f"{label} (only {_reported_labels(dimension)} reported, not comparable)"
+    return f"{label} (only {_labels(dimension, 'not_stated')} reported, not comparable)"
+
+
+def _written_item(dimension: DimensionMatch) -> str:
+    phrases = " / ".join(_quoted(phrase) for phrase in dimension.written_values)
+    return f"{KEY_LABELS[dimension.key]} {phrases}"
 
 
 def _different_item(dimension: DimensionMatch) -> str:
-    viewer = value_label(dimension.key, dimension.viewer_value)
-    return f"{_reported_labels(dimension)} (you: {viewer})"
+    return f"{_labels(dimension, 'different')} (you: {_viewer_label(dimension)})"
+
+
+def _match_parts(match: MatchResult) -> dict[str, str]:
+    """Return the non-empty condition-line bodies of one mention's match, keyed by lead."""
+    dims = match.dimensions
+    unstated = [d for d in dims if d.status == "not_stated"]
+    parts = {
+        _RELEVANT: [_relevant_item(d) for d in dims if d.status in ("match", "imprecise")],
+        _NOT_STATED: [_not_stated_item(d) for d in unstated if not _only_written(d)],
+        WRITTEN_LABEL: [_written_item(d) for d in unstated if _only_written(d)],
+        _DIFFERENT: [_different_item(d) for d in dims if d.status == "different"],
+    }
+    separators = {_NOT_STATED: ", "}
+    return {
+        lead: separators.get(lead, _ITEM_SEPARATOR).join(items)
+        for lead, items in parts.items()
+        if items
+    }
 
 
 def _match_lines(match: MatchResult) -> tuple[str, ...]:
-    dims = match.dimensions
-    relevant = [_relevant_item(d) for d in dims if d.status in ("match", "imprecise")]
-    unstated = [_not_stated_item(d) for d in dims if d.status == "not_stated"]
-    different = [_different_item(d) for d in dims if d.status == "different"]
-    lines = (
-        f"Relevant: {_ITEM_SEPARATOR.join(relevant)}" if relevant else "",
-        f"Not stated: {', '.join(unstated)}" if unstated else "",
-        f"Different: {_ITEM_SEPARATOR.join(different)}" if different else "",
+    return tuple(f"{lead}: {body}" for lead, body in _match_parts(match).items())
+
+
+def _tier_line(match: MatchResult) -> str:
+    """Return the one condition line that explains a mention's tier."""
+    parts = _match_parts(match)
+    lead = next(lead for lead in _TIER_PARTS[match.tier] if lead in parts)
+    return f"{lead}: {parts[lead]}"
+
+
+def _other_mention_lines(matches: Sequence[MentionMatch], best: MatchResult) -> tuple[str, ...]:
+    """State the tier line of every other relevant mention whose tier differs from the best."""
+    return tuple(
+        f"{_mention_label(m.mention)}: {_tier_line(m.match)}"
+        for m in matches
+        if m.match is not None and m.match.tier != best.tier
     )
-    return tuple(line for line in lines if line)
 
 
 def _condition_items(facts: Iterable[FactView]) -> tuple[str, ...]:
@@ -592,22 +934,41 @@ def _condition_items(facts: Iterable[FactView]) -> tuple[str, ...]:
     )
 
 
-def _reported_lines(matches: Sequence[MentionMatch]) -> tuple[str, ...]:
+def _written_items(facts: Iterable[FactView]) -> tuple[str, ...]:
+    """Quote the display-only comparable-key phrases of ``facts``, in canonical key order."""
+    phrases: dict[str, list[str]] = {}
+    for fact in facts:
+        if fact.normalized_value is None and fact.key in COMPARABLE_KEYS:
+            phrases.setdefault(fact.key, []).append(_quoted(fact.value_as_written))
+    return tuple(
+        f"{KEY_LABELS[key]} {phrase}"
+        for key in COMPARABLE_KEYS
+        for phrase in _unique(phrases.get(key, ()))
+    )
+
+
+def _reported_value_lines(matches: Sequence[MentionMatch]) -> tuple[str, ...]:
     """List the comparable conditions reported for each mention, merging identical lists."""
     by_items: dict[tuple[str, ...], list[str]] = {}
     for match in matches:
         items = _condition_items(match.facts)
         if items:
             by_items.setdefault(items, []).append(_mention_label(match.mention))
-    if not by_items:
-        return (NOT_STATED_LINE,)
     if len(matches) == 1:
-        (items,) = by_items
-        return (f"Reported: {_ITEM_SEPARATOR.join(items)}",)
+        return tuple(f"Reported: {_ITEM_SEPARATOR.join(items)}" for items in by_items)
     return tuple(
         f"Reported for {', '.join(_unique(labels))}: {_ITEM_SEPARATOR.join(items)}"
         for items, labels in by_items.items()
     )
+
+
+def _reported_lines(matches: Sequence[MentionMatch]) -> tuple[str, ...]:
+    """Without a selection: reported conditions, then display-only phrases, else not stated."""
+    written = _written_items(fact for match in matches for fact in match.facts)
+    lines = _reported_value_lines(matches)
+    if written:
+        lines = (*lines, f"{WRITTEN_LABEL}: {_ITEM_SEPARATOR.join(written)}")
+    return lines or (NOT_STATED_LINE,)
 
 
 def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, ...]:
@@ -623,22 +984,74 @@ def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, 
     Returns
     -------
     tuple[str, ...]
-        With comparable conditions selected: the best relevant mention's ``Relevant: ...``
-        (matches, and imprecise matches with both values), ``Not stated: ...`` and
-        ``Different: ...`` lines, each only when non-empty, preceded by ``Shown for ...`` when
-        the comment has several relevant mentions. Without a selection: the conditions each
-        mention reported, or ``"Growing conditions not stated"``.
+        ``("Not yet analysed for growing conditions",)`` for a comment never extracted. With
+        comparable conditions selected: the best relevant mention's ``Relevant: ...``
+        (matches, and imprecise matches with both values), ``Not stated: ...``,
+        ``Mentioned as written, not comparable: ...`` (display-only phrases, quoted) and
+        ``Different: ...`` lines, each only when non-empty and each naming only the reported
+        values that produced its status. With several relevant mentions these are led by
+        ``Shown for X (1 of n mentions)`` and followed by one ``"Y: <tier line>"`` per other
+        mention whose tier differs. Without a selection: the conditions each mention reported,
+        then display-only phrases, or ``"Growing conditions not stated"``.
     """
+    if result.comment.parse_status is None:
+        return (NOT_ANALYSED_LINE,)
     matches = result.mention_matches
     best = _best(matches)
     match = best.match if best is not None else match_context(garden, ())
     if match is None:
         return _reported_lines(matches)
-    lines = _match_lines(match)
-    if best is not None and len(matches) > 1:
-        lead = f"Shown for {_mention_label(best.mention)} (1 of {len(matches)} mentions)"
-        return (lead, *lines)
-    return lines
+    if best is None or len(matches) == 1:
+        return _match_lines(match)
+    lead = f"Shown for {_mention_label(best.mention)} (1 of {len(matches)} mentions)"
+    return (lead, *_match_lines(match), *_other_mention_lines(matches, match))
+
+
+def _shows_reported_conditions(result: CommentResult) -> bool:
+    """Whether the card's condition caption shows a condition the commenter stated."""
+    if result.comment.parse_status is None:
+        return False
+    matches = result.mention_matches
+    keys = {fact.key for match in matches for fact in match.facts}
+    if "region" in keys:
+        return True
+    best = _best(matches)
+    if best is None or best.match is None:
+        return not keys.isdisjoint(COMPARABLE_KEYS)
+    if any(m.match is not None and m.match.tier != "not_stated" for m in matches):
+        return True
+    return any(d.reported_values or d.written_values for d in best.match.dimensions)
+
+
+def condition_caption(result: CommentResult, garden: GardenContext) -> str:
+    """Return a card's condition caption as escaped Markdown (SPEC §7 labelled).
+
+    Parameters
+    ----------
+    result : CommentResult
+        A displayed comment.
+    garden : GardenContext
+        The viewer's garden used for the search.
+
+    Returns
+    -------
+    str
+        The :func:`condition_lines` and (for an analysed comment) the :func:`region_line`, each
+        escaped, joined by hard line breaks and led by a ``reported conditions`` badge when any
+        of them shows a condition the commenter stated.
+    """
+    lines = condition_lines(result, garden)
+    if result.comment.parse_status is not None:
+        lines = (*lines, region_line(result))
+    text = "  \n".join(escape_markdown(line) for line in lines)
+    if _shows_reported_conditions(result):
+        return f"{label_badge('reported conditions')} {text}"
+    return text
+
+
+def card_heading(result: CommentResult) -> str:
+    """Return a card's title as escaped bold Markdown with a ``community report`` badge."""
+    return f"**{escape_markdown(card_title(result))}** {label_badge('community report')}"
 
 
 def _region_facts(result: CommentResult) -> list[FactView]:
@@ -714,7 +1127,10 @@ def evidence_rows(result: CommentResult) -> tuple[EvidenceRow, ...]:
 
 
 def source_link(view: CommentView) -> str | None:
-    """Return the comment's permalink, if it has one.
+    """Return the comment's permalink, if it has one and the comment is real.
+
+    A synthetic comment is fiction, so it never links out, even when its import carried a
+    permalink.
 
     Raises
     ------
@@ -724,14 +1140,17 @@ def source_link(view: CommentView) -> str | None:
     link = view.permalink
     if link is not None and not link.lower().startswith(("https://", "http://")):
         raise ValueError(f"Comment {view.comment_id} has a permalink that is not http(s)")
-    return link
+    return None if view.rights_status == "synthetic" else link
 
 
 def provenance_note(view: CommentView) -> str | None:
-    """Return the note shown instead of a source link (``None`` when a link exists)."""
-    if source_link(view) is not None:
-        return None
-    return SYNTHETIC_NOTE if view.rights_status == "synthetic" else NO_LINK_NOTE
+    """Return the card's provenance note: always the synthetic marker on synthetic rows.
+
+    Otherwise a note that no source link exists, or ``None`` when the card shows a link.
+    """
+    if view.rights_status == "synthetic":
+        return SYNTHETIC_NOTE
+    return None if source_link(view) is not None else NO_LINK_NOTE
 
 
 def posted_line(view: CommentView) -> str | None:
@@ -887,7 +1306,7 @@ def state_choices(counts: RegionCounts, current: str | None) -> dict[str | None,
     if current is not None and current not in labels:
         labels[current] = f"{REGION_NAMES[current]} (no reports with the current filters)"
     ordered = sorted(labels, key=REGION_NAMES.__getitem__)
-    return {None: "All states", **{code: labels[code] for code in ordered}}
+    return {None: ALL_STATES, **{code: labels[code] for code in ordered}}
 
 
 def _cell_label(row: Mapping[Hashable, Any], counts: RegionCounts) -> str:

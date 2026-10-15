@@ -384,15 +384,18 @@ def add_private(importer: SourceImporter, conn: sqlite3.Connection, *args: Any) 
 def add_expired(
     importer: SourceImporter, conn: sqlite3.Connection, *args: Any, expires_at: str = PAST
 ) -> None:
-    importer(
-        conn,
-        *args,
-        source_id=EXPIRED_SOURCE,
-        comments=EXPIRED_COMMENTS,
-        extractions=EXPIRED_EXTRACTIONS,
-        rights_status="cleared",
-        expires_at=expires_at,
-    )
+    """Import and extract while permission holds, then re-import recording the expiry.
+
+    Extractions can only be loaded for comments whose permission has not ended, so the
+    expiry is set by a second (identical) import, as an operator would.
+    """
+    common: dict[str, Any] = {
+        "source_id": EXPIRED_SOURCE,
+        "comments": EXPIRED_COMMENTS,
+        "rights_status": "cleared",
+    }
+    importer(conn, *args, **common, extractions=EXPIRED_EXTRACTIONS)
+    importer(conn, *args, **common, expires_at=expires_at)
 
 
 def flatten(result: SearchResult) -> list[CommentResult]:
@@ -606,14 +609,7 @@ def test_expired_source_is_invisible_in_every_scope_and_purged(
     demo_conn: sqlite3.Connection, add_private_source: SourceImporter, tmp_path: Path
 ) -> None:
     before = {scope: snapshot(demo_conn, scope) for scope in ("public", "private")}
-    add_private_source(
-        demo_conn,
-        source_id=EXPIRED_SOURCE,
-        comments=EXPIRED_COMMENTS,
-        extractions=EXPIRED_EXTRACTIONS,
-        rights_status="cleared",
-        expires_at=PAST,
-    )
+    add_expired(add_private_source, demo_conn)
 
     for scope in ("public", "private"):
         assert snapshot(demo_conn, scope) == before[scope]
@@ -621,6 +617,8 @@ def test_expired_source_is_invisible_in_every_scope_and_purged(
     earlier = "2025-06-01T00:00:00Z"  # before expiry the cleared source *is* public
     assert search(demo_conn, "public", SearchQuery(text=EXPIRED_WORD), earlier).n_candidates == 1
 
+    assert db.extractable_texts(demo_conn, ["exp-0001"], NOW) == {}  # permission has ended
+    assert list(db.extractable_texts(demo_conn, ["exp-0001"], earlier)) == ["exp-0001"]
     assert db.purge_expired(demo_conn, NOW) == [EXPIRED_SOURCE]
     assert db.stored_texts(demo_conn, ["exp-0001"]) == {}
     assert search(demo_conn, "public", SearchQuery(text=EXPIRED_WORD), earlier).n_candidates == 0

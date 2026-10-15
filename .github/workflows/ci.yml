@@ -17,5 +17,7 @@ jobs:
         run: uv sync --locked
       - name: Pre-commit hooks (ruff, format, mypy --strict)
         run: uv run pre-commit run --all-files
+      - name: Install Chromium for the browser tests
+        run: uv run playwright install --with-deps chromium
       - name: Tests
         run: uv run pytest --cov --cov-report=term-missing

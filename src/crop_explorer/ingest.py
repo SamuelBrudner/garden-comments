@@ -1,14 +1,16 @@
 """Read user-supplied CSV/JSONL comment exports into validated records (SPEC §8, flow 1-2).
 
 The file format comes from the suffix (``.csv`` or ``.jsonl``). Bytes are decoded as strict
-UTF-8 (a leading byte-order mark is tolerated). Every row needs a non-blank id and text; ids
-must be unique within the file. Optional permalink and date columns become ``None`` when the
-column is unmapped, absent or blank. Comment text is kept exactly as given (no stripping or
+UTF-8 (a leading byte-order mark is tolerated); cells holding invalid Unicode (e.g. an escaped
+lone surrogate in JSON) are rejected. Every row needs a non-blank id and text; ids must be
+unique within the file. Optional permalink and date columns become ``None`` when the column is
+unmapped, absent or blank, unless the mapping marks them required (named explicitly), in which
+case the column must exist. Comment text is kept exactly as given (no stripping or
 normalising), so evidence quotes stay exact substrings.
 
 Errors are :class:`IngestError` with the file, the row (CSV data row, 1-based) or line (JSONL
-physical line, 1-based) and the column, but never a cell value: a swapped column mapping would
-otherwise echo comment text. Only counts are logged.
+physical line, 1-based) and the column, but never a cell value (not even a duplicated id): a
+swapped column mapping would otherwise echo comment text. Only counts are logged.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from loguru import logger
+from pydantic import ValidationError
 
 from crop_explorer import db
 from crop_explorer.schemas import (
@@ -61,6 +64,8 @@ _JSON_TYPE_NAMES: Final[Mapping[type, str]] = {
     bool: "boolean",
     type(None): "null",
 }
+_MAX_LISTED: Final = 10
+"""Most duplicate groups (and row numbers per group) named in one error message."""
 
 
 class IngestError(ValueError):
@@ -186,7 +191,13 @@ def build_source(  # noqa: PLR0913 - keyword-only signature fixed by docs/ARCHIT
 
 
 def import_file(
-    conn: sqlite3.Connection, path: Path, mapping: ColumnMapping, source: SourceRecord
+    conn: sqlite3.Connection,
+    path: Path,
+    mapping: ColumnMapping,
+    source: SourceRecord,
+    *,
+    replace: bool = False,
+    clear_expiry: bool = False,
 ) -> ImportStats:
     """Read an export and make it the complete stored contents of ``source``.
 
@@ -200,11 +211,15 @@ def import_file(
         Column mapping of the export.
     source
         Provenance of the export, usually from :func:`build_source` on the same ``path``.
+    replace
+        Allow replacing every stored comment of the source or changing its rights status.
+    clear_expiry
+        Remove the source's stored expiry (``source.expires_at`` must be ``None``).
 
     Returns
     -------
     ImportStats
-        Inserted/updated/unchanged/deleted counts from :func:`db.sync_source_comments`.
+        Counts and effective rights state from :func:`db.sync_source_comments`.
 
     Raises
     ------
@@ -212,7 +227,9 @@ def import_file(
         If the file is invalid, or its bytes no longer match ``source.dataset_hash`` (the file
         changed after :func:`build_source` hashed it); nothing is written in that case.
     ValueError
-        If a comment id already belongs to another source (raised by the database layer).
+        If the database layer refuses the import: a comment id already belongs to another
+        source, the stored source has expired, or (without ``replace``) the import would
+        change its rights status or shares no comment id with its stored comments.
     """
     _suffix_of(path)
     data = _read_bytes(path)
@@ -221,7 +238,10 @@ def import_file(
             f"{path}: file contents do not match the dataset_hash of source "
             f"{source.source_id!r}; build the source record from this exact file"
         )
-    return db.sync_source_comments(conn, source, _parse(path, data, mapping))
+    records = _parse(path, data, mapping)
+    return db.sync_source_comments(
+        conn, source, records, replace=replace, clear_expiry=clear_expiry
+    )
 
 
 # --------------------------------------------------------------------------- file level
@@ -276,32 +296,53 @@ def _mapped_columns(mapping: ColumnMapping) -> tuple[str, ...]:
     return (mapping.id_col, mapping.text_col, *(c for c in optional if c is not None))
 
 
+def _explicit_columns(mapping: ColumnMapping) -> tuple[str, ...]:
+    """Return the optional columns marked required (the operator named them explicitly)."""
+    flagged = (
+        (mapping.permalink_col, mapping.permalink_required),
+        (mapping.date_col, mapping.date_required),
+    )
+    return tuple(column for column, required in flagged if required and column is not None)
+
+
 def _rows(suffix: str, text: str, mapping: ColumnMapping) -> list[_Row]:
     if not text.strip():
         raise IngestError("file is empty")
     rows = _csv_rows(text, mapping) if suffix == ".csv" else _jsonl_rows(text)
     if not rows:
         raise IngestError("file contains no comments")
+    _check_explicit_keys(rows, mapping)
     return rows
+
+
+def _check_explicit_keys(rows: Sequence[_Row], mapping: ColumnMapping) -> None:
+    for column in _explicit_columns(mapping):
+        if not any(column in row.cells for row in rows):
+            raise IngestError(f"no {rows[0].unit} has the mapped column {column!r}")
 
 
 def _records(rows: Sequence[_Row], mapping: ColumnMapping) -> list[CommentRecord]:
     records = [_to_record(row, order, mapping) for order, row in enumerate(rows)]
-    _check_unique_ids(rows, records)
+    _check_unique_ids(rows, records, mapping.id_col)
     return records
 
 
-def _check_unique_ids(rows: Sequence[_Row], records: Sequence[CommentRecord]) -> None:
-    positions: defaultdict[str, list[int]] = defaultdict(list)
+def _check_unique_ids(rows: Sequence[_Row], records: Sequence[CommentRecord], column: str) -> None:
+    """Name the rows of each duplicated id, never the id itself (it may be comment text)."""
+    positions: defaultdict[str, list[str]] = defaultdict(list)
     for row, rec in zip(rows, records, strict=True):
-        positions[rec.comment_id].append(row.number)
-    duplicates = [(cid, numbers) for cid, numbers in positions.items() if len(numbers) > 1]
-    if duplicates:
+        positions[rec.comment_id].append(str(row.number))
+    groups = [numbers for numbers in positions.values() if len(numbers) > 1]
+    if groups:
         unit = rows[0].unit
-        listed = "; ".join(
-            f"{cid!r} ({unit}s {', '.join(map(str, numbers))})" for cid, numbers in duplicates
-        )
-        raise IngestError(f"duplicate comment ids: {listed}")
+        listed = [f"{unit}s {_capped(numbers, ', ')}" for numbers in groups]
+        raise IngestError(f"duplicate comment ids in column {column!r}: {_capped(listed, '; ')}")
+
+
+def _capped(items: Sequence[str], separator: str) -> str:
+    shown = separator.join(items[:_MAX_LISTED])
+    hidden = len(items) - _MAX_LISTED
+    return f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
 # --------------------------------------------------------------------------- CSV
@@ -318,7 +359,7 @@ def _csv_rows(text: str, mapping: ColumnMapping) -> list[_Row]:
 
 
 def _check_header(header: Sequence[str], mapping: ColumnMapping) -> None:
-    for column in (mapping.id_col, mapping.text_col):
+    for column in (mapping.id_col, mapping.text_col, *_explicit_columns(mapping)):
         if column not in header:
             raise IngestError(f"CSV header has no required column {column!r}")
     for column in _mapped_columns(mapping):
@@ -378,16 +419,35 @@ def _to_record(row: _Row, order: int, mapping: ColumnMapping) -> CommentRecord:
         )
     except IngestError as exc:
         raise IngestError(f"{row.where}: {exc}") from None
+    except ValidationError as exc:  # its own text quotes the input: never pass it on
+        columns = _invalid_columns(exc, mapping)
+        raise IngestError(f"{row.where}: invalid value in column(s) {columns}") from None
+
+
+def _invalid_columns(exc: ValidationError, mapping: ColumnMapping) -> str:
+    """Name the mapped columns of the fields a record failed on (no values)."""
+    by_field = {
+        "comment_id": mapping.id_col,
+        "text": mapping.text_col,
+        "permalink": mapping.permalink_col,
+        "created_at": mapping.date_col,
+    }
+    fields = sorted({str(error["loc"][0]) for error in exc.errors() if error["loc"]})
+    return ", ".join(repr(by_field.get(field) or field) for field in fields)
 
 
 def _cell(cells: Mapping[str, object], column: str | None) -> str | None:
     """Return the cell as given; ``None`` when unmapped, absent or JSON null."""
-    if column is None:
+    value = None if column is None else cells.get(column)
+    if value is None:
         return None
-    value = cells.get(column)
-    if value is None or isinstance(value, str):
-        return value
-    raise IngestError(f"column {column!r} must be a string, got {_json_type(value)}")
+    if not isinstance(value, str):
+        raise IngestError(f"column {column!r} must be a string, got {_json_type(value)}")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise IngestError(f"column {column!r} holds invalid Unicode (a lone surrogate)") from None
+    return value
 
 
 def _required(cells: Mapping[str, object], column: str) -> str:

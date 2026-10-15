@@ -459,6 +459,14 @@ def test_choropleth_of_empty_input_still_renders() -> None:
     assert pio.from_json(figure.to_json()).data[0].locationmode == "USA-states"
 
 
+def test_choropleth_layout_is_static_and_borderless() -> None:
+    layout = choropleth(mixed_counts()).layout
+
+    assert layout.dragmode is False
+    assert (layout.margin.l, layout.margin.r, layout.margin.t, layout.margin.b) == (0, 0, 0, 0)
+    assert layout.geo.bgcolor == "rgba(0,0,0,0)"
+
+
 def test_choropleth_color_range_starts_at_zero() -> None:
     trace = choropleth(mixed_counts()).data[0]
 

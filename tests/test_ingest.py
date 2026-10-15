@@ -20,8 +20,10 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from loguru import logger
+from pydantic import Field
 
 from crop_explorer import db
+from crop_explorer import ingest as ingest_module
 from crop_explorer.config import load_config
 from crop_explorer.extraction import load_extractions
 from crop_explorer.ingest import (
@@ -466,26 +468,50 @@ def test_jsonl_non_string_values_are_rejected(
 # --------------------------------------------------------------------------- duplicates
 
 
-def test_csv_duplicate_ids_name_each_id_and_its_rows(tmp_path: Path) -> None:
+def test_csv_duplicate_ids_name_the_column_and_rows_but_never_the_ids(tmp_path: Path) -> None:
+    """F41: with a swapped mapping the "ids" are comment bodies, so they are never printed."""
     rows = [("c1", "a"), ("c2", "b"), ("c1", "c"), ("c3", "d"), ("c2", "e"), ("c1", "f")]
     path = write_csv(tmp_path / "dup.csv", ("comment_id", "text"), rows)
 
     message = ingest_error(path)
 
-    assert "duplicate" in message
-    assert "'c1' (rows 1, 3, 6)" in message
-    assert "'c2' (rows 2, 5)" in message
-    assert "'c3'" not in message
+    assert "duplicate comment ids in column 'comment_id'" in message
+    assert "rows 1, 3, 6; rows 2, 5" in message
+    assert "c1" not in message and "c2" not in message and "c3" not in message
 
 
 def test_jsonl_duplicate_ids_report_line_numbers(tmp_path: Path) -> None:
     path = tmp_path / "dup.jsonl"
     path.write_text(
-        '{"comment_id": "x", "text": "a"}\n\n{"comment_id": "x", "text": "b"}\n',
+        '{"comment_id": "xid", "text": "a"}\n\n{"comment_id": "xid", "text": "b"}\n',
         encoding="utf-8",
     )
 
-    assert "'x' (lines 1, 3)" in ingest_error(path)
+    message = ingest_error(path)
+
+    assert "lines 1, 3" in message
+    assert "xid" not in message
+
+
+def test_swapped_mapping_with_identical_bodies_never_echoes_the_body(tmp_path: Path) -> None:
+    body = "SECRETBODY my kohlrabi died in Cheyenne"
+    path = write_csv(tmp_path / "swapped.csv", ("cid", "body"), [("a", body), ("b", body)])
+
+    message = ingest_error(path, ColumnMapping(id_col="body", text_col="cid"))
+
+    assert "rows 1, 2" in message
+    assert "'body'" in message
+    assert SECRET not in message
+
+
+def test_many_duplicate_groups_are_listed_briefly(tmp_path: Path) -> None:
+    rows = [(f"c{i}", "t") for i in range(15)] * 2
+    path = write_csv(tmp_path / "many.csv", ("comment_id", "text"), rows)
+
+    message = ingest_error(path)
+
+    assert "rows 1, 16; rows 2, 17" in message
+    assert "(+5 more)" in message
 
 
 # --------------------------------------------------------------------------- optional fields
@@ -675,6 +701,88 @@ def test_mapping_must_use_distinct_columns(two_row_csv: Path, mapping: ColumnMap
     assert "distinct" in ingest_error(two_row_csv, mapping)
 
 
+# --------------------------------------------------------------------------- explicit columns
+
+
+def test_explicit_optional_csv_column_must_exist(two_row_csv: Path) -> None:
+    """F36: a mistyped --permalink-col/--date-col fails instead of dropping every value."""
+    for mapping, column in (
+        (ColumnMapping(permalink_col="link", permalink_required=True), "link"),
+        (ColumnMapping(date_col="posted", date_required=True), "posted"),
+    ):
+        message = ingest_error(two_row_csv, mapping)
+        assert f"'{column}'" in message
+        assert "header" in message
+
+
+def test_explicit_default_named_column_must_exist_too(tmp_path: Path) -> None:
+    path = write_csv(tmp_path / "min.csv", ("comment_id", "text"), [("c1", TEXT1)])
+
+    message = ingest_error(path, ColumnMapping(permalink_required=True))
+
+    assert "'permalink'" in message
+
+
+def test_explicit_optional_jsonl_key_must_appear_in_some_object(tmp_path: Path) -> None:
+    path = write_jsonl(
+        tmp_path / "keys.jsonl",
+        [{"comment_id": "c1", "text": TEXT1, "url": URL1}, {"comment_id": "c2", "text": TEXT2}],
+    )
+
+    message = ingest_error(path, ColumnMapping(permalink_col="link", permalink_required=True))
+
+    assert "'link'" in message
+    assert path.name in message
+    found = read_comments(path, ColumnMapping(permalink_col="url", permalink_required=True))
+    assert [r.permalink for r in found] == [URL1, None]  # absent in one object is fine
+
+
+def test_implicit_optional_columns_may_be_absent(tmp_path: Path) -> None:
+    path = write_jsonl(tmp_path / "plain.jsonl", [{"comment_id": "c1", "text": TEXT1}])
+
+    assert read_comments(path, DEFAULT) == [record("c1", TEXT1, 0)]
+
+
+# --------------------------------------------------------------------------- invalid Unicode
+
+
+@pytest.mark.parametrize("column", ["comment_id", "text", "permalink", "created_at"])
+def test_lone_surrogate_is_rejected_with_file_line_and_column(tmp_path: Path, column: str) -> None:
+    """F28: a truncated emoji (escaped lone surrogate) never puts the cell into the error."""
+    cells = {"comment_id": "yt-77", "text": f"{SECRET} Jane at 12 Elm St", "permalink": None}
+    cells[column] = f"{SECRET} grew Sungold \ud83c"
+    path = tmp_path / "surrogate.jsonl"
+    path.write_text(
+        '{"comment_id": "ok", "text": "fine"}\n' + json.dumps(cells) + "\n", encoding="utf-8"
+    )
+
+    message = ingest_error(path)
+
+    assert path.name in message
+    assert "line 2" in message
+    assert f"'{column}'" in message
+    assert SECRET not in message and "Elm" not in message
+
+
+def test_any_record_validation_error_is_reported_without_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backstop: a pydantic error (whose text quotes the input) never reaches the message."""
+
+    class TinyRecord(CommentRecord):
+        text: str = Field(min_length=1, max_length=3)
+
+    monkeypatch.setattr(ingest_module, "CommentRecord", TinyRecord)
+    path = write_csv(tmp_path / "long.csv", ("comment_id", "text"), [("c1", f"{SECRET} long")])
+
+    message = ingest_error(path)
+
+    assert "row 1" in message
+    assert "'text'" in message
+    assert path.name in message
+    assert SECRET not in message
+
+
 # --------------------------------------------------------------------------- privacy
 
 
@@ -839,8 +947,13 @@ def test_build_source_requires_a_readable_file(tmp_path: Path) -> None:
 EXTRACTION_CFG = load_config().extraction
 TABLES = ("sources", "comments", "parses", "mentions", "environment_facts")
 TEXT2_CHANGED = "Cherokee Purple cracked after the downpour."
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 C1_EXTRACTION = {
     "comment_id": "c1",
+    "text_hash": sha256_hex(TEXT1),
     "extractor_version": "test-v1",
     "status": "parsed",
     "mentions": [
@@ -853,6 +966,7 @@ C1_EXTRACTION = {
                 {
                     "key": "method",
                     "value_as_written": "5 gallon pots",
+                    "normalized_value": "container",
                     "evidence_quote": "Sun Gold in 5 gallon pots",
                     "applicability": "this_mention",
                     "basis": "reported_garden_context",
@@ -860,6 +974,7 @@ C1_EXTRACTION = {
                 {
                     "key": "zone",
                     "value_as_written": "zone 6b",
+                    "normalized_value": "6b",
                     "evidence_quote": "zone 6b",
                     "applicability": "whole_comment",
                     "basis": "reported_garden_context",
@@ -870,6 +985,7 @@ C1_EXTRACTION = {
 }
 C2_EXTRACTION = {
     "comment_id": "c2",
+    "text_hash": sha256_hex(TEXT2),
     "extractor_version": "test-v1",
     "status": "parsed",
     "mentions": [
@@ -888,6 +1004,20 @@ def memory_db() -> Iterator[sqlite3.Connection]:
     conn = db.connect(db.MEMORY_PATH)
     yield conn
     conn.close()
+
+
+def private_stats(
+    *, inserted: int = 0, updated: int = 0, unchanged: int = 0, deleted: int = 0
+) -> ImportStats:
+    return ImportStats(
+        source_id="export-2024",
+        inserted=inserted,
+        updated=updated,
+        unchanged=unchanged,
+        deleted=deleted,
+        rights_status="private_unverified",
+        expires_at=None,
+    )
 
 
 def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -935,9 +1065,7 @@ def test_import_file_stores_exact_records_under_the_source(
 ) -> None:
     stats = import_csv(memory_db, two_row_csv)
 
-    assert stats == ImportStats(
-        source_id="export-2024", inserted=2, updated=0, unchanged=0, deleted=0
-    )
+    assert stats == private_stats(inserted=2)
     assert [
         (v.comment_id, v.text, v.permalink, v.created_at, v.source_order, v.parse_status)
         for v in private_views(memory_db)
@@ -958,9 +1086,7 @@ def test_reimporting_the_identical_file_changes_nothing_and_keeps_extractions(
 
     stats = import_csv(extracted_db, two_row_csv)
 
-    assert stats == ImportStats(
-        source_id="export-2024", inserted=0, updated=0, unchanged=2, deleted=0
-    )
+    assert stats == private_stats(unchanged=2)
     assert table_counts(extracted_db) == before_counts
     assert private_views(extracted_db) == before_views
     assert before_counts["environment_facts"] == 2
@@ -983,7 +1109,7 @@ def test_changed_comment_text_drops_only_that_comments_extraction(
     assert text_hits(extracted_db, "downpour") == ["c2"]
     assert text_hits(extracted_db, "split") == []
     assert db.iter_comments_for_extraction(extracted_db, only_unparsed=True, now=IMPORTED) == [
-        ("c2", TEXT2_CHANGED)
+        ("c2", TEXT2_CHANGED, hashlib.sha256(TEXT2_CHANGED.encode("utf-8")).hexdigest())
     ]
 
 
@@ -1055,6 +1181,36 @@ def test_import_refuses_a_file_that_changed_after_its_source_was_built(
     assert (fresh.inserted, fresh.deleted) == (1, 1)
 
 
+def test_a_different_export_under_the_same_source_id_needs_replace(
+    extracted_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """F06: an unrelated file with the same source id cannot silently replace the source."""
+    other = write_csv(tmp_path / "other.csv", HEADER, [("v2-1", "Okra.", "", "")])
+    before = table_counts(extracted_db)
+
+    with pytest.raises(ValueError, match="export-2024"):
+        import_file(extracted_db, other, DEFAULT, make_source(other))
+    assert table_counts(extracted_db) == before
+
+    stats = import_file(extracted_db, other, DEFAULT, make_source(other), replace=True)
+    assert stats == private_stats(inserted=1, deleted=2)
+
+
+def test_import_file_keeps_or_clears_the_stored_expiry(
+    memory_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    expiry = "2030-01-01T00:00:00Z"
+    first = import_file(
+        memory_db, two_row_csv, DEFAULT, make_source(two_row_csv, expires_at=expiry)
+    )
+    kept = import_file(memory_db, two_row_csv, DEFAULT, make_source(two_row_csv))
+    cleared = import_file(
+        memory_db, two_row_csv, DEFAULT, make_source(two_row_csv), clear_expiry=True
+    )
+
+    assert (first.expires_at, kept.expires_at, cleared.expires_at) == (expiry, expiry, None)
+
+
 SMALL_IDS = st.sampled_from(["a", "b", "c", "d"])
 SMALL_TEXTS = st.sampled_from(["Sungold in pots.", "Juliet in the ground.", "Brandywine!"])
 EXPORTS = st.lists(st.tuples(SMALL_IDS, SMALL_TEXTS), max_size=4, unique_by=lambda r: r[0])
@@ -1068,11 +1224,12 @@ def test_reimport_leaves_exactly_the_latest_export(
     """Any import sequence stores exactly the latest file, with exact change counts."""
     path = tmp_path / "export.jsonl"
     old, new = dict(first), dict(second)
+    replace = old.keys().isdisjoint(new)  # an unrelated export needs an explicit replace
     conn = db.connect(db.MEMORY_PATH)
     try:
         for rows in (first, second):
             write_jsonl(path, [{"comment_id": cid, "text": text} for cid, text in rows])
-            stats = import_file(conn, path, DEFAULT, make_source(path))
+            stats = import_file(conn, path, DEFAULT, make_source(path), replace=replace)
         again = import_file(conn, path, DEFAULT, make_source(path))
         stored = db.stored_texts(conn, sorted(old | new))
     finally:
@@ -1083,6 +1240,4 @@ def test_reimport_leaves_exactly_the_latest_export(
     assert stats.deleted == len(old.keys() - new.keys())
     assert stats.updated == sum(old[k] != new[k] for k in old.keys() & new.keys())
     assert stats.unchanged == sum(old[k] == new[k] for k in old.keys() & new.keys())
-    assert again == ImportStats(
-        source_id="export-2024", inserted=0, updated=0, unchanged=len(new), deleted=0
-    )
+    assert again == private_stats(unchanged=len(new))
