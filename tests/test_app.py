@@ -475,7 +475,6 @@ class TestMap:
         assert options == ["All states", "Connecticut (3 reports)", "Georgia (1 report)"]
         assert "Region not reported: 1" in texts_of(at)
 
-
     def test_map_is_remounted_without_a_stale_selection_when_the_filter_changes(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:

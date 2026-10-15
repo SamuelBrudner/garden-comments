@@ -353,6 +353,19 @@ def test_region_counts_rejects_a_table_with_wrong_columns() -> None:
         )
 
 
+def test_region_counts_compare_by_value() -> None:
+    def counts(*results: CommentResult, k: int = 1) -> RegionCounts:
+        return region_counts(list(results), min_cell_count=k)
+
+    ct, me = result("c1", [region("US-CT")]), result("c2", [region("US-ME")])
+    assert counts(ct, me) == counts(me, ct)
+    assert counts(ct, me) != counts(ct)
+    assert counts(ct, me) != counts(ct, me, k=2)
+    assert counts() != "not counts"
+    with pytest.raises(TypeError):
+        hash(counts())
+
+
 def test_region_counts_rejects_negative_bucket_counts() -> None:
     table = region_counts([], min_cell_count=1).table
     with pytest.raises(ValueError, match="non-negative"):

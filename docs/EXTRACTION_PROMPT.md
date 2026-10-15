@@ -205,9 +205,11 @@ Extract only what the comment states for the reported growing. Never infer:
 ### Hypotheticals, advice and plans
 
 Advice, plans and hypotheticals are not growing reports. The loader splits each comment into
-sentences on `.`, `!`, `?` and line breaks. It **rejects any fact whose evidence sentence
-contains a hypothetical marker** (`hypothetical_context`), matched case-insensitively as whole
-words, with `’` treated as `'`. The current markers (`config.yaml` →
+sentences on `!`, `?`, line breaks and `.` (a full stop counts only before a space, a closing
+quote or bracket, or the end of the comment, and not after an abbreviation such as `Mr.`,
+`e.g.` or `var.`, so `5.5 gallon` and `Mr. Stripey` do not end a sentence). It **rejects any
+fact whose evidence sentence contains a hypothetical marker** (`hypothetical_context`), matched
+case-insensitively as whole words, with `’` treated as `'`. The current markers (`config.yaml` →
 `extraction.hypothetical_markers`; read the config for the authoritative list) are:
 
 `i'd`, `i would`, `would try`, `i'll`, `i will`, `should`, `could`, `might`, `if you`,
@@ -223,11 +225,12 @@ relevant). Never edit a quote to dodge the check. The mention itself may still b
 | 1 | Each line is one valid object of the shape above: known keys only, valid enums, non-empty quotes. | `schema_error` |
 | 2 | `comment_id` exists in the database and appears once in the file. | `unknown_comment_id`, `duplicate_comment_id` |
 | 3 | Mention `evidence_quote` is an **exact, case-sensitive substring** of the comment text. Otherwise the mention and all its facts are dropped. | `mention_quote_not_substring` |
-| 4 | `variety_as_written` occurs (case-insensitively) inside the mention quote. | `variety_not_in_quote` |
+| 4 | `variety_as_written` occurs (case-insensitively) inside the mention quote; `crop` and `variety_as_written` are non-blank names. | `variety_not_in_quote`, `invalid_crop`, `invalid_variety` |
 | 5 | Fact `evidence_quote` is an exact, case-sensitive substring of the comment text. | `fact_quote_not_substring` |
 | 6 | `value_as_written` occurs (case-insensitively) inside the fact's `evidence_quote`. | `value_not_in_quote` |
 | 7 | `normalized_value`, when given, is a vocabulary value for its key. | `invalid_normalized_value` |
 | 8 | For `region`, `zone` and `growing_year`, `normalized_value` equals the loader's normalisation of `value_as_written`. | `strict_key_mismatch` |
+| 8b | For every other key, `normalized_value` does not contradict the loader's normalisation of `value_as_written` (`"pots"` cannot be `raised_bed`). A value the loader cannot derive is accepted. | `normalized_value_mismatch` |
 | 9 | No sentence overlapping the fact's evidence contains a hypothetical marker. | `hypothetical_context` |
 | 10 | At most one distinct region and one distinct zone per mention. | `conflicting_region`, `conflicting_zone` |
 

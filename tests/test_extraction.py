@@ -1451,6 +1451,36 @@ def test_every_fixture_extraction_line_validates_without_rejection() -> None:
         assert len(result.mentions) == len(line.mentions), comment_id
 
 
+def prompt_worked_example() -> tuple[dict[str, str], list[ParsedComment]]:
+    """The input and output JSON blocks of docs/EXTRACTION_PROMPT.md's worked example."""
+    doc = (REPO / "docs" / "EXTRACTION_PROMPT.md").read_text(encoding="utf-8")
+    section = doc.split("### Worked example", 1)[1].split("\n### ", 1)[0]
+    blocks = [part.split("```", 1)[0] for part in section.split("```json\n")[1:]]
+    inputs = [json.loads(line) for line in blocks[0].splitlines() if line.strip()]
+    outputs = [ParsedComment.model_validate_json(x) for x in blocks[1].splitlines() if x.strip()]
+    return {row["comment_id"]: row["text"] for row in inputs}, outputs
+
+
+def test_the_prompts_worked_example_passes_the_validator() -> None:
+    """The model is taught with this example, so it must load without any rejection."""
+    texts, outputs = prompt_worked_example()
+
+    assert [line.comment_id for line in outputs] == list(texts)
+    for line in outputs:
+        result = validate_parsed_comment(line, texts[line.comment_id], REPO_CFG)
+        assert result.rejections == (), line.comment_id
+        assert result.status == line.status
+
+
+def test_the_prompts_hypothetical_example_cannot_carry_a_zone() -> None:
+    texts, _ = prompt_worked_example()
+    added = mention("Great video", fact("zone", "zone 5", "in zone 5", "5"), crop=None)
+
+    result = validate_parsed_comment(parsed("ex-3", added), texts["ex-3"], REPO_CFG)
+
+    assert reasons(result) == [(0, 0, "hypothetical_context")]
+
+
 def test_fixture_load_report(demo: sqlite3.Connection) -> None:
     raw = [json.loads(x) for x in FIXTURE_EXTRACTIONS.read_text(encoding="utf-8").split("\n") if x]
     anonymous = sum(

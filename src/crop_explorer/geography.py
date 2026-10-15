@@ -43,7 +43,7 @@ _SEQUENTIAL_BLUE: Final = (
 _Bucket = Literal["mapped", "us_state_not_reported", "outside_us", "not_reported"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class RegionCounts:
     """Distinct-comment counts per reported U.S. state, plus the comments the map cannot show.
 
@@ -87,6 +87,21 @@ class RegionCounts:
         if min(self.not_reported, self.outside_us, self.us_state_not_reported) < 0:
             raise ValueError("RegionCounts bucket counts must be non-negative")
         _check_min_cell_count(self.min_cell_count)
+
+    def __eq__(self, other: object) -> bool:
+        """Compare by value; the table is compared with :meth:`pandas.DataFrame.equals`.
+
+        The generated dataclass ``__eq__`` would compare DataFrames with ``==``, which raises
+        instead of returning a bool.
+        """
+        if not isinstance(other, RegionCounts):
+            return NotImplemented
+        buckets = (self.not_reported, self.outside_us, self.us_state_not_reported)
+        others = (other.not_reported, other.outside_us, other.us_state_not_reported)
+        same_threshold = self.min_cell_count == other.min_cell_count
+        return buckets == others and same_threshold and self.table.equals(other.table)
+
+    __hash__ = None  # type: ignore[assignment]  # mutable DataFrame inside: unhashable
 
 
 def region_counts(results: Sequence[CommentResult], min_cell_count: int) -> RegionCounts:
