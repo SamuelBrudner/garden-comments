@@ -331,7 +331,7 @@ class TestBrowseScreen:
     ) -> None:
         at = run_app(monkeypatch, app_env)
         assert (
-            "Only 35 of 70 reports mention comparable growing conditions (4 not yet analysed)."
+            "Only 33 of 70 reports mention comparable growing conditions (4 not yet analysed)."
             in infos(at)
         )
 
@@ -456,6 +456,18 @@ class TestGrouping:
             "syn-0013",
             "syn-0053",
         }
+
+    def test_a_topic_filter_keeps_comparing_the_searched_crop(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """Validation regression: Topics "pests" moved syn-0068's zucchini to Matching with the
+        clay its Waltham Butternut grew in (SPEC §11 #2)."""
+        at = select_garden(run_app(monkeypatch, app_env), soil="clay")
+        at.text_input(key=ui.TEXT_KEY).input("zucchini").run()
+        assert "syn-0068" in shown_ids(group(at, "not_stated"), app_env)
+        at.multiselect(key=ui.TOPICS_KEY).select("pests").run()
+        assert "syn-0068" in shown_ids(group(at, "not_stated"), app_env)
+        assert not has_group(at, "match")
 
     def test_different_group_is_collapsed(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -692,6 +704,20 @@ class TestProvenanceLabels:
         captions = [c.value for c in group(at, "match").caption if "Relevant" in c.value]
         assert len(captions) == 3
         assert all(caption.startswith(f"{badge} ") for caption in captions)
+
+    def test_a_region_only_card_is_not_badged_and_is_called_not_comparable(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """Validation regression: syn-0008 states only Maine, which is never compared."""
+        at = select_garden(run_app(monkeypatch, app_env), zone="6b")
+        at.text_input(key=ui.TEXT_KEY).input("visiting relatives").run()
+        assert shown_ids(group(at, "not_stated"), app_env) == {"syn-0008"}
+        captions = [c.value for c in group(at, "not_stated").caption if "Region" in c.value]
+        assert captions == [ui.escape_markdown("Not stated: hardiness zone\nRegion: Maine")]
+        assert (
+            "The 1 report found does not mention comparable growing conditions, so it cannot be "
+            "compared with your garden. It is shown below."
+        ) in infos(at)
 
     def test_map_tab_is_labelled(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)

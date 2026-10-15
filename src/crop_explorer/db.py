@@ -30,6 +30,7 @@ from typing import Final, Literal, NamedTuple
 
 from loguru import logger
 
+from crop_explorer.normalization import variety_key
 from crop_explorer.schemas import (
     CommentRecord,
     ImportStats,
@@ -197,6 +198,11 @@ _SELECT_STORED_HASHES: Final = "SELECT comment_id, text_hash FROM comments WHERE
 _SAVEPOINT: Final = "crop_explorer_tx"
 _ORDER: Final = "c.source_id, c.source_order, c.comment_id"
 _VISIBLE_FROM: Final = "comments c JOIN sources s ON s.source_id = c.source_id"
+_TEXT_MATCH: Final = (
+    "(c.id IN (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?)"
+    " OR c.comment_id IN (SELECT comment_id FROM mentions WHERE variety_key = ?))"
+)
+"""Search text: a full-text match, or a mention whose variety_key is the text's."""
 _IDS_PARAM: Final = "(SELECT value FROM json_each(?))"
 _SELECT_OWNERS: Final = (
     f"SELECT comment_id, source_id FROM comments WHERE comment_id IN {_IDS_PARAM}"
@@ -1033,7 +1039,10 @@ def visible_comment_ids(
 ) -> list[str]:
     """Return ids of comments visible in ``scope`` at ``now``, optionally full-text filtered.
 
-    Comments are found by text whether or not they were ever extracted.
+    Comments are found by text whether or not they were ever extracted. A comment with a
+    mention whose stored ``variety_key`` equals the text's
+    :func:`~crop_explorer.normalization.variety_key` is found too, so one spelling of a variety
+    finds the others ("Sungold" finds "Sun Gold" and "Sun-Gold"); this only adds comments.
 
     Parameters
     ----------
@@ -1059,10 +1068,21 @@ def visible_comment_ids(
     where, params = visibility_clause(scope, now)
     match = None if text is None else fts_query(text)
     if match is not None:
-        where += " AND c.id IN (SELECT rowid FROM comments_fts WHERE comments_fts MATCH ?)"
-        params.append(match)
+        where += f" AND {_TEXT_MATCH}"
+        params.extend((match, _text_variety_key(text)))
     sql = f"SELECT c.comment_id FROM {_VISIBLE_FROM} WHERE {where} ORDER BY {_ORDER}"
     return [str(row["comment_id"]) for row in conn.execute(sql, params)]
+
+
+def _text_variety_key(text: str | None) -> str:
+    """Return the text's :func:`~crop_explorer.normalization.variety_key` (``""`` if none).
+
+    No stored key is ever empty, so ``""`` matches no mention.
+    """
+    try:
+        return "" if text is None else variety_key(text)
+    except ValueError:
+        return ""
 
 
 def load_comment_views(

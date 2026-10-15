@@ -47,6 +47,7 @@ from crop_explorer.normalization import (
     resolve_spans,
     variety_key,
 )
+from crop_explorer.regions import US_STATES, us_postal
 from crop_explorer.schemas import (
     EnvironmentFact,
     EnvKey,
@@ -62,6 +63,7 @@ from crop_explorer.visibility import require_utc_iso
 from crop_explorer.vocab import is_valid_normalized
 
 __all__ = [
+    "REJECTION_REASONS",
     "ExtractionReport",
     "load_extractions",
     "read_extraction_jsonl",
@@ -91,6 +93,32 @@ _QUESTION_CONTEXT: Final = "question_context"
 _CONFLICT_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {"region": "conflicting_region", "zone": "conflicting_zone"}
 )
+REJECTION_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        _SCHEMA_ERROR,
+        _UNKNOWN_COMMENT_ID,
+        _DUPLICATE_COMMENT_ID,
+        _SOURCE_EXPIRED,
+        _STALE_TEXT,
+        _MENTION_QUOTE_NOT_SUBSTRING,
+        _VARIETY_NOT_IN_QUOTE,
+        _CROP_NOT_IN_QUOTE,
+        _INVALID_CROP,
+        _INVALID_VARIETY,
+        _FACT_QUOTE_NOT_SUBSTRING,
+        _VALUE_NOT_IN_QUOTE,
+        _VALUE_IN_VARIETY_NAME,
+        _INVALID_NORMALIZED_VALUE,
+        _NEGATED_VALUE,
+        _BLOCKED_VALUE,
+        _STRICT_KEY_MISMATCH,
+        _NORMALIZED_VALUE_MISMATCH,
+        _HYPOTHETICAL_CONTEXT,
+        _QUESTION_CONTEXT,
+        *_CONFLICT_REASONS.values(),
+    }
+)
+"""Every reason a :class:`~crop_explorer.schemas.Rejection` from this module can carry."""
 _LINE_BUCKETS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "schema_errors": _SCHEMA_ERROR,
@@ -113,15 +141,23 @@ _TRAILING_WORD_WINDOW: Final = 32
 sentence splitting linear in the text length (a longer word is never an abbreviation)."""
 _ABBREVIATIONS: Final = frozenset(
     {
-        "mr", "mrs", "ms", "dr", "prof", "st", "mt", "ft", "jr", "sr",
-        "vs", "e.g", "i.e", "eg", "ie", "cf", "approx",
+        "mr", "mrs", "ms", "dr", "prof", "jr", "sr",
+        "vs", "e.g", "i.e", "eg", "ie", "cf", "approx", "nr",
+        "st", "mt", "mtn", "ft", "pt", "co", "cty", "twp", "apt", "rd", "ave", "blvd", "hwy",
         "var", "cv", "ssp", "subsp", "spp",
-        "gal", "lb", "lbs", "oz",
+        "gal", "lb", "lbs", "oz", "qt", "cu", "sq", "yd",
     }
 )  # fmt: skip
-"""Words whose trailing ``.`` does not end a sentence ("I'd try Mr. Stripey in zone 5").
+"""Words (any case) whose trailing ``.`` does not end a sentence: titles, places and units
+("I'd try Mr. Stripey in zone 5", "I'd try it in Co. Cork in zone 8", "2 cu. ft. bags").
 
 Joining across an abbreviation can only make the hypothetical guard stricter, never looser."""
+_STATE_CODES: Final = frozenset(us_postal(code) for code in US_STATES)
+"""Uppercase U.S. postal codes, which end a sentence although "co", "mt" and "ms" are
+abbreviations: "Denver, CO." is Colorado, "Co. Cork" a county."""
+_SENTENCE_START: Final = "^"
+"""Prefix of a marker that counts only at the start of a sentence ("^maybe": "Maybe Sungold in
+zone 5." is a hedge, "gets maybe 7 hrs of full sun" an estimate inside a report)."""
 _APOSTROPHES: Final = "'\u2019\u2018\u02bc\u00b4`"
 """Characters a marker's apostrophe matches: ASCII ``'``, U+2019, U+2018, U+02BC, the acute accent
 U+00B4 and the backtick."""
@@ -295,7 +331,7 @@ def _comment(parsed: ParsedComment, text: str, pattern: re.Pattern[str]) -> _Com
     return _Comment(
         comment_id=parsed.comment_id,
         text=text,
-        hypothetical=tuple(s for s in sentences if pattern.search(text, *s)),
+        hypothetical=tuple(s for s in sentences if pattern.match(text, *s)),
         questions=tuple(s for s in sentences if text[s[1] - 1] == _QUESTION_MARK),
         variety_names=_merged(span for name in names for span in _name_spans(text, name)),
     )
@@ -503,19 +539,23 @@ def _validate_fact(comment: _Comment, fact: EnvironmentFact) -> ValidatedFact:
     _require(quote in comment.text, _FACT_QUOTE_NOT_SUBSTRING)
     found = _word_occurrences(quote, fact.value_as_written)
     _require(bool(found), _VALUE_NOT_IN_QUOTE)
-    _require(not _in_variety_name(comment, quote, found), _VALUE_IN_VARIETY_NAME)
+    found = [position for position in found if not _in_variety_name(comment, quote, position)]
+    _require(bool(found), _VALUE_IN_VARIETY_NAME)
     normalized = _normalized_value(fact, found)
     _require(not _in_sentences(comment.text, comment.hypothetical, quote), _HYPOTHETICAL_CONTEXT)
     _require(not _in_sentences(comment.text, comment.questions, quote), _QUESTION_CONTEXT)
     return ValidatedFact.model_validate({**fact.model_dump(), "normalized_value": normalized})
 
 
-def _in_variety_name(comment: _Comment, quote: str, found: Sequence[_Span]) -> bool:
-    """Rule 4: whether some occurrence of the value lies wholly inside a variety name."""
+def _in_variety_name(comment: _Comment, quote: str, position: _Span) -> bool:
+    """Rule 4: whether, at some occurrence of the quote, ``position`` lies inside a variety name.
+
+    Such a position is not evidence for the value ("Arkansas" of "Arkansas Traveler").
+    """
+    start, end = position
     return bool(comment.variety_names) and any(
         _inside(comment.variety_names, offset + start, offset + end)
         for offset in _occurrence_starts(comment.text, quote)
-        for start, end in found
     )
 
 
@@ -531,7 +571,10 @@ def _in_sentences(text: str, sentences: Sequence[_Span], quote: str) -> bool:
 
 
 def _normalized_value(fact: EnvironmentFact, found: Sequence[_Span]) -> str | None:
-    """Apply rule 5 at every position of the value in the quote; ``None`` stays display-only."""
+    """Apply rule 5 at the positions of the value in the quote; ``None`` stays display-only.
+
+    Look-alike positions are skipped; every other position must support the given value.
+    """
     given = fact.normalized_value
     written = [fact.evidence_quote[start:end] for start, end in found]
     if given is None:
@@ -540,8 +583,11 @@ def _normalized_value(fact: EnvironmentFact, found: Sequence[_Span]) -> str | No
         return None
     _require(is_valid_normalized(fact.key, given), _INVALID_NORMALIZED_VALUE)
     spans = resolve_spans(fact.key, fact.evidence_quote)
-    for position, phrase in zip(found, written, strict=True):
-        _check_position(fact.key, given, _covering(spans, position), position, phrase)
+    judged = [(p, w, _covering(spans, p)) for p, w in zip(found, written, strict=True)]
+    kept = [(p, w, covering) for p, w, covering in judged if not _look_alike(covering, p)]
+    _require(bool(kept), _BLOCKED_VALUE)
+    for position, phrase, covering in kept:
+        _check_position(fact.key, given, covering, position, phrase)
     return given
 
 
@@ -570,6 +616,18 @@ def _check_position(
     named = {span.value for span in covering if span.kind == "value"}
     _require(bool(named) and not _blocked_around(covering, position), _BLOCKED_VALUE)
     _require(given in named and named <= _allowed_with(key, given), _NORMALIZED_VALUE_MISMATCH)
+
+
+def _look_alike(covering: Sequence[WrittenSpan], position: _Span) -> bool:
+    """Whether a position only shows a look-alike: blocked, never negated, naming no value.
+
+    "Michigan" in "Lake Michigan" or "clay" in "clay pots" neither supports nor contradicts the
+    value, so it is skipped when another position of the value states it.
+    """
+    if not covering or any(span.kind == "negated" for span in covering):
+        return False
+    named = any(span.kind == "value" for span in covering)
+    return not named or _blocked_around(covering, position)
 
 
 def _blocked_around(covering: Sequence[WrittenSpan], position: _Span) -> bool:
@@ -650,9 +708,24 @@ def _drop_shared_conflicts(
 
 @lru_cache(maxsize=16)
 def _marker_pattern(markers: tuple[str, ...]) -> re.Pattern[str]:
-    """Compile the markers into one case-insensitive, word-bounded alternation."""
+    """Compile the markers into one case-insensitive, word-bounded pattern.
+
+    The pattern is matched at a sentence's start (``pattern.match(text, start, end)``): a
+    ``^`` marker must open the sentence, after any spaces or punctuation; any other marker may
+    stand anywhere in it.
+    """
+    opening = [m.removeprefix(_SENTENCE_START) for m in markers if m.startswith(_SENTENCE_START)]
+    anywhere = [m for m in markers if not m.startswith(_SENTENCE_START)]
+    branches = [_marker_branch(r"\W*", opening), _marker_branch(r".*?(?<!\w)", anywhere)]
+    return re.compile("|".join(filter(None, branches)), re.IGNORECASE | re.DOTALL)
+
+
+def _marker_branch(prefix: str, markers: Sequence[str]) -> str:
+    """One alternation of ``markers`` after ``prefix``; empty when there are no markers."""
+    if not markers:
+        return ""
     alternatives = sorted({_marker_regex(marker) for marker in markers})
-    return re.compile(rf"(?<!\w)(?:{'|'.join(alternatives)})(?!\w)", re.IGNORECASE)
+    return rf"{prefix}(?:{'|'.join(alternatives)})(?!\w)"
 
 
 def _marker_regex(marker: str) -> str:
@@ -672,7 +745,12 @@ def _ends_sentence(text: str, delimiter: re.Match[str]) -> bool:
         return True
     end = delimiter.start()
     word = _TRAILING_WORD.search(text, max(0, end - _TRAILING_WORD_WINDOW), end)
-    return word is None or word.group().casefold() not in _ABBREVIATIONS
+    return word is None or not _is_abbreviation(word.group())
+
+
+def _is_abbreviation(word: str) -> bool:
+    """Whether ``word`` is a known abbreviation; an uppercase state code ("CO", "MT") is not."""
+    return word.casefold() in _ABBREVIATIONS and word not in _STATE_CODES
 
 
 def _sentence_spans(text: str) -> list[_Span]:

@@ -542,12 +542,12 @@ def test_public_tiers_ignore_private_condition_matches(isolation: IsolationDbs) 
 
     assert public.tier_counts["match"] == 0
     assert public.limitation_message == (
-        "Only 35 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+        "Only 33 of 69 reports mention comparable growing conditions (3 not yet analysed)."
     )
     assert [item.comment.comment_id for item in private.groups[0].results] == ["prv-0001"]
     assert private.groups[0].key == "match"
     assert private.limitation_message == (
-        "Only 39 of 75 reports mention comparable growing conditions (4 not yet analysed)."
+        "Only 37 of 75 reports mention comparable growing conditions (4 not yet analysed)."
     )
 
 

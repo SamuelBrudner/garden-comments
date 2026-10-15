@@ -22,6 +22,7 @@ from crop_explorer.geography import (
 )
 from crop_explorer.schemas import Applicability, EnvKey
 from crop_explorer.views import CommentResult, CommentView, FactView, MentionMatch, MentionView
+from crop_explorer.vocab import COMPARABLE_KEYS
 
 COMMENT_TEXT = "SECRET-BODY grew Sungold in pots in Hartford"
 QUOTE_PREFIX = "SECRET-QUOTE"
@@ -101,7 +102,11 @@ def result_from(
         ),
         region_status=None,
         explanation="",
-        has_conditions=any(f.normalized_value is not None for _, fs in relevant for f in fs),
+        has_conditions=any(
+            f.normalized_value is not None and f.key in COMPARABLE_KEYS
+            for _, fs in relevant
+            for f in fs
+        ),
     )
 
 

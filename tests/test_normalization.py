@@ -218,6 +218,8 @@ def _slices(text: str, spans: tuple[WrittenSpan, ...]) -> list[tuple[str, str | 
             "gets shade in the afternoon",
             [("shade in the afternoon", "part_shade", "value")],
         ),
+        ("zone", "Zero problems in zone 6b", [("zone 6b", "6b", "value")]),
+        ("shelter", "lacking a greenhouse", [("greenhouse", "greenhouse", "negated")]),
         ("humidity", "nothing relevant", []),
     ],
 )
@@ -388,6 +390,18 @@ def test_every_full_region_name_maps_to_its_code(code: str, name: str) -> None:
         ("Kansas City, Kansas", "US-KS"),
         ("Kansas City, MO", "US-MO"),
         ("Nevada City, California", "US-CA"),
+        ("SoCal", "US-CA"),
+        ("So Cal", "US-CA"),
+        ("So-Cal", "US-CA"),
+        ("socal", "US-CA"),
+        ("SOCAL", "US-CA"),
+        ("SoCal (inland empire)", "US-CA"),
+        ("SoCal coastal", "US-CA"),
+        ("here in SoCal, USA", "US-CA"),
+        ("NorCal", "US-CA"),
+        ("Nor Cal", "US-CA"),
+        ("Nor-Cal", "US-CA"),
+        ("norcal foothills", "US-CA"),
     ],
 )
 def test_region_phrases(written: str, expected: str) -> None:
@@ -419,6 +433,10 @@ def test_region_phrases(written: str, expected: str) -> None:
         "conn.",
         "Kansas City",
         "near Kansas City",
+        "it was so calm",
+        "also cal",
+        "SoCal and Oregon",
+        "not in SoCal",
     ],
 )
 def test_region_phrases_that_are_absent_or_ambiguous(written: str) -> None:
@@ -1057,6 +1075,117 @@ def test_low_quantity_wording_never_yields_the_high_value(key: EnvKey, written: 
     assert normalize_written(key, written) is None
 
 
+# Regression: low-quantity cues (less, lack, rarely, seldom, zero, ...) negated any region,
+# zone, method or shelter phrase up to three words later, so loading rejected valid facts.
+LOW_QUANTITY_ELSEWHERE: list[tuple[EnvKey, str, str]] = [
+    ("region", "It rarely rains in Arizona", "US-AZ"),
+    ("region", "Zero rain in Arizona this summer", "US-AZ"),
+    ("region", "zero rain in Arizona this summer", "US-AZ"),
+    ("region", "less rain in Oregon than usual", "US-OR"),
+    ("region", "I seldom water in Texas", "US-TX"),
+    ("zone", "it drops below zero in zone 4b", "4b"),
+    ("zone", "Zero problems in zone 6b", "6b"),
+    ("zone", "Zero problems in zone 6b with Sungold this year.", "6b"),
+    ("zone", "less frost damage in zone 7a", "7a"),
+    ("method", "zero issues in containers", "container"),
+    ("method", "less work in raised beds", "raised_bed"),
+    ("method", "Less splitting in containers", "container"),
+    ("shelter", "less blight in greenhouse", "greenhouse"),
+    ("growing_year", "less rain in 2023", "2023"),
+    # "in" never links a cue to a phrase: the condition is where the change happened.
+    ("shelter", "it drops below zero in the greenhouse", "greenhouse"),
+    ("shelter", "they split less in the greenhouse", "greenhouse"),
+    ("method", "I grow less in pots this year", "container"),
+    ("sun", "fruit set was less in the shade", "shade"),
+    # A place, zone or year is never a quantity, even right after a cue.
+    ("region", "less Texas heat than last year", "US-TX"),
+    ("region", "the lack of Arizona rain", "US-AZ"),
+    ("zone", "zero zone 6b frost damage", "6b"),
+    ("growing_year", "less 2023 blight", "2023"),
+    ("method", "zero containers this year, all in-ground", "in_ground"),
+]
+
+
+@pytest.mark.parametrize(("key", "written", "expected"), LOW_QUANTITY_ELSEWHERE)
+def test_low_quantity_cues_leave_phrases_they_do_not_qualify_alone(
+    key: EnvKey, written: str, expected: str
+) -> None:
+    assert normalize_written(key, written) == expected
+
+
+# A low-quantity cue negates a phrase it directly qualifies: right before it, or separated only
+# by articles, "of", "any", a form of "be"/"get" or a degree word ("rarely got very hot").
+LOW_QUANTITY_QUALIFIED: list[tuple[EnvKey, str]] = [
+    ("shelter", "lacking a greenhouse"),
+    ("shelter", "I lack a greenhouse"),
+    ("shelter", "for lack of a greenhouse"),
+    ("shelter", "a lack of any greenhouse"),
+    ("sun", "zero shade"),
+    ("method", "zero containers this year"),
+    ("humidity", "it was rarely humid"),
+    ("humidity", "less humid than last year"),
+    ("summer_heat", "it rarely got hot"),
+    ("summer_heat", "it seldom gets very hot"),
+    ("summer_heat", "it rarely ever gets too hot"),
+    ("summer_heat", "insufficient hot days"),
+    ("precipitation", "it rarely rained"),
+    ("precipitation", "seldom rainy"),
+    ("irrigation", "zero drip lines"),
+]
+
+
+@pytest.mark.parametrize(("key", "written"), LOW_QUANTITY_QUALIFIED)
+def test_low_quantity_cues_negate_the_phrase_they_qualify(key: EnvKey, written: str) -> None:
+    assert normalize_written(key, written) is None
+    assert [span.kind for span in resolve_spans(key, written)] == ["negated"]
+
+
+@pytest.mark.parametrize(
+    ("key", "written"),
+    [
+        ("zone", "No problems in zone 6b"),
+        ("method", "never grown in containers"),
+        ("region", "never been to Arizona"),
+        ("shelter", "didn't use a greenhouse"),
+        ("growing_year", "not in 2023"),
+    ],
+)
+def test_negation_cues_keep_their_three_word_window(key: EnvKey, written: str) -> None:
+    assert normalize_written(key, written) is None
+
+
+# An intensifier between a negation cue and the phrase does not use up the window: "never even
+# been to Arkansas" is as negated as "never been to Arkansas".
+@pytest.mark.parametrize(
+    ("key", "written"),
+    [
+        ("region", "I've never even been to Arkansas"),
+        ("region", "never ever been to Arizona"),
+        ("region", "I have not really been to Ohio"),
+        ("shelter", "I don't even have a greenhouse"),
+        ("shelter", "I don't really have a greenhouse"),
+        ("method", "never actually grown in containers"),
+    ],
+)
+def test_intensifiers_do_not_use_up_the_negation_window(key: EnvKey, written: str) -> None:
+    assert normalize_written(key, written) is None
+
+
+@pytest.mark.parametrize(
+    ("key", "written", "expected"),
+    [
+        ("region", "Never had blight in Arizona", "US-AZ"),
+        ("region", "Never even had blight in Arizona", "US-AZ"),
+        ("shelter", "I really love my greenhouse", "greenhouse"),
+        ("method", "even in containers", "container"),
+    ],
+)
+def test_intensifiers_never_widen_the_window_otherwise(
+    key: EnvKey, written: str, expected: str
+) -> None:
+    assert normalize_written(key, written) == expected
+
+
 @pytest.mark.parametrize(
     ("key", "written", "expected"),
     [
@@ -1249,7 +1378,17 @@ def test_normalize_crop_ignores_ascii_case(crop: str) -> None:
 CROPS = ("tomato", "pepper", "cucumber", "zucchini", "potato", "bean", "cherry tomato", "pea")
 CROP_VARIANTS = {
     "tomato": ("tomato", "Tomatoes", "TOMATO", "tomato's", "toms", "tomatos"),
-    "pepper": ("peppers", "Pepper", "chilies", "chillies", "chile", "chili", "chilis"),
+    "pepper": (
+        "peppers",
+        "Pepper",
+        "chilies",
+        "chillies",
+        "chile",
+        "chili",
+        "chilis",
+        "peper",
+        "Pepers",
+    ),
     "cucumber": ("cucumbers", "cukes", "Cuke"),
     "zucchini": ("zucchinis", "courgettes", "Courgette"),
     "potato": ("potatoes", "spuds", "Spud"),
@@ -1266,6 +1405,8 @@ def test_crop_synonyms_map_casefolded_words_to_normalized_crops() -> None:
     assert CROP_SYNONYMS["spuds"] == "potato"
     assert CROP_SYNONYMS["toms"] == "tomato"
     assert CROP_SYNONYMS["chillies"] == "pepper"
+    assert CROP_SYNONYMS["peper"] == "pepper"
+    assert CROP_SYNONYMS["pepers"] == "pepper"
     for written, crop in CROP_SYNONYMS.items():
         assert written == " ".join(written.casefold().split())
         assert normalize_crop(crop) == crop
@@ -1294,6 +1435,9 @@ def test_crop_synonyms_map_casefolded_words_to_normalized_crops() -> None:
         ("the tomato\u2019s skin split", "tomato", True),
         ("pak-choi bolted", "pak choi", True),
         ("pak choi bolted", "pak-choi", True),
+        ("my pepers are like 2 ft tall but no flowers", "pepper", True),
+        ("Peper plants sulked", "pepper", True),
+        ("the peperomia on the sill", "pepper", False),
         ("", "tomato", False),
     ],
 )
@@ -1346,26 +1490,47 @@ def test_mentions_crop_ignores_case_and_crop_spelling(text: str, crop: str) -> N
 @pytest.mark.parametrize(
     ("variety", "expected"),
     [
-        ("Sun Gold", "sun gold"),
-        ("Cherokee Purple", "cherokee purple"),
-        ('"Sun Gold"', "sun gold"),
+        ("Sun Gold", "sungold"),
+        ("Cherokee Purple", "cherokeepurple"),
+        ('"Sun Gold"', "sungold"),
         ("'Sungold'", "sungold"),
-        ("\u2018Sun Gold\u2019", "sun gold"),
-        ("\u201cSun Gold\u201d", "sun gold"),
-        ("Mr. Stripey", "mr stripey"),
-        ("Aunt Ruby's German Green", "aunt ruby's german green"),
-        ("Aunt Ruby\u2019s German Green", "aunt ruby's german green"),
-        ("Early-Girl", "early-girl"),
-        ("Sun - Gold", "sun gold"),
-        ("  Black   Krim!! ", "black krim"),
-        ("Brandywine (Sudduth's)", "brandywine sudduth's"),
-        ("Sweet 100", "sweet 100"),
+        ("\u2018Sun Gold\u2019", "sungold"),
+        ("\u201cSun Gold\u201d", "sungold"),
+        ("Mr. Stripey", "mrstripey"),
+        ("Aunt Ruby's German Green", "auntruby'sgermangreen"),
+        ("Aunt Ruby\u2019s German Green", "auntruby'sgermangreen"),
+        ("Early-Girl", "earlygirl"),
+        ("Sun - Gold", "sungold"),
+        ("  Black   Krim!! ", "blackkrim"),
+        ("Brandywine (Sudduth's)", "brandywinesudduth's"),
+        ("Sweet 100", "sweet100"),
         ("Rutgers'", "rutgers"),
         ("-Juliet-", "juliet"),
     ],
 )
 def test_variety_key(variety: str, expected: str) -> None:
     assert variety_key(variety) == expected
+
+
+@pytest.mark.parametrize(
+    "spellings",
+    [
+        ("Sun Gold", "Sungold", "Sun-Gold", "SUNGOLD", '"Sun Gold"', "Sun\u2011Gold", "sun  gold"),
+        ("Early Girl", "Early-Girl", "EarlyGirl", "early girl", "'Early Girl'"),
+        ("Cherokee Purple", "Cherokee-Purple", "CherokeePurple"),
+    ],
+)
+def test_spellings_of_one_variety_share_a_key(spellings: tuple[str, ...]) -> None:
+    """Spaces and hyphens inside a name never split one variety into two groups."""
+    assert len({variety_key(spelling) for spelling in spellings}) == 1
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [("Sun Gold", "Sun Sugar"), ("Early Girl", "Early Girl 2"), ("Sweet 100", "Sweet 1000")],
+)
+def test_different_varieties_keep_different_keys(left: str, right: str) -> None:
+    assert variety_key(left) != variety_key(right)
 
 
 @pytest.mark.parametrize("variety", ["", "   ", "!!!", "''", '"-"'])
@@ -1381,8 +1546,8 @@ def test_variety_key_is_idempotent_and_clean(variety: str) -> None:
     except ValueError:
         return
     assert variety_key(key) == key
-    assert key == " ".join(key.split())
-    assert re.search(r"(?<!\w)['-]|['-](?!\w)", key) is None
+    assert re.search(r"[\s-]", key) is None
+    assert re.search(r"(?<!\w)'|'(?!\w)", key) is None
 
 
 # --- parse_zone

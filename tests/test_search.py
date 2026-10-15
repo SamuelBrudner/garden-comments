@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
@@ -333,6 +334,47 @@ def view_lists(draw: st.DrawFn) -> list[CommentView]:
 SEARCH_TEXTS = ("Sungold", "juliet tomatoes", "peppers", "hornworms", "!!")
 
 
+NAMED_BY: dict[str, Callable[[MentionView], bool]] = {
+    "Sungold": lambda m: m.variety_as_written == "Sungold",
+    "juliet tomatoes": lambda m: m.variety_as_written == "Juliet" or m.crop == "tomato",
+    "peppers": lambda m: m.crop == "pepper",
+    "hornworms": lambda m: False,
+    "!!": lambda m: False,
+}
+"""Test oracle: which mentions of :func:`mention_views` each search text names."""
+
+
+@st.composite
+def mention_filter_sets(draw: st.DrawFn) -> dict[str, Any]:
+    """At least one of the crop, topics, year and state filters, as ``SearchQuery`` fields."""
+    filters = {
+        "crop": draw(st.none() | st.sampled_from(("tomato", "Peppers"))),
+        "topics": tuple(draw(st.lists(st.sampled_from(("flavor", "disease")), unique=True))),
+        "year": draw(st.none() | st.sampled_from(("2023", "2024"))),
+        "region_filter": draw(st.none() | st.sampled_from(REGIONS)),
+    }
+    assume(any(filters.values()))
+    return filters
+
+
+@st.composite
+def filterable_views(draw: st.DrawFn) -> CommentView:
+    """Two or three mentions sharing a whole-comment state and year, so filters keep several."""
+    shared = (
+        fact("region", draw(st.sampled_from(REGIONS[:2])), applicability="whole_comment"),
+        fact(
+            "growing_year", draw(st.sampled_from(("2023", "2024"))), applicability="whole_comment"
+        ),
+    )
+    first, *others = (draw(mention_views(f"c0#m{i}")) for i in range(draw(st.integers(2, 3))))
+    return comment("c0", first.model_copy(update={"facts": (*first.facts, *shared)}), *others)
+
+
+def best_rank(matches: Sequence[MentionMatch]) -> int:
+    """The tier rank of the best of ``matches`` (what decides the comment's group)."""
+    return min((TIER_ORDER[match_of(mm).tier] for mm in matches), default=TIER_ORDER["not_stated"])
+
+
 @st.composite
 def queries(draw: st.DrawFn) -> SearchQuery:
     return SearchQuery(
@@ -507,18 +549,100 @@ class TestTextNamesTheRelevantMentions:
         result = build_result([self.SPLIT], ask(text="Roma and Jalapeño", shelter="greenhouse"))
         assert self.varieties(result) == ["Jalapeño", "Roma"]
 
-    @pytest.mark.parametrize(
-        "query",
-        [
-            ask(text="Roma", topics=("flavor",), shelter="greenhouse"),
-            ask(text="Roma", crop="pepper", shelter="greenhouse"),
-        ],
-        ids=["topics", "crop"],
-    )
-    def test_a_mention_filter_takes_precedence_over_the_text(self, query: SearchQuery) -> None:
-        result = build_result([self.SPLIT], query)
+    def test_a_filter_both_mentions_pass_still_compares_the_named_one(self) -> None:
+        """Both SPLIT mentions are about flavor, so the topic filter keeps both."""
+        result = build_result(
+            [self.SPLIT], ask(text="Roma", topics=("flavor",), shelter="greenhouse")
+        )
+        assert layout(result) == {"different": ["split"]}
+        assert self.varieties(result) == ["Roma"]
+
+    def test_a_filter_dropping_every_named_mention_falls_back_to_the_rest(self) -> None:
+        result = build_result([self.SPLIT], ask(text="Roma", crop="pepper", shelter="greenhouse"))
         assert layout(result) == {"match": ["split"]}
-        assert "Jalapeño" in self.varieties(result)
+        assert self.varieties(result) == ["Jalapeño"]
+
+    OHIO = comment(
+        "ohio",
+        mention(
+            "ohio#m0",
+            variety="Sungold",
+            topics=("general",),
+            facts=(
+                fact("region", "US-OH", applicability="whole_comment"),
+                fact("growing_year", "2024", applicability="whole_comment"),
+                IN_GROUND,
+            ),
+        ),
+        mention("ohio#m1", variety="Juliet", topics=("general",), facts=(CONTAINER,)),
+        text="Here in Ohio I grew Sungold in the ground and Juliet in containers.",
+    )
+    """The validation round's asc-1: a whole-comment state, a different method per variety."""
+
+    @pytest.mark.parametrize(
+        "filters",
+        [
+            {},
+            {"region_filter": "US-OH"},
+            {"crop": "tomato"},
+            {"topics": ("general",)},
+            {"year": "2024"},
+        ],
+        ids=["none", "state", "crop", "topics", "year"],
+    )
+    def test_a_filter_never_lets_another_variety_decide_the_group(
+        self, filters: dict[str, Any]
+    ) -> None:
+        """Validation regression: one map click put an in-ground Sungold report under Matching."""
+        result = build_result([self.OHIO], ask(text="Sungold", method="container", **filters))
+        assert layout(result) == {"different": ["ohio"]}
+        ohio = card(result, "ohio")
+        assert [mm.mention.variety_as_written for mm in ohio.mention_matches] == ["Sungold"]
+        assert ohio.explanation == "Different: in the ground (you: containers)."
+        assert result.tier_counts["match"] == 0
+        strict = ask(text="Sungold", method="container", only_stated=True, **filters)
+        hidden = build_result([self.OHIO], strict)
+        assert (hidden.groups, hidden.n_hidden_by_strict) == ((), 1)
+
+    @settings(deadline=None, max_examples=200)
+    @given(
+        view=comment_views("c0") | filterable_views(),
+        text=st.sampled_from(SEARCH_TEXTS),
+        garden=gardens(min_selected=1),
+        filters=mention_filter_sets(),
+    )
+    def test_a_filter_only_narrows_the_mentions_the_text_names(
+        self, view: CommentView, text: str, garden: GardenContext, filters: dict[str, Any]
+    ) -> None:
+        """A filter never lets an unnamed mention set the tier while a named one passes it."""
+        passing = relevant_mentions(view, SearchQuery(garden=garden, **filters))
+        filtered = relevant_mentions(view, SearchQuery(text=text, garden=garden, **filters))
+        if passing is None:
+            assert filtered is None
+            return
+        named = tuple(mm for mm in passing if NAMED_BY[text](mm.mention))
+        assert filtered == (named or passing)
+        unfiltered = relevant_mentions(view, SearchQuery(text=text, garden=garden))
+        assert unfiltered is not None
+        if named:
+            assert best_rank(named) >= best_rank(unfiltered)
+
+    @pytest.mark.parametrize(
+        ("variety", "text"),
+        [
+            ("Sungold", "Sun Gold"),
+            ("Sun Gold", "sungold"),
+            ("Sun-Gold", "SUN GOLD seedlings"),
+            ("Aunt Ruby's German Green", "aunt rubys german green"),
+        ],
+    )
+    def test_spellings_sharing_a_variety_key_name_the_same_mention(
+        self, variety: str, text: str
+    ) -> None:
+        view = comment("sg", mention("sg#m0", variety=variety), mention("sg#m1", variety="Roma"))
+        matches = relevant_mentions(view, ask(text=text))
+        assert matches is not None
+        assert [mm.mention.mention_id for mm in matches] == ["sg#m0"]
 
     def test_a_multi_word_variety_must_be_named_in_full(self) -> None:
         def named(text: str) -> list[str]:
@@ -806,14 +930,53 @@ class TestGracefulSparsity:
             'Soil mentioned as "rocky hillside dirt" (not comparable).'
         )
 
-    def test_a_region_or_heatwave_counts_as_a_growing_condition(self) -> None:
+    def test_a_heatwave_counts_as_a_comparable_condition(self) -> None:
         views = [
-            reporting("ct", fact("region", "US-CT")),
-            reporting("heat", fact("summer_heat", "heatwave"), order=1),
+            reporting("heat", fact("summer_heat", "heatwave")),
+            reporting("ct-pots", fact("region", "US-CT"), CONTAINER, order=1),
         ]
         result = build_result(views, ask(method="container"))
         assert result.n_with_conditions == 2
+        assert all(r.has_conditions for r in shown(result))
         assert result.limitation_message is None
+
+    def test_a_region_alone_is_not_a_comparable_condition(self) -> None:
+        """Validation regression: a location is a preference and is never compared (SPEC §5)."""
+        views = [
+            reporting("ct", fact("region", "US-CT")),
+            reporting("ct2", fact("region", "US-CT"), order=1),
+            reporting("bare", order=2),
+        ]
+        for garden in (ask(zone="6b"), ask(zone="6b", region="US-CT"), ask()):
+            result = build_result(views, garden)
+            assert result.n_with_conditions == 0
+            assert not any(r.has_conditions for r in shown(result))
+            assert result.limitation_message == self.NONE_STATED
+        assert build_result(views[:2], ask(zone="6b")).limitation_message == (
+            "None of these 2 reports mention comparable growing conditions, so none can be "
+            "compared with your garden. All are shown below."
+        )
+
+    def test_a_single_region_only_report_is_said_to_be_not_comparable(self) -> None:
+        """Validation regression: "visiting relatives in Maine" under zone 6b had no notice."""
+        maine = reporting("maine", fact("region", "US-ME"))
+        result = build_result([maine], ask(zone="6b"))
+        assert layout(result) == {"not_stated": ["maine"]}
+        assert result.limitation_message == (
+            "The 1 report found does not mention comparable growing conditions, so it cannot be "
+            "compared with your garden. It is shown below."
+        )
+
+    def test_region_only_reports_are_not_counted_among_comparable_ones(self) -> None:
+        views = [
+            reporting("ct", fact("region", "US-CT")),
+            reporting("pots", CONTAINER, order=1),
+            reporting("bare", order=2),
+        ]
+        result = build_result(views, ask(zone="6b"))
+        assert result.limitation_message == (
+            "Only 1 of 3 reports mentions comparable growing conditions."
+        )
 
 
 class TestNotYetAnalysed:
@@ -1549,10 +1712,17 @@ class TestSyntheticFixtures:
         assert layout(result)["match"] == ["syn-0006", "syn-0001", "syn-0003"]
 
     def test_coverage_message_and_counts(self, synthetic: sqlite3.Connection) -> None:
+        """syn-0008 and syn-0048 state only a region, which is never a comparable condition."""
         result = search(synthetic, "public", ask(), NOW)
         assert (result.n_candidates, result.n_not_analysed) == (69, 3)
         assert result.limitation_message == (
-            "Only 35 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+            "Only 33 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+        )
+        region_only = search(synthetic, "public", ask(text="visiting relatives", zone="6b"), NOW)
+        assert layout(region_only) == {"not_stated": ["syn-0008"]}
+        assert region_only.limitation_message == (
+            "The 1 report found does not mention comparable growing conditions, so it cannot be "
+            "compared with your garden. It is shown below."
         )
 
     def test_quick_chip_support(self, synthetic: sqlite3.Connection) -> None:
@@ -1573,6 +1743,16 @@ class TestSyntheticFixtures:
         assert "syn-0007" not in [r.comment.comment_id for r in shown(strict)]
         pepper = search(synthetic, "public", ask(text="Jalapeño", shelter="greenhouse"), NOW)
         assert card(pepper, "syn-0007").tier == "match"
+
+    @pytest.mark.parametrize("topics", [(), ("pests",)], ids=["text-only", "topic-pests"])
+    def test_a_topic_filter_keeps_comparing_the_searched_crop(
+        self, synthetic: sqlite3.Connection, topics: tuple[Topic, ...]
+    ) -> None:
+        """Validation regression: syn-0068's clay belongs to Waltham Butternut, not zucchini."""
+        query = ask(text="zucchini", topics=topics, soil="clay")
+        zucchini = card(search(synthetic, "public", query, NOW), "syn-0068")
+        assert zucchini.tier == "not_stated"
+        assert [mm.mention.crop for mm in zucchini.mention_matches] == ["zucchini"]
         assert chip_support(synthetic, "private", NOW, CHIPS) == chip_support(
             synthetic, "public", NOW, CHIPS
         )

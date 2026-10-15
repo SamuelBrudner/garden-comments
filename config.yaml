@@ -25,7 +25,8 @@ extraction:
   # A fact is rejected when the sentence containing its evidence quote contains one of
   # these markers (case-insensitive, word-bounded): advice, plans and hypotheticals are
   # not growing reports. Conservative by design: false rejections only lose structure,
-  # never searchable text.
+  # never searchable text. A marker that starts with "^" counts only at the start of a
+  # sentence. docs/EXTRACTION_PROMPT.md lists the same markers (checked by a test).
   hypothetical_markers:
     - "i'd"
     - "i would"
@@ -47,19 +48,31 @@ extraction:
     - "id try"
     - "ill try"
     - "id grow"
-    - "would"
-    - "wish"
     - "if i had"
     - "if only"
     - "gonna"
     - "hoping to"
     - "hope to"
     - "thinking of"
-    - "maybe"
     - "we'll"
     - "we'd"
     - "you'd"
-    - "anyone"
+    # Narrow forms only: a bare "would" is also a firsthand report ("would grow it again",
+    # "would wilt every afternoon"), a bare "maybe" an estimate ("gets maybe 7 hrs of sun")
+    # and a bare "anyone" an aside ("If anyone's curious, I grow ...").
+    - "would do"
+    - "would be"
+    - "would work"
+    - "would thrive"
+    - "would love"
+    - "wish i"
+    - "i wish"
+    - "^maybe"
+    - "maybe try"
+    - "maybe i'll"
+    - "maybe next"
+    - "has anyone"
+    - "does anyone"
 
 quick_chips:
   - label: Containers

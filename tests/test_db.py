@@ -37,6 +37,7 @@ from crop_explorer.db import (
     sync_source_comments,
     visible_comment_ids,
 )
+from crop_explorer.normalization import variety_key
 from crop_explorer.schemas import (
     RIGHTS_STATUSES,
     CommentRecord,
@@ -1269,6 +1270,31 @@ def test_text_search_finds_comments_without_extraction(conn: sqlite3.Connection)
         ("c1", None, ()),
         ("c2", "unresolved", ()),
     ]
+
+
+def test_text_search_also_finds_other_spellings_of_a_variety(conn: sqlite3.Connection) -> None:
+    """A search finds stored mentions whose variety_key equals the text's: "Sungold" finds
+    "Sun Gold" and the reverse. It only ever adds comments, and visibility still applies."""
+    records = [rec("c1", "Sun Gold in pots.", 0), rec("c2", "Sungold, sweet.", 1)]
+    sync_source_comments(conn, make_source(), [*records, rec("c3", "Peas.", 2)])
+    sync_source_comments(
+        conn, make_source("mine", "private_unverified"), [rec("p1", "Sun-Gold, secret plot.")]
+    )
+    for comment_id, quote, variety in (
+        ("c1", "Sun Gold in pots", "Sun Gold"),
+        ("c2", "Sungold, sweet", "Sungold"),
+        ("p1", "Sun-Gold, secret plot", "Sun-Gold"),
+    ):
+        mention = vmention(quote, variety=variety).model_copy(
+            update={"variety_key": variety_key(variety)}
+        )
+        replace_extraction(conn, validated(comment_id, (mention,)), LOADED)
+    assert visible_comment_ids(conn, "public", NOW, "Sungold") == ["c1", "c2"]
+    assert visible_comment_ids(conn, "public", NOW, "sun gold") == ["c1", "c2"]
+    assert visible_comment_ids(conn, "public", NOW, "SUN-GOLD") == ["c1", "c2"]
+    assert visible_comment_ids(conn, "private", NOW, "Sungold") == ["c1", "c2", "p1"]
+    assert visible_comment_ids(conn, "public", NOW, "sweet") == ["c2"]
+    assert visible_comment_ids(conn, "public", NOW, "peas") == ["c3"]
 
 
 # --------------------------------------------------------------------------- scope gating

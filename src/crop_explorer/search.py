@@ -5,9 +5,11 @@ everything after that is the pure, deterministic :func:`build_result`. Reports a
 well their *stated* circumstances match the viewer's garden (match, partial, not stated,
 different), never by predicted quality: outcome words and comment text play no part in a tier or
 in the order. A search text that names a variety or crop makes those mentions the ones compared
-(SPEC §4: the variety mention is the query unit). A region is a location preference that sorts
-same-region (then same-country) reports first within a group; it never changes a tier. Counts are
-of distinct comments, never of mentions.
+(SPEC §4: the variety mention is the query unit); a crop, topic, year or state filter only narrows
+them, so it never lets another variety's conditions decide a card's group (SPEC §11 #2). A region
+is a location preference that sorts same-region (then same-country) reports first within a group;
+it never changes a tier and never counts as a comparable condition. Counts are of distinct
+comments, never of mentions.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Final
 
@@ -32,7 +35,7 @@ from crop_explorer.environment_match import (
     match_context,
     region_status,
 )
-from crop_explorer.normalization import crops_named, normalize_crop, variety_key
+from crop_explorer.normalization import crops_named, normalize_crop
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import EnvKey, Topic
 from crop_explorer.views import (
@@ -78,8 +81,9 @@ _REGION_RANKS: Final[Mapping[RegionStatus | None, int]] = MappingProxyType(
 )
 _OTHER_REGION_RANK: Final = 2
 """Display rank of ``elsewhere``, ``not_stated`` and no garden region."""
-_CONDITION_KEYS: Final[frozenset[EnvKey]] = frozenset((*COMPARABLE_KEYS, "region"))
-"""Keys whose normalized facts count as "mentions comparable growing conditions"."""
+_CONDITION_KEYS: Final[frozenset[EnvKey]] = frozenset(COMPARABLE_KEYS)
+"""Keys whose normalized facts count as "mentions comparable growing conditions". A region is a
+location preference that is never compared, so a report stating only a region does not count."""
 _UNNAMED_MENTION: Final = "Unidentified variety"
 _SEARCH_WORD: Final = re.compile(r"[^\W_]+")
 """A word of search text or of a name: letters/digits; anything else separates words."""
@@ -131,7 +135,7 @@ class _MentionFilter:
     year: str | None
     region: str | None
     text: _TextNames
-    """What the search text names; it picks the relevant mentions only when nothing else is set."""
+    """What the search text names; it picks the relevant mentions among those passing the rest."""
 
     def is_set(self) -> bool:
         return any((self.crop, self.topics, self.year, self.region))
@@ -157,15 +161,24 @@ def _words(text: str) -> tuple[str, ...]:
     return tuple(_SEARCH_WORD.findall(plain))
 
 
-def _names(text: _TextNames, mention: MentionView) -> bool:
-    """Whether the search text names the mention's whole variety name, or its crop.
+@lru_cache(maxsize=4096)
+def _name_pattern(name: str) -> re.Pattern[str] | None:
+    """Match a name's letters and digits as whole consecutive words of :attr:`_TextNames.joined`.
 
-    Words contain no spaces, so a space-delimited substring test is exactly "occurs as
-    consecutive words".
+    A word may break anywhere inside the name, so spellings that share a
+    :func:`~crop_explorer.normalization.variety_key` name each other: ``"Sun Gold"``,
+    ``"Sun-Gold"`` and ``"sungold"``. Each optional space precedes a letter or digit, so the
+    pattern never backtracks and a search is linear in the text. ``None`` when nothing is left.
     """
+    letters = "".join(_words(name))
+    return re.compile(f" {' ?'.join(map(re.escape, letters))} ") if letters else None
+
+
+def _names(text: _TextNames, mention: MentionView) -> bool:
+    """Whether the search text names the mention's whole variety name, or its crop."""
     variety = mention.variety_as_written
-    phrase = () if variety is None else _words(variety_key(variety))
-    if phrase and f" {' '.join(phrase)} " in text.joined:
+    pattern = None if variety is None else _name_pattern(variety)
+    if pattern is not None and pattern.search(text.joined):
         return True
     crop = () if mention.crop is None else _words(mention.crop)
     return bool(crop) and normalize_crop(" ".join(crop)) in text.crops
@@ -198,8 +211,8 @@ def _relevant(
         for mention, facts in with_facts
         if mention_filter.passes(mention, facts)
     )
-    if mention_filter.is_set():
-        return kept or None
+    if not kept and mention_filter.is_set():
+        return None
     named = tuple(match for match in kept if _names(mention_filter.text, match.mention))
     return named or kept
 
@@ -214,19 +227,20 @@ def relevant_mentions(view: CommentView, query: SearchQuery) -> tuple[MentionMat
     query : SearchQuery
         The viewer's query. ``crop``, ``topics``, ``year`` and ``region_filter`` are
         mention-level filters. ``text`` picks candidates in the database read; here it only
-        chooses among mentions, and only when no mention-level filter is set.
+        chooses among the mentions that pass those filters, so a filter only ever narrows the
+        mentions the text names and never brings back one it did not name.
 
     Returns
     -------
     tuple[MentionMatch, ...] or None
         ``None`` when a mention-level filter is set and no single mention passes all of them.
-        Otherwise the passing mentions in mention order, each with its applicable facts and
-        its match against the garden (``None`` when no comparable condition is selected).
-        With no mention-level filter: the mentions whose whole variety name (by
-        :func:`~crop_explorer.normalization.variety_key`) or crop (by
-        :func:`~crop_explorer.normalization.mentions_crop`) is named by consecutive words of
-        ``text`` (casefolded, diacritics ignored), or every mention when ``text`` names none
-        (so a comment without mentions gives ``()``).
+        Otherwise, in mention order and each with its applicable facts and its match against
+        the garden (``None`` when no comparable condition is selected): the passing mentions
+        whose whole variety name or crop (by :func:`~crop_explorer.normalization.mentions_crop`)
+        ``text`` names as consecutive words (casefolded, diacritics ignored; a variety's words
+        may be split or joined, so "Sun Gold" and "sungold" name each other), or every passing
+        mention when ``text`` names none of them (so, without filters, a comment without
+        mentions gives ``()``).
 
     Raises
     ------
@@ -344,7 +358,7 @@ class _Coverage:
     n: int
     """Candidates."""
     n_with: int
-    """Candidates stating a comparable condition or a region."""
+    """Candidates stating a comparable condition (a region alone does not count)."""
     n_new: int
     """Candidates never analysed (``parse_status is None``); disjoint from ``n_with``."""
     n_hidden: int

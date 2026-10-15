@@ -656,11 +656,25 @@ class TestCardLabels:
             "Growing conditions not stated  \nRegion not reported"
         )
 
-    def test_caption_badges_a_stated_region_alone(self) -> None:
-        view = comment(mentions=[mention(facts=[fact("region", "US-VT", "Vermont")])])
-        caption = ui.condition_caption(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
-        assert caption.startswith(":green-badge[reported conditions] Not stated\\:")
-        assert caption.endswith(ui.escape_markdown("Region: Vermont"))
+    def test_a_region_alone_is_not_badged_as_reported_conditions(self) -> None:
+        """Validation regression: "reported conditions Growing conditions not stated" read as a
+        contradiction; a location is never a comparable growing condition."""
+        view = comment(mentions=[mention(facts=[fact("region", "US-ME", "Maine")])])
+        assert ui.condition_caption(result_of(view), GardenContext()) == ui.escape_markdown(
+            "Growing conditions not stated\nRegion: Maine"
+        )
+        assert ui.condition_caption(
+            result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS
+        ) == ui.escape_markdown("Not stated: hardiness zone, growing method\nRegion: Maine")
+
+    def test_a_region_beside_a_stated_condition_keeps_the_badge(self) -> None:
+        maine = fact("region", "US-ME", "Maine", fact_id="a")
+        pots = fact("method", "container", "pots", fact_id="b")
+        view = comment(mentions=[mention(facts=[maine, pots])])
+        caption = ui.condition_caption(result_of(view), GardenContext())
+        assert caption == ":green-badge[reported conditions] " + ui.escape_markdown(
+            "Reported: containers\nRegion: Maine"
+        )
 
     def test_caption_badges_display_only_phrases(self) -> None:
         dirt = fact("soil", None, "rocky dirt")

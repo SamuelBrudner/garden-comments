@@ -64,8 +64,10 @@ visible; summer heat, humidity, rainfall, season length, sun, soil and watering 
 humid", ...) appear only when enough reports support them, and their tooltip says how many
 state any and how many state all of the chip's conditions. Under the search box, **Crop |
 Topics | Year grown** are hard filters ("Showing only reports that say they grew in 2023", with
-an "Any year" reset). Each card carries a `community report` badge and its condition lines a
-`reported conditions` badge; a comment that has not been extracted yet reads "Not yet analysed
+an "Any year" reset). Each card carries a `community report` badge and, when they show a comparable condition the
+commenter stated, its condition lines a `reported conditions` badge (a stated region alone is
+not a comparable condition, so it gets no badge and does not count in "Only N of M reports
+mention comparable growing conditions"); a comment that has not been extracted yet reads "Not yet analysed
 for growing conditions", and a condition stated in words the app cannot compare reads
 "Mentioned as written, not comparable: soil "rocky hillside dirt"". Each result group shows
 `viewer.page_size` cards at a time with a "Show N more" button. "Optional outside context"
@@ -136,13 +138,19 @@ What the loader keeps (anything it cannot verify is rejected and listed with a r
   ("Virginia" in "West Virginia", "zone 6b" in "zone 6b/7a") is `normalized_value_mismatch`.
   Region, zone and year values must be readable by the loader where they are quoted
   (`strict_key_mismatch`). A place named inside a variety name ("Arkansas Traveler") is
-  `value_in_variety_name`.
+  `value_in_variety_name`. An occurrence inside a look-alike or a variety name is skipped when
+  another occurrence in the quote states the value ("I live in Michigan near Lake Michigan"
+  keeps `US-MI`); every other occurrence must agree. A low-quantity word (less, lack, rarely,
+  seldom, zero) negates only the value it directly qualifies ("less humid", "it rarely
+  rained"), never a region, zone or year ("Zero problems in zone 6b" keeps `6b`).
 - A `normalized_value` of `null` is never filled in: such a fact is shown as written but never
   used for matching.
 - Facts quoted from advice, plans, wishes or questions ("I'd try these in zone 5", "Wish I had
   a greenhouse", "Does it do well in zone 6b?") are rejected (`hypothetical_context`,
   `question_context`), as are whole-comment regions or zones that disagree across mentions
-  (`conflicting_region`, `conflicting_zone`).
+  (`conflicting_region`, `conflicting_zone`). The markers are phrases, not bare words: "would
+  be", "i wish", "has anyone", and "maybe" only at the start of a sentence, so an estimate
+  ("gets maybe 7 hrs of full sun") or a habit ("would wilt every afternoon") is kept.
 
 A rejected fact never removes the comment from full-text search. Re-loading the same file is
 idempotent; re-importing a comment with changed text drops its old extraction. The full rule
@@ -171,7 +179,10 @@ its words from the full-text index and zeroes the freed pages.
 **Upgrading.** Databases record a schema version. A database created by an earlier version of
 this code (or by another program) is refused with "unsupported database schema"; rebuild into
 a new file (`demo`, or `ingest` + `load-extractions` again with `--db new.sqlite`). Crop names
-are normalised at load time, so re-loading extractions also refreshes them.
+and variety grouping keys are normalised at load time, so re-loading extractions also refreshes
+them (since this version a variety key ignores spaces and hyphens, so "Sun Gold" and "Sungold"
+group together and a search for either finds both; the viewer always shows the name as
+written).
 
 ## Rights and the publication gate
 
@@ -217,7 +228,7 @@ config file):
 | `viewer.max_query_chars` | Longest search text accepted (the search box is capped; it bounds full-text search cost). |
 | `viewer.page_size` | Cards shown per result group before "Show N more". |
 | `map.public_min_cell_count` | In public scope, map cells with fewer reports are drawn as "fewer than k". This **only coarsens the map display**: cards still show each comment's text and region, and filtering by that state still lists the reports, so it is not a privacy control. Only publish comments whose source is cleared. |
-| `extraction.hypothetical_markers` | Words that make a sentence advice, a plan or a wish; facts quoted from such sentences (and from questions) are rejected. |
+| `extraction.hypothetical_markers` | Phrases that make a sentence advice, a plan or a wish; facts quoted from such sentences (and from questions) are rejected. A marker starting with `^` (`^maybe`) counts only at the start of a sentence. Keep the list in `docs/EXTRACTION_PROMPT.md` Part 2 in step (a test checks it). |
 | `quick_chips` | Label plus the garden conditions each chip sets. |
 | `outside_context` | Opt-in outbound links, each badged with its evidence type: `regional climate reference` (USDA zone map, NOAA normals, NASA climatology), `published external trial` (university variety trials) or `community report` (outside gardeners' own ratings, e.g. Cornell's Vegetable Varieties for Gardeners; never this channel's comments). `reported conditions` is not allowed here, and a government host (`*.gov`, `*.mil`, `*.gov.au`, `*.gc.ca`, ...) can never be labelled `community report`. |
 | `logging.level`, `logging.json_path` | Loguru level and optional JSON-lines log file (never receives comment text). |
@@ -248,7 +259,10 @@ the first-load labels, the source link's address), then a desktop smoke test. Th
 marked `browser`, takes about 15 seconds and needs Playwright's Chromium (`uv run playwright
 install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
 `tests/test_code_standards.py` fails for any function in `src/` or `app.py` with more than 15
-code lines. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
+code lines. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in
+step with the code: its marker list, rejection codes, region codes and aliases, documented
+phrasings, look-alikes and crop synonyms must match what the loader reads, and its worked
+example must load with zero rejections. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
 runs the tests with coverage.
 
 ## Project layout
@@ -280,7 +294,7 @@ runs the tests with coverage.
 │   ├── visibility.py             # rights/expiry gate shared by every viewer read
 │   └── ui.py                     # pure viewer helpers (escaping, card text, state)
 └── tests/                        # unit tests per module, plus acceptance, CLI, viewer (AppTest),
-                                  # browser (Playwright) and code-standards tests
+                                  # browser (Playwright), prompt-consistency and code-standards tests
 ```
 
 ## Limitations
@@ -297,7 +311,9 @@ runs the tests with coverage.
   never used for matching. A non-North-American "City, XX" address whose code is also a U.S.
   or Canadian postal code ("Perth, WA", "Catania, CT") is never mapped; the country is recorded
   only when the comment names it ("Perth, WA, Australia"). The hypothetical guard works
-  sentence by sentence, so advice phrased without a configured marker is not caught, and the
+  sentence by sentence, so advice phrased without a configured marker is not caught (a
+  mid-sentence "maybe" that hedges the value itself, "in zone 5 maybe", is left to the
+  extractor; a sentence that opens with "Maybe" always loses its facts), and the
   position checks read the evidence quote only: a quote cut just after a negation ("humid"
   taken from "it wasn't humid") is not caught, which is why the prompt asks for full phrases.
 - Regions are coarse (U.S. states, Canadian provinces, countries); the map shows U.S. states

@@ -186,7 +186,8 @@ class CommentResult(BaseModel):
     explanation: str
     has_conditions: bool
     """Whether an applicable fact of a relevant mention has a normalized value for a comparable
-    key or ``region`` (a growing year alone, or a display-only fact, does not count)."""
+    key. A region, a growing year or a display-only fact alone does not count: a location is a
+    preference that is never compared with the garden."""
 
 
 class SearchQuery(BaseModel):
@@ -223,7 +224,7 @@ class SearchResult(BaseModel):
     n_candidates: int
     """Distinct visible comments matching text and structured filters (before strict hiding)."""
     n_with_conditions: int
-    """Candidates whose relevant mentions state a comparable condition or a region."""
+    """Candidates whose relevant mentions state a comparable condition (``has_conditions``)."""
     n_not_analysed: int
     """Candidates that have never been through extraction (``parse_status is None``)."""
     n_hidden_by_strict: int

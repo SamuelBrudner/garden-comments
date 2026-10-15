@@ -25,11 +25,13 @@ from pydantic import ValidationError
 from crop_explorer import db
 from crop_explorer.config import ExtractionConfig, load_config
 from crop_explorer.extraction import (
+    REJECTION_REASONS,
     ExtractionReport,
     load_extractions,
     read_extraction_jsonl,
     validate_parsed_comment,
 )
+from crop_explorer.normalization import variety_key
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import (
     ENV_KEYS,
@@ -405,7 +407,7 @@ def test_rule3_crop_and_variety_key_are_normalised() -> None:
     assert (only.crop, only.variety_as_written, only.variety_key) == (
         "cherry tomato",
         '"Sun Gold"',
-        "sun gold",
+        variety_key("Sungold"),  # "Sun Gold" and "Sungold" share one key
     )
 
 
@@ -660,6 +662,60 @@ def test_rule5_every_occurrence_of_the_value_in_the_quote_is_judged() -> None:
     assert reasons(result) == [(0, 0, "negated_value")]
 
 
+@pytest.mark.parametrize(
+    ("text", "key", "written", "quote", "claimed"),
+    [
+        ("I live in Michigan near Lake Michigan and my Sungold loved it.", "region", "Michigan",
+         "I live in Michigan near Lake Michigan", "US-MI"),
+        ("I'm in Tennessee, in the Tennessee Valley, and Sungold thrives.", "region", "Tennessee",
+         "I'm in Tennessee, in the Tennessee Valley", "US-TN"),
+        ("Grew Sungold in Ohio, down in the Ohio Valley.", "region", "Ohio",
+         "Grew Sungold in Ohio, down in the Ohio Valley", "US-OH"),
+        ("Colorado here, right on the Colorado River; Sungold did great.", "region", "Colorado",
+         "Colorado here, right on the Colorado River", "US-CO"),
+        ("I'm in Kansas, not far from Kansas City.", "region", "Kansas",
+         "I'm in Kansas, not far from Kansas City", "US-KS"),
+        ("It was hot all summer and the hot peppers loved it.", "summer_heat", "hot",
+         "It was hot all summer and the hot peppers loved it", "hot"),
+        ("My soil is heavy clay, so I grew Sungold in clay pots.", "soil", "clay",
+         "My soil is heavy clay, so I grew Sungold in clay pots", "clay"),
+    ],
+)  # fmt: skip
+def test_rule5_a_look_alike_occurrence_is_skipped_when_another_states_the_value(
+    text: str, key: EnvKey, written: str, quote: str, claimed: str
+) -> None:
+    """Regression: a state named next to its lake, valley, river or city keeps its value."""
+    result = validate(text, mention(text[:6], fact(key, written, quote, claimed)))
+
+    assert result.rejections == ()
+    assert facts_of(result) == [(key, claimed)]
+
+
+@pytest.mark.parametrize(
+    ("text", "key", "written", "quote", "claimed", "reason"),
+    [
+        ("Sungold in clay pots, more clay pots on the deck.", "soil", "clay",
+         "Sungold in clay pots, more clay pots", "clay", "blocked_value"),
+        ("Kansas City, then Kansas City again.", "region", "Kansas",
+         "Kansas City, then Kansas City", "US-KS", "blocked_value"),
+        ("Not hot this year, but the hot peppers loved it.", "summer_heat", "hot",
+         "Not hot this year, but the hot peppers loved it", "hot", "negated_value"),
+        ("I moved from West Virginia to Virginia.", "region", "Virginia",
+         "I moved from West Virginia to Virginia", "US-VA", "normalized_value_mismatch"),
+        ("Chicago gardener near Lake Michigan, Michigan City too.", "region", "Michigan",
+         "near Lake Michigan, Michigan City", "US-MI", "blocked_value"),
+    ],
+)  # fmt: skip
+def test_rule5_skipping_look_alikes_never_hides_a_negation_or_another_value(
+    text: str, key: EnvKey, written: str, quote: str, claimed: str, reason: str
+) -> None:
+    """Only look-alikes are skipped: a negated or different-value occurrence still rejects."""
+    result = validate(text, mention(text[:6], fact(key, written, quote, claimed)))
+
+    assert facts_of(result) == []
+    assert reasons(result) == [(0, 0, reason)]
+
+
 def test_rule5_unrecognised_value_is_kept_as_display_only() -> None:
     text = "I grow Sungold in rocky hillside dirt and it copes."
     result = validate(
@@ -803,7 +859,12 @@ def test_rule6_acute_accent_and_backtick_count_as_apostrophes(apostrophe: str) -
         "Ill try Sungold in zone 5.",
         "Id grow Sungold in zone 5.",
         "Sungold would do fine in zone 5.",
+        "Sungold would be great in zone 5.",
+        "Sungold would work in zone 5.",
+        "Sungold would thrive in zone 5.",
+        "Sungold would love zone 5.",
         "Wish I had Sungold in zone 5.",
+        "I wish Sungold grew in zone 5.",
         "If I had more room, Sungold in zone 5.",
         "If only Sungold grew in zone 5.",
         "Gonna put Sungold in zone 5.",
@@ -811,16 +872,26 @@ def test_rule6_acute_accent_and_backtick_count_as_apostrophes(apostrophe: str) -
         "I hope to grow Sungold in zone 5.",
         "Thinking of Sungold in zone 5.",
         "Maybe Sungold in zone 5.",
+        "maybe Sungold in zone 5.",
+        "(Maybe Sungold in zone 5.)",
+        "Maybe 3 plants in zone 5.",
+        "Maybe try Sungold in zone 5.",
+        "Sungold, maybe next time in zone 5.",
+        "Sungold, maybe I\u2019ll put it in zone 5.",
         "We\u2019ll grow Sungold in zone 5.",
         "We'd grow Sungold in zone 5.",
         "You'd love Sungold in zone 5.",
-        "Anyone with Sungold in zone 5 says hi.",
+        "Has anyone grown Sungold in zone 5.",
+        "Does anyone grow Sungold in zone 5.",
     ],
 )
 def test_rule6_the_repository_markers_cover_plans_wishes_and_missing_apostrophes(
     sentence: str,
 ) -> None:
-    """F07: the configured markers catch the common unpunctuated and plan/wish phrasings."""
+    """F07: the configured markers catch the common unpunctuated and plan/wish phrasings.
+
+    A sentence that opens with "Maybe" is a hedge on the whole statement (marker ``^maybe``).
+    """
     text = f"Sungold was sweet. {sentence}"
     result = validate(
         text,
@@ -829,6 +900,46 @@ def test_rule6_the_repository_markers_cover_plans_wishes_and_missing_apostrophes
     )
 
     assert reasons(result) == [(0, 0, "hypothetical_context")]
+
+
+@pytest.mark.parametrize(
+    ("text", "key", "written", "quote", "claimed"),
+    [
+        ("Grew Cherokee Purple, Sungold and Hot Portugal in 5 gal buckets on the back deck, "
+         "gets maybe 7 hrs of full sun.", "sun", "full sun", "gets maybe 7 hrs of full sun",
+         "full_sun"),
+        ("Grew Cherokee Purple, Sungold and Hot Portugal in 5 gal buckets on the back deck, "
+         "gets maybe 7 hrs of full sun.", "method", "buckets",
+         "in 5 gal buckets on the back deck", "container"),
+        ("Watered by hand maybe 2x a week unless it rained.", "irrigation", "Watered by hand",
+         "Watered by hand maybe 2x a week", "hand_watered"),
+        ("Outdoor tomatoes basically impossible here, maybe 100 frost free days if we're lucky.",
+         "season_length", "100 frost free days", "maybe 100 frost free days if we're lucky",
+         "short_season"),
+        ("Outdoor tomatoes basically impossible here, maybe 100 frost free days if we're lucky.",
+         "shelter", "Outdoor", "Outdoor tomatoes basically impossible here", "outdoors"),
+        ("Peppers were tiny, maybe 3cm, in the polytunnel.", "shelter", "polytunnel",
+         "in the polytunnel", "greenhouse"),
+        ("I grew Sungold in pots in zone 6b and would grow it again.", "zone", "zone 6b",
+         "in zone 6b", "6b"),
+        ("My Sungold in containers would wilt every afternoon in the muggy heat.", "method",
+         "containers", "in containers", "container"),
+        ("Every year my Sungold in the greenhouse would split after rain.", "shelter",
+         "greenhouse", "in the greenhouse", "greenhouse"),
+        ("If anyone's curious, I grow Sungold in pots in zone 6b.", "zone", "zone 6b",
+         "in zone 6b", "6b"),
+        ("Grew Sungold in a wishing-well planter in zone 6b.", "zone", "zone 6b", "in zone 6b",
+         "6b"),
+    ],
+)  # fmt: skip
+def test_rule6_estimates_and_firsthand_would_or_anyone_are_not_hypothetical(
+    text: str, key: EnvKey, written: str, quote: str, claimed: str
+) -> None:
+    """Regression: "maybe 7 hrs" is an estimate; "would grow it again" a firsthand report."""
+    result = validate(text, mention(text[:4], fact(key, written, quote, claimed)), cfg=REPO_CFG)
+
+    assert result.rejections == ()
+    assert facts_of(result) == [(key, claimed)]
 
 
 @pytest.mark.parametrize(
@@ -872,6 +983,23 @@ def test_rule6_wish_and_question_in_one_comment_reject_both_facts() -> None:
     assert reasons(result) == [(0, 0, "hypothetical_context"), (0, 1, "question_context")]
 
 
+def test_rule6_a_sentence_start_marker_only_counts_at_the_start() -> None:
+    cfg = ExtractionConfig(hypothetical_markers=("^maybe",))
+    opening = validate(
+        "Glacier was fine. \u201cMaybe Glacier in zone 5,\u201d he said.",
+        mention("Glacier was fine", fact("zone", "zone 5", "zone 5", "5"), variety="Glacier"),
+        cfg=cfg,
+    )
+    inside = validate(
+        "Glacier was fine. Zone 5 gets maybe 7 hrs of sun.",
+        mention("Glacier was fine", fact("zone", "Zone 5", "Zone 5", "5"), variety="Glacier"),
+        cfg=cfg,
+    )
+
+    assert reasons(opening) == [(0, 0, "hypothetical_context")]
+    assert inside.rejections == ()
+
+
 @pytest.mark.parametrize("marker", ["i\u2019d", "i'd"])
 def test_rule6_configured_markers_may_use_either_apostrophe(marker: str) -> None:
     cfg = ExtractionConfig(hypothetical_markers=(marker,))
@@ -910,14 +1038,39 @@ def test_rule6_markers_are_word_bounded_and_sentence_scoped(text: str) -> None:
         "I'd space them 2.5 feet apart in zone 5.",
         "Maybe I'll put Glacier (var. cerasiforme) out in zone 5.",
         "I'd try it in zone 5...it might ripen.",  # no space after the ellipsis: one sentence
+        "I'd try it in Co. Cork in zone 5.",
+        "I'd try it in co. Cork in zone 5.",
+        "I'd try it near Pt. Reyes in zone 5.",
+        "I'd grow it on my apt. balcony in zone 5.",
+        "I'd try it off Mill Rd. in zone 5.",
+        "I'd try it on 5th Ave. in zone 5.",
+        "I'd try it in Mt. Vernon in zone 5.",
+        "I'd try it nr. Leeds in zone 5.",
+        "I'd use 2 cu. ft. bags in zone 5.",
     ],
 )
 def test_rule6_abbreviations_and_decimals_do_not_end_a_hypothetical_sentence(text: str) -> None:
-    """SPEC §11 #5: a full stop inside "Mr.", "e.g." or "2.5" cannot hide the marker."""
+    """SPEC §11 #5: a full stop inside "Mr.", "e.g.", "Co." or "2.5" cannot hide the marker."""
     result = validate(text, mention(text[:6], fact("zone", "zone 5", "zone 5", "5"), crop=None))
 
     assert facts_of(result) == []
     assert reasons(result) == [(0, 0, "hypothetical_context")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Zone 5 in Denver, CO. I'd try Brandywine next.",
+        "Zone 5 near Bozeman, MT. I'd try Brandywine next.",
+        "Zone 5 in Jackson, MS. I'd try Brandywine next.",
+    ],
+)
+def test_rule6_an_uppercase_state_code_still_ends_its_sentence(text: str) -> None:
+    """Colorado's "CO." ends a sentence (unlike "Co."): the next marker does not reach back."""
+    result = validate(text, mention(text[:6], fact("zone", "Zone 5", "Zone 5", "5"), crop=None))
+
+    assert result.rejections == ()
+    assert facts_of(result) == [("zone", "5")]
 
 
 @pytest.mark.parametrize(
@@ -964,9 +1117,10 @@ def test_rule6_a_repeated_quote_is_rejected_if_any_occurrence_is_hypothetical() 
 def test_rule6_every_configured_marker_rejects_a_fact_in_its_sentence(
     marker: str, apostrophe: str, upper: bool
 ) -> None:
-    phrase = marker.replace("'", apostrophe)
+    phrase = marker.removeprefix("^").replace("'", apostrophe)
     phrase = phrase.upper() if upper else phrase
-    text = f"Glacier was fine. Honestly {phrase} put it in zone 5 again."
+    opening = "" if marker.startswith("^") else "Honestly "  # "^": at the start of a sentence
+    text = f"Glacier was fine. {opening}{phrase} put it in zone 5 again."
     result = validate(
         text,
         mention("Glacier was fine", fact("zone", "zone 5", "zone 5", "5"), variety="Glacier"),
@@ -976,8 +1130,9 @@ def test_rule6_every_configured_marker_rejects_a_fact_in_its_sentence(
     assert reasons(result) == [(0, 0, "hypothetical_context")]
 
 
-def test_rule6_blank_marker_in_config_fails_loudly() -> None:
-    cfg = ExtractionConfig(hypothetical_markers=("   ",))
+@pytest.mark.parametrize("blank", ["   ", "^", "^  "])
+def test_rule6_blank_marker_in_config_fails_loudly(blank: str) -> None:
+    cfg = ExtractionConfig(hypothetical_markers=("i'd", blank))
     with pytest.raises(ValueError, match="marker"):
         validate(TEXT_POTS, sungold(), cfg=cfg)
 
@@ -1193,6 +1348,44 @@ def test_rule4_variety_a_place_outside_the_variety_name_is_kept(
 
     assert result.rejections == ()
     assert facts_of(result) == [("region", claimed)]
+
+
+@pytest.mark.parametrize(
+    ("text", "variety", "place", "code"),
+    [
+        ("My California Wonder peppers did great here in California.", "California Wonder",
+         "California", "US-CA"),
+        ("Arkansas Traveler did fine for me in Arkansas.", "Arkansas Traveler", "Arkansas",
+         "US-AR"),
+    ],
+)  # fmt: skip
+def test_rule4_variety_an_occurrence_in_the_name_is_skipped_when_another_names_the_place(
+    text: str, variety: str, place: str, code: str
+) -> None:
+    """Regression: the state outside the variety name supports the fact (full-sentence quote)."""
+    quote = text.removesuffix(".")
+    result = validate(
+        text,
+        mention(quote, fact("region", place, quote, code), crop="pepper", variety=variety),
+    )
+
+    assert result.rejections == ()
+    assert facts_of(result) == [("region", code)]
+
+
+def test_rule4_variety_a_quote_that_also_occurs_inside_the_name_is_still_rejected() -> None:
+    """The bare quote "California" occurs inside "California Wonder" too: ambiguous."""
+    text = "My California Wonder peppers did great here in California."
+    result = validate(
+        text,
+        mention(
+            "California Wonder peppers",
+            fact("region", "California", "California", "US-CA"),
+            variety="California Wonder",
+        ),
+    )
+
+    assert reasons(result) == [(0, 0, "value_in_variety_name")]
 
 
 # =========================================================================== rule 8
@@ -2035,6 +2228,11 @@ def test_logs_and_rejections_never_contain_comment_text(
     assert {r.reason for r in report.rejections} <= KNOWN_REASONS
 
 
+def test_the_public_reason_list_is_exactly_the_documented_one() -> None:
+    """``REJECTION_REASONS`` is what the prompt documents (tests/test_prompt_consistency.py)."""
+    assert REJECTION_REASONS == KNOWN_REASONS
+
+
 def test_rejections_are_plain_ids_and_codes() -> None:
     result = validate(TEXT_POTS, sungold(fact("method", "pots", "in pot")))
 
@@ -2095,40 +2293,6 @@ def test_every_fixture_extraction_line_validates_without_rejection() -> None:
         assert result.rejections == (), comment_id
         assert result.status == line.status, comment_id
         assert len(result.mentions) == len(line.mentions), comment_id
-
-
-def prompt_worked_example() -> tuple[dict[str, str], list[ParsedComment]]:
-    """The input and output JSON blocks of docs/EXTRACTION_PROMPT.md's worked example."""
-    doc = (REPO / "docs" / "EXTRACTION_PROMPT.md").read_text(encoding="utf-8")
-    section = doc.split("### Worked example", 1)[1].split("\n### ", 1)[0]
-    blocks = [part.split("```", 1)[0] for part in section.split("```json\n")[1:]]
-    inputs = [json.loads(line) for line in blocks[0].splitlines() if line.strip()]
-    assert all(row["text_hash"] == sha256(row["text"]) for row in inputs)
-    outputs = [ParsedComment.model_validate_json(x) for x in blocks[1].splitlines() if x.strip()]
-    return {row["comment_id"]: row["text"] for row in inputs}, outputs
-
-
-def test_the_prompts_worked_example_passes_the_validator() -> None:
-    """The model is taught with this example, so it must load without any rejection."""
-    texts, outputs = prompt_worked_example()
-
-    assert [line.comment_id for line in outputs] == list(texts)
-    for line in outputs:
-        assert line.text_hash == sha256(texts[line.comment_id]), line.comment_id
-        result = validate_parsed_comment(line, texts[line.comment_id], REPO_CFG)
-        assert result.rejections == (), line.comment_id
-        assert result.status == line.status
-
-
-def test_the_prompts_hypothetical_example_cannot_carry_a_zone() -> None:
-    texts, _ = prompt_worked_example()
-    added = mention("Great video", fact("zone", "zone 5", "in zone 5", "5"), crop=None)
-
-    line = parsed("ex-3", added, text=texts["ex-3"])
-
-    result = validate_parsed_comment(line, texts["ex-3"], REPO_CFG)
-
-    assert reasons(result) == [(0, 0, "hypothetical_context")]
 
 
 def test_fixture_load_report(demo: sqlite3.Connection) -> None:

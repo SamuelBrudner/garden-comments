@@ -12,6 +12,7 @@ Passing these synthetic tests is not evidence of real-world extraction accuracy 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Sequence
@@ -93,8 +94,8 @@ def dimension_statuses(item: CommentResult) -> dict[str, str]:
     return {d.key: d.status for d in best.dimensions}
 
 
-def view(conn: sqlite3.Connection, comment_id: str) -> CommentView:
-    (found,) = db.load_comment_views(conn, "public", NOW, [comment_id])
+def view(conn: sqlite3.Connection, comment_id: str, scope: Any = "public") -> CommentView:
+    (found,) = db.load_comment_views(conn, scope, NOW, [comment_id])
     return found
 
 
@@ -479,7 +480,7 @@ def test_11_16_sparse_conditions_still_offer_search_and_explain_the_limitation(
     assert thanks.limitation_message.startswith(f"None of these {thanks.n_candidates} report")
     overall = run(demo_conn, garden=EXAMPLE_GARDEN)
     assert overall.limitation_message == (
-        "Only 35 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+        "Only 33 of 69 reports mention comparable growing conditions (3 not yet analysed)."
     )
 
     # A corpus where *no* comment states a condition (and none was ever extracted).
@@ -695,3 +696,72 @@ def test_validator_e2e_an_extraction_of_edited_text_is_stale_and_reexported(
     assert "p-edit" in [
         json.loads(row)["comment_id"] for row in again.read_text(encoding="utf-8").splitlines()
     ]
+
+
+def private_line(comment_id: str, text: str, *facts: dict[str, Any]) -> dict[str, Any]:
+    """An extractor line for a private comment: one Sungold mention carrying ``facts``."""
+    return {
+        "comment_id": comment_id,
+        "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "extractor_version": "acceptance-v1",
+        "status": "parsed",
+        "mentions": [
+            {
+                "crop": "tomato",
+                "variety_as_written": "Sungold",
+                "evidence_quote": "Sungold",
+                "environment": list(facts),
+            }
+        ],
+    }
+
+
+def test_validator_e2e_an_estimate_with_maybe_is_a_matching_report(
+    demo_env: CliEnv,
+    demo_conn: sqlite3.Connection,
+    add_private_source: SourceImporter,
+    tmp_path: Path,
+) -> None:
+    """ "gets maybe 7 hrs of full sun" hedges an amount; the report still matches."""
+    text = "Grew Sungold in 5 gal buckets on the back deck, gets maybe 7 hrs of full sun."
+    add_private_source(
+        demo_conn, source_id="maybe", comments=[{"comment_id": "p-maybe", "text": text}]
+    )
+    line = private_line(
+        "p-maybe",
+        text,
+        env_fact("method", "buckets", "in 5 gal buckets on the back deck", "container"),
+        env_fact("sun", "full sun", "gets maybe 7 hrs of full sun", "full_sun"),
+    )
+
+    assert load_lines(demo_env, tmp_path, line) == []
+
+    result = run(demo_conn, "private", garden=GardenContext(method="container", sun="full_sun"))
+    assert group_of(result, "p-maybe") == "match"
+    assert dimension_statuses(by_id(result, "p-maybe")) == {"method": "match", "sun": "match"}
+
+
+def test_validator_e2e_a_county_abbreviation_cannot_hide_a_hypothetical_zone(
+    demo_env: CliEnv,
+    demo_conn: sqlite3.Connection,
+    add_private_source: SourceImporter,
+    tmp_path: Path,
+) -> None:
+    """SPEC §11 #5: the full stop of "Co." does not end the sentence that holds "I'd try"."""
+    text = "Sungold did fine in my polytunnel. I'd try it in Co. Cork in zone 8."
+    add_private_source(
+        demo_conn, source_id="cork", comments=[{"comment_id": "p-cork", "text": text}]
+    )
+    line = private_line(
+        "p-cork",
+        text,
+        env_fact("shelter", "polytunnel", "in my polytunnel", "greenhouse"),
+        env_fact("zone", "zone 8", "in zone 8", "8"),
+    )
+
+    assert load_lines(demo_env, tmp_path, line) == [("p-cork", 0, 1, "hypothetical_context")]
+
+    facts = view(demo_conn, "p-cork", "private").mentions[0].facts
+    assert (normalized(facts, "shelter"), normalized(facts, "zone")) == ({"greenhouse"}, set())
+    result = run(demo_conn, "private", garden=GardenContext(zone="8"))
+    assert group_of(result, "p-cork") == "not_stated"

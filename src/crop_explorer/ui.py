@@ -1009,15 +1009,17 @@ def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, 
 
 
 def _shows_reported_conditions(result: CommentResult) -> bool:
-    """Whether the card's condition caption shows a condition the commenter stated."""
+    """Whether the card's condition lines show a comparable condition the commenter stated.
+
+    The region line never counts: a location is not a comparable condition, and a badge before
+    "Growing conditions not stated" would contradict it.
+    """
     if result.comment.parse_status is None:
         return False
     matches = result.mention_matches
-    keys = {fact.key for match in matches for fact in match.facts}
-    if "region" in keys:
-        return True
     best = _best(matches)
     if best is None or best.match is None:
+        keys = {fact.key for match in matches for fact in match.facts}
         return not keys.isdisjoint(COMPARABLE_KEYS)
     if any(m.match is not None and m.match.tier != "not_stated" for m in matches):
         return True
@@ -1038,8 +1040,10 @@ def condition_caption(result: CommentResult, garden: GardenContext) -> str:
     -------
     str
         The :func:`condition_lines` and (for an analysed comment) the :func:`region_line`, each
-        escaped, joined by hard line breaks and led by a ``reported conditions`` badge when any
-        of them shows a condition the commenter stated.
+        escaped, joined by hard line breaks and led by a ``reported conditions`` badge when a
+        condition line shows a comparable condition the commenter stated (as a value or as
+        written). A stated region alone gets no badge: the region line names the place and the
+        heading's ``community report`` badge already says who reported it.
     """
     lines = condition_lines(result, garden)
     if result.comment.parse_status is not None:

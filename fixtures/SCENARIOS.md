@@ -65,7 +65,7 @@ loader never fills in a `null`.
 | syn-0039 | “California Wonder” pepper: state name inside a variety name | no region (warning). A region fact quoting the name would be rejected (`value_in_variety_name`) | 3 |
 | syn-0051 | “Kentucky Wonder” beans grown in Colorado | region `US-CO` only, never Kentucky | 3, 13 |
 | syn-0055 | Sandy soil, full sun on Cape Cod | soil `sandy`, sun `full_sun`. Region kept as written with `normalized_value: null` (Massachusetts not inferred) | 3, 18 |
-| syn-0058 | Hearsay: an uncle grows Rutgers in Kansas | mention kept, no region (warning) | 4 |
+| syn-0058 | Hearsay: an uncle grows Rutgers in Kansas, and the writer “finally grew it myself” | mention kept (the writer's own growing), no region (warning). Crop-only hearsay with no growing of the writer's own gets **no mention** (prompt example `ex-8`) | 4 |
 | syn-0060 | “Greetings from Texas!”: residence greeting, not a growing location | mention kept, no region (warning) | 4 |
 | syn-0045 | United Kingdom allotment, Ailsa Craig in the polytunnel, “outdoor plants” unnamed | region `GB` (`whole_comment`), `greenhouse` only on Ailsa Craig. Unnamed outdoor plants get nothing | 2 |
 | syn-0024 | Hoop house in Vermont, “outside plants were long dead” | `greenhouse` on Sungold. The unnamed outside plants get nothing | 2 |
@@ -122,13 +122,31 @@ loader never fills in a `null`.
 | syn-0042 | Seed advertisement | `unresolved`, empty mentions | 1 |
 | syn-0002, syn-0016, syn-0018, syn-0022, syn-0028, syn-0031, syn-0037, syn-0044, syn-0047, syn-0049, syn-0050, syn-0054, syn-0056, syn-0059, syn-0061, syn-0064, syn-0066, syn-0067 | Flavor, earliness, yield or appearance with no conditions | mention(s), no facts | 6, 16 |
 
+### Validator behaviour exercised outside the fixtures
+
+The fixture sentences avoid every configured hypothetical marker, so narrowing the markers to
+phrases (no bare “would”, “maybe” or “anyone”; `^maybe` only opens a sentence) and the longer
+abbreviation list of the sentence splitter change nothing here: the load still has zero
+rejections and 82 facts. The behaviours that did change are covered elsewhere:
+
+- “gets maybe 7 hrs of full sun” (an estimate) is a matching report, and “I'd try it in Co.
+  Cork in zone 8” stays hypothetical: `tests/test_acceptance.py`, validator end-to-end cases.
+- A state named next to its lake, valley or namesake variety (“I live in Michigan near Lake
+  Michigan”, “My California Wonder peppers did great here in California”) keeps its region:
+  `tests/test_extraction.py`, rules 4 and 5.
+- First-person reports that name no crop, the same crop under two conditions, back-references,
+  non-USDA zones, heat given as temperatures and crop-only hearsay: the worked example of
+  `docs/EXTRACTION_PROMPT.md` (`ex-5` … `ex-10`), validated by
+  `tests/test_prompt_consistency.py`.
+
 ## Coverage numbers (verified by the fixture self-check)
 
 - **Sparsity:** 31 of 69 comments (45%) have no environment fact at all, including the 3 that
-  were never extracted. 35 of 69 have a normalized comparable or region fact. Facts that are
-  only a growing year (syn-0035, syn-0065) or an un-normalized value (syn-0034) do not count as
-  conditions. So a typical search produces the “Only N of M reports mention comparable growing
-  conditions (3 not yet analysed).” message.
+  were never extracted. 33 of 69 have a normalized comparable fact. A region is never compared,
+  so the two region-only reports (syn-0008, syn-0048) do not count, and neither do facts that
+  are only a growing year (syn-0035, syn-0065) or an un-normalized value (syn-0034). So a
+  typical search produces the “Only N of M reports mention comparable growing conditions (3 not
+  yet analysed).” message (“Only 33 of 69” for the whole demo).
 - **Totals after loading:** 69 comments, 66 parsed comments, 71 mentions, 82 facts.
 - **Quick chips** (`config.yaml`, shown at ≥ 3 reports stating any of the chip's conditions;
   `search.chip_support` gives `ChipSupport(n_any, n_all)`):

@@ -4,11 +4,13 @@ Every mapping is an explicit, module-level synonym table. Free text is matched
 case-insensitively (two-letter postal codes and dotted state abbreviations excepted), with
 whitespace collapsed and every phrase bounded by non-word characters. Overlapping candidates
 are resolved **longest phrase first** over non-overlapping spans, so "heat wave" is a heatwave
-rather than "hot" and "West Virginia" is not Virginia. A phrase preceded by a negation or
-low-quantity cue in the same clause ("not humid", "no greenhouse", "less humid") is discarded,
-and look-alike phrases ("hot peppers", "clay pots", "started under lights", "Lake Michigan",
-"Perth, WA", "Sunset zone 9") are blocked outright. A bare dimension noun ("humidity",
-"heat", "rain") names no value. If two different values remain, the phrase is ambiguous and
+rather than "hot" and "West Virginia" is not Virginia. A phrase preceded by a negation cue
+within three words of its clause ("not humid", "no greenhouse") is discarded, and so is a
+non-strict phrase a low-quantity cue directly qualifies ("less humid", "lack of a greenhouse",
+but not "Zero problems in zone 6b" or "Less splitting in containers"). Look-alike phrases
+("hot peppers", "clay pots", "started under lights", "Lake Michigan", "Perth, WA", "Sunset
+zone 9") are blocked outright. A bare dimension noun ("humidity", "heat", "rain") names no
+value. If two different values remain, the phrase is ambiguous and
 nothing is normalized; the only exception is a region subdivision named with its own country
 ("Ontario, Canada"). Region, zone and year are never inferred from one another or from any
 other condition.
@@ -480,6 +482,8 @@ _REGION_ALIASES: Final[_SynonymTable] = MappingProxyType(
         "TR": ("Türkiye", "Turkiye"),
         "MX": ("México",),
         "US-WA": ("Washington State",),
+        # Words may be joined by a space, a hyphen or nothing: "SoCal", "So-Cal", "Nor Cal".
+        "US-CA": ("So Cal", "Nor Cal"),
         "US-DC": (
             "Washington, D.C.",
             "Washington D.C.",
@@ -666,19 +670,30 @@ _NEGATION_CUES: Final = frozenset(
         "can't",
         "cannot",
         "couldn't",
-        # Low-quantity cues: "less humid", "a lack of humid days", "it rarely rained".
-        "less",
-        "lack",
-        "lacked",
-        "lacking",
-        "insufficient",
-        "rarely",
-        "seldom",
-        "zero",
     }
 )
 _NEGATION_WINDOW: Final = 3
 """How many words before a phrase (within its clause) are searched for a negation cue."""
+_INTENSIFIERS: Final = frozenset({"even", "ever", "really", "actually"})
+"""Words that do not count towards :data:`_NEGATION_WINDOW`: "never even been to Arkansas" is
+as negated as "never been to Arkansas"."""
+_LOW_QUANTITY_CUES: Final = frozenset(
+    {"less", "lack", "lacked", "lacking", "insufficient", "rarely", "seldom", "zero"}
+)
+"""Cues that negate only the phrase they directly qualify ("less humid", "it rarely rained"),
+never a phrase further on ("Zero problems in zone 6b", "Less splitting in containers")."""
+_QUALIFIER_FILLERS: Final = frozenset(
+    {
+        *("a", "an", "the", "of", "any"),
+        *("is", "was", "were", "be", "been", "get", "gets", "got", "getting"),
+        *("very", "too", "so", "that", "really", "ever"),
+    }
+)
+"""Words that may stand between a low-quantity cue and the phrase it qualifies: "lack of a
+greenhouse", "it rarely got very hot". "in" is not one: "they split less in the greenhouse"
+and "below zero in the greenhouse" report the greenhouse."""
+_LOW_QUANTITY_REACH: Final = 4
+"""How many words before a phrase are read for a low-quantity cue (the cue plus fillers)."""
 _CLAUSE_BREAK: Final = re.compile(r"[,;:.!?()\[\]{}]")
 _WORD: Final = re.compile(r"[\w'-]+")
 
@@ -960,8 +975,8 @@ def _clauses(text: str) -> _Clauses:
     return _Clauses(text, breaks, tuple(w.start() for w in words), tuple(w.end() for w in words))
 
 
-def _is_negated(clauses: _Clauses, span: _Span) -> bool:
-    """Whether one of the last few words before ``span`` in its clause is a negation cue.
+def _preceding_words(clauses: _Clauses, span: _Span, window: int) -> list[str]:
+    """Return the last ``window`` words before ``span`` in its clause, casefolded, in order.
 
     Uses bisection over the precomputed positions, so checking every span of a long text
     stays O(k log n) instead of rescanning the text before each span.
@@ -969,12 +984,43 @@ def _is_negated(clauses: _Clauses, span: _Span) -> bool:
     n_breaks = bisect_left(clauses.breaks, span.start)
     clause_start = clauses.breaks[n_breaks - 1] + 1 if n_breaks else 0
     last = bisect_left(clauses.word_starts, span.start)
-    first = max(bisect_left(clauses.word_starts, clause_start), last - _NEGATION_WINDOW)
-    preceding = {
+    first = max(bisect_left(clauses.word_starts, clause_start), last - window)
+    return [
         clauses.text[clauses.word_starts[i] : min(clauses.word_ends[i], span.start)].casefold()
         for i in range(first, last)
-    }
-    return not _NEGATION_CUES.isdisjoint(preceding)
+    ]
+
+
+def _is_negated(clauses: _Clauses, span: _Span) -> bool:
+    """Whether one of the last few words before ``span`` in its clause is a negation cue.
+
+    :data:`_INTENSIFIERS` are skipped, so they never push a cue out of the window.
+    """
+    reach = _NEGATION_WINDOW + len(_INTENSIFIERS)
+    words = [w for w in _preceding_words(clauses, span, reach) if w not in _INTENSIFIERS]
+    return not _NEGATION_CUES.isdisjoint(words[-_NEGATION_WINDOW:])
+
+
+def _is_low_quantity(clauses: _Clauses, span: _Span) -> bool:
+    """Whether a low-quantity cue directly qualifies ``span``.
+
+    The cue is the word right before the phrase, or is separated from it only by
+    :data:`_QUALIFIER_FILLERS` ("less humid", "lack of a greenhouse", "rarely got very hot").
+    """
+    words = _preceding_words(clauses, span, _LOW_QUANTITY_REACH)
+    while words and words[-1] in _QUALIFIER_FILLERS:
+        words.pop()
+    return bool(words) and words[-1] in _LOW_QUANTITY_CUES
+
+
+def _span_kind(key: EnvKey, clauses: _Clauses, span: _Span) -> SpanKind:
+    """Classify a value span: negated by a cue, or stating its value.
+
+    Low-quantity cues quantify an amount, so they never negate a region, zone or year
+    ("less Texas heat" is still Texas).
+    """
+    low_quantity = key not in STRICT_KEYS and _is_low_quantity(clauses, span)
+    return "negated" if low_quantity or _is_negated(clauses, span) else "value"
 
 
 def _single(values: set[str]) -> str | None:
@@ -1009,7 +1055,8 @@ class WrittenSpan:
         ("zones 6-7", "2022-2023", "zone 14").
     kind
         ``"value"`` for a phrase that states its value, ``"negated"`` for one preceded by a
-        negation or low-quantity cue in its clause ("not humid", "less humid"), and
+        negation cue in its clause ("not humid") or, outside region, zone and year, directly
+        qualified by a low-quantity cue ("less humid", "lack of a greenhouse"), and
         ``"blocked"`` for a look-alike that names nothing ("clay pots", "Kansas City").
     """
 
@@ -1026,8 +1073,7 @@ def _written_span(
     if span.value is None:
         return WrittenSpan(start, end, None, "blocked")
     value = span.value if is_valid_normalized(key, span.value) else None
-    kind: SpanKind = "negated" if _is_negated(clauses, span) else "value"
-    return WrittenSpan(start, end, value, kind)
+    return WrittenSpan(start, end, value, _span_kind(key, clauses, span))
 
 
 def resolve_spans(key: EnvKey, text: str) -> tuple[WrittenSpan, ...]:
@@ -1199,6 +1245,8 @@ CROP_SYNONYMS: Final[Mapping[str, str]] = MappingProxyType(
         "tomatos": "tomato",
         "capsicum": "pepper",
         "capsicums": "pepper",
+        "peper": "pepper",
+        "pepers": "pepper",
         "chile": "pepper",
         "chiles": "pepper",
         "chili": "pepper",
@@ -1211,7 +1259,7 @@ CROP_SYNONYMS: Final[Mapping[str, str]] = MappingProxyType(
 )
 """Casefolded as-written crop words -> the normalized crop they also name, for
 :func:`mentions_crop` ("cukes" names a cucumber; "chillies" names a pepper as well as a
-chilli)."""
+chilli). A few common misspellings are listed too ("tomatos", "pepers")."""
 
 _CROP_WORD: Final = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 """A word of a crop name: letters/digits, with inner apostrophes; hyphens separate words."""
@@ -1301,9 +1349,11 @@ _LOOSE_JOINERS: Final = re.compile(r"(?<!\w)['-]|['-](?!\w)")
 def variety_key(variety: str) -> str:
     """Return the grouping key of a variety name.
 
-    Casefolds, removes quotes and punctuation (keeping hyphens and apostrophes only between
-    two word characters, as in ``"early-girl"`` or ``"aunt ruby's"``) and collapses whitespace:
-    ``'"Sun Gold"'`` -> ``"sun gold"``.
+    Casefolds, removes quotes and punctuation (keeping apostrophes only between two word
+    characters, as in ``"aunt ruby's"``), then removes every space and hyphen, so spellings of
+    one variety share a key: ``'"Sun Gold"'``, ``"Sungold"`` and ``"Sun-Gold"`` ->
+    ``"sungold"``; ``"Early Girl"`` -> ``"earlygirl"``. It is a grouping key only; show
+    ``variety_as_written`` to people.
 
     Parameters
     ----------
@@ -1321,7 +1371,7 @@ def variety_key(variety: str) -> str:
         If nothing but punctuation and whitespace remains.
     """
     text = _NON_NAME_CHARACTERS.sub(" ", variety.translate(_TYPOGRAPHIC).casefold())
-    key = " ".join(_LOOSE_JOINERS.sub(" ", text).split())
+    key = "".join(_TOKEN_SPLIT.split(_LOOSE_JOINERS.sub(" ", text)))
     if not key:
         raise ValueError("Variety name is empty after removing quotes and punctuation")
     return key

@@ -196,7 +196,11 @@ passed to `MATCH` unsanitized.
 
 `visible_comment_ids`: ids of comments visible in `scope` at `now` (see visibility), filtered by
 FTS when `fts_query(text)` is not `None`, ordered `ORDER BY c.source_id, c.source_order,
-c.comment_id`. Text search finds comments that were never extracted.
+c.comment_id`. Text search finds comments that were never extracted. A comment also matches
+when one of its mentions has a stored `variety_key` equal to `normalization.variety_key(text)`
+(no match when the text has no key), so "Sungold" finds "Sun Gold" and "Sun-Gold" reports and
+the reverse; this only ever adds comments. Keys stored before `variety_key` dropped spaces and
+hyphens match only after the extractions are re-loaded.
 
 `load_comment_views`: `CommentView`s (mentions ordered by `mention_index`, facts by
 `fact_index`) for the given ids (or all visible when `None`), **re-applying the visibility
@@ -306,7 +310,8 @@ display-only, it is never mislabelled). `ValueError` for a key that is not an `E
 evidence quote): resolved longest-first, non-overlapping, in text order, with offsets into the
 **original** text (`text[start:end]` is exactly the matched phrase, even where whitespace was
 collapsed for matching). `kind` is `"value"` (the phrase states `value`), `"negated"` (a
-negation or low-quantity cue precedes it in its clause; `value` is what it would name) or
+negation cue precedes it in its clause, or a low-quantity cue directly qualifies it; `value` is
+what it would name) or
 `"blocked"` (a look-alike; `value` is `None`). For a `"value"`/`"negated"` span, `value` is
 `None` when the phrase names something outside the vocabulary: a range or list ("zones 6-7",
 "zone 6b/7a", "2022-2023") or an out-of-range zone ("zone 14"). `normalize_written` is computed
@@ -330,11 +335,25 @@ Rules:
   trailing "-grown" is allowed). Inside a phrase, words may be joined by a space, a hyphen or
   nothing ("heat wave" / "heat-wave" / "heatwave"). Overlaps are resolved **longest phrase
   first**; on a tie (same start and length) a blocker wins.
-- Negation: a phrase is dropped when one of the 3 words before it in the same clause (clauses
-  split on `, ; : . ! ?` and brackets) is a negation cue (no, not, never, without, didn't,
-  isn't, ...) or a low-quantity cue (less, lack, lacked, lacking, insufficient, rarely, seldom,
-  zero). "not humid", "less humid", "it rarely rained" → `None`; phrases that start with the
-  negation ("no rain", "lack of rain" → `dry_season`) still match.
+- Negation: a phrase is dropped (`"negated"`) when
+  - one of the 3 words before it in the same clause (clauses split on `, ; : . ! ?` and
+    brackets) is a negation cue (no, not, never, without, nor, neither, hardly, barely, didn't,
+    isn't, can't, ...): "not humid", "didn't use drip", "No problems in zone 6b" → `None`. The
+    intensifiers even, ever, really and actually do not count towards the 3 words, so "I've
+    never even been to Arkansas" and "I don't even have a greenhouse" → `None` as well; or
+  - a low-quantity cue (less, lack, lacked, lacking, insufficient, rarely, seldom, zero)
+    **directly qualifies** it: the cue is the word right before the phrase, or only fillers
+    stand between them — a/an/the/of/any, a form of be/get (is, was, were, be, been, get, gets,
+    got, getting) or a degree word (very, too, so, that, really, ever), at most 3 words before
+    the phrase. "less humid", "it rarely rained", "it rarely got very hot", "lacking a
+    greenhouse", "for lack of a greenhouse", "zero shade" → `None`. A cue further away
+    qualifies something else, and "in" is never a filler: "Zero problems in zone 6b" → `6b`,
+    "Less splitting in containers" → `container`, "It rarely rains in Arizona" → `US-AZ`,
+    "they split less in the greenhouse" / "below zero in the greenhouse" → `greenhouse`.
+    Low-quantity cues never negate region, zone or year ("less Texas heat" → `US-TX`, "below
+    zero in zone 4b" → `4b`).
+
+  Phrases that start with the negation ("no rain", "lack of rain" → `dry_season`) still match.
 - Bare dimension nouns name no value: "humidity", "heat", "rain"/"rains" → `None`, so "Humidity
   was in the single digits", "lack of heat" and "it rarely rains" stay display-only. Explicit
   forms still map: "humid", "high humidity", "muggy" → `humid`; "low humidity" → `dry_air`;
@@ -370,7 +389,8 @@ Rules:
     "RHS zone 4") → `None`; they are never stored as USDA zones.
 - Region: full state/province/country names and aliases anywhere in the phrase
   ("in Connecticut" → `US-CT`; "New England" → `US`; "New South Wales" → `AU`, not Wales;
-  Washington DC forms → `US-DC`). Dotted abbreviations ("Conn.", "Calif.", "N.Y.") match
+  Washington DC forms → `US-DC`; "SoCal"/"So Cal"/"So-Cal" and "NorCal"/"Nor Cal"/"Nor-Cal" →
+  `US-CA`, while "so calm" names nothing). Dotted abbreviations ("Conn.", "Calif.", "N.Y.") match
   case-sensitively ("a huge mass." is not Massachusetts). Uppercase two-letter postal codes only
   (a) as the whole phrase ("CT"), (b) right after a comma and followed by the end, punctuation,
   a ZIP code or a country ("Hartford, CT 06103"), or (c) right after a directional/area
@@ -410,8 +430,9 @@ unchanged. Idempotent. Empty → `ValueError`.
 
 `CROP_SYNONYMS`: a small explicit map from casefolded as-written crop words to the normalized
 crop they also name: cuke(s) → cucumber, courgette(s) → zucchini, aubergine(s) → eggplant,
-spud(s) → potato, toms/tomatos → tomato, capsicum/chile/chili/chilli (and plurals) → pepper.
-Every value is a `normalize_crop` fixed point (checked at import).
+spud(s) → potato, toms/tomatos → tomato, capsicum/chile/chili/chilli (and plurals) and the
+misspellings peper/pepers → pepper. Every value is a `normalize_crop` fixed point (checked at
+import).
 
 `mentions_crop(text, crop)`: `True` iff some window of 1–3 consecutive words of `text` (words
 split on whitespace, hyphens and punctuation; inner apostrophes kept), after `normalize_crop` or
@@ -425,10 +446,15 @@ after `normalize_crop`, and via `CROP_SYNONYMS`; the set also holds the casefold
 themselves). Compute it once to test many crops against one text: search does this once per
 query instead of rescanning the query text for every mention.
 
-`variety_key`: casefold; typographic apostrophes/hyphens → ASCII; keep hyphens and apostrophes
-only between two word characters; every other quote/punctuation mark becomes a space; collapse
-whitespace (`'"Sun Gold"'` → `sun gold`, `"Aunt Ruby's German Green"` → `aunt ruby's german
-green`, `"Mr. Stripey"` → `mr stripey`). Empty result → `ValueError`.
+`variety_key`: a **grouping key only** (people always see `variety_as_written`). Casefold;
+typographic apostrophes/hyphens → ASCII; keep apostrophes only between two word characters;
+every other quote/punctuation mark becomes a space; then remove every space and hyphen, so
+spellings of one variety share a key: `"Sun Gold"`, `'"Sun Gold"'`, `"Sungold"`, `"Sun-Gold"`
+→ `sungold`; `"Early Girl"`, `"Early-Girl"` → `earlygirl`; `"Aunt Ruby's German Green"` →
+`auntruby'sgermangreen`; `"Mr. Stripey"` → `mrstripey`. Different names stay apart (`"Sun
+Sugar"`, `"Early Girl 2"`). Empty result → `ValueError`. Keys stored before this rule (with
+spaces/hyphens, e.g. `sun gold`) change when extractions are re-loaded. The key has no word
+boundaries, so do not split it into words to look for a variety in text.
 
 `parse_zone` accepts only already-normalized values (`vocab.ZONE_PATTERN`); `"6B"`, `"zone 6"`
 → `ValueError`.
@@ -441,6 +467,7 @@ class ExtractionReport(BaseModel):  # frozen pydantic model
     stale_texts, comments_loaded, status_counts: dict[ParseStatus, int], mentions_accepted,
     mentions_rejected, facts_accepted, facts_rejected, unresolved_identities,
     rejections: tuple[Rejection, ...]
+REJECTION_REASONS: frozenset[str]  # every reason code a Rejection from this module can carry
 def read_extraction_jsonl(path: Path) -> tuple[list[tuple[int, ParsedComment]], list[Rejection]]
 def validate_parsed_comment(parsed: ParsedComment, text: str, cfg: ExtractionConfig) -> ValidatedComment
 def load_extractions(conn, path: Path, cfg: ExtractionConfig, loaded_at: str,
@@ -481,23 +508,31 @@ those occurrences count; otherwise every case-insensitive one does.
 4. Fact `evidence_quote` must be an exact substring of the comment text
    (`fact_quote_not_substring`); `value_as_written` must occur in it as whole words
    (`value_not_in_quote`: "Maine" is not in "remained", "pot" is not in "potatoes"). Every such
-   occurrence, at every occurrence of the quote in the text, is a **position** of the value.
-   If any position lies wholly inside an occurrence in the comment text (whole words, any
-   case) of any mention's `variety_as_written` → `value_in_variety_name` ("Arkansas" of
-   "Arkansas Traveler", "Hot" of "Hot Portugal", "Shade" of "Shade Star"), for every key and
-   also for a display-only fact. The stored `value_as_written` stays as the extractor wrote it.
+   occurrence is a **position** of the value. A position that, at some occurrence of the quote
+   in the text, lies wholly inside an occurrence in the comment text (whole words, any case)
+   of any mention's `variety_as_written` is not evidence and is dropped ("Arkansas" of
+   "Arkansas Traveler", "Hot" of "Hot Portugal", "Shade" of "Shade Star"); if no position is
+   left → `value_in_variety_name`, for every key and also for a display-only fact. So "My
+   California Wonder peppers did great here in California" as the quote of `US-CA` is
+   accepted, while the bare quote "California" (which also occurs inside the name) is not. The
+   stored `value_as_written` stays as the extractor wrote it.
 5. Normalised value. `null` always means display-only: the loader never derives a value for
    it. The only check on a `null` fact is that a strict-key phrase is not really another strict
    key's value (region "zone 6b", zone "Connecticut", region "2023" → `strict_key_mismatch`).
    A given value must satisfy `vocab.is_valid_normalized` (`invalid_normalized_value`). Then
-   the quote is read with `normalization.resolve_spans(key, evidence_quote)` and every position
-   of the value in the quote is judged by the resolved spans that overlap it:
+   the quote is read with `normalization.resolve_spans(key, evidence_quote)` and each
+   remaining position of the value is judged by the resolved spans that overlap it. First,
+   **look-alike positions are dropped**: overlapping spans exist, none is `"negated"`, and
+   either none is a `"value"` span or a `"blocked"` span extends past the position ("Michigan"
+   in "Lake Michigan", "clay" in "clay pots", "hot" in "hot peppers"). If no position is left →
+   `blocked_value` ("clay" in "clay pots", "Hot" in "Hot peppers", "Kansas" in "Kansas City",
+   "Perth, WA", "Lake Michigan", "Sunset zone 9"). So "I live in Michigan near Lake Michigan"
+   gives `US-MI` and "heavy clay ... clay pots" gives `clay`. Every other position must hold:
    - any overlapping span is `"negated"` → `negated_value` ("humid" in "it wasn't humid", "not
-     humid", "no greenhouse");
-   - a `"blocked"` span extends past the position, or the overlapping spans are all blocked →
-     `blocked_value` ("clay" in "clay pots", "Hot" in "Hot peppers", "Kansas" in "Kansas
-     City", "Perth, WA", "Lake Michigan", "Sunset zone 9"); a blocker wholly inside the value
-     next to a value span is fine ("Kansas City, Missouri" → `US-MO`);
+     humid", "no greenhouse"; "Not humid in June, humid in July" is rejected although the
+     second occurrence states the value);
+   - a blocker wholly inside the value next to a value span is fine ("Kansas City, Missouri" →
+     `US-MO`);
    - otherwise the `"value"` spans must name the given value, and nothing else except, for a
      region, its own country ("Maine, USA" → `US-ME`), else `normalized_value_mismatch`
      ("Virginia" in "West Virginia" for `US-VA`, "zone 6b" in "zone 6b/7a", "Zones 6-7" for
@@ -511,16 +546,28 @@ those occurrences count; otherwise every case-insensitive one does.
      6b" → rejected).
 6. Hypothetical/advice/question guard: split the comment text into sentences; `!`, `?` and line
    breaks always end a sentence, `.` ends one only when followed by whitespace, a closing quote
-   or bracket, or the end of the text, and not after a known abbreviation (Mr, Mrs, Dr, St,
-   e.g, i.e, vs, var, cv, gal, lb, oz, ...; looked for within the 32 characters before the full
-   stop, which keeps splitting linear). Each delimiter belongs to the sentence it ends. If any
-   sentence overlapping **any occurrence** of the fact's evidence quote contains a configured
-   marker (`cfg.hypothetical_markers`: case-insensitive, word-bounded, a space in a marker
-   matches any whitespace, apostrophes `'` `’` `‘` `ʼ` `´` and the backtick interchangeable) →
-   reject the fact (`hypothetical_context`); otherwise, if such a sentence ends with `?` →
-   `question_context`. Joining sentences can only make the guard stricter, so "I'd try Mr.
-   Stripey in zone 5" and "I'd space them 2.5 feet apart in zone 5" are rejected. A blank
-   configured marker is a config error (`ValueError`).
+   or bracket, or the end of the text, and not after a known abbreviation in any case: titles
+   (Mr, Mrs, Ms, Dr, Prof, Jr, Sr), places (St, Mt, Mtn, Ft, Pt, Co, Cty, Twp, Apt, Rd, Ave,
+   Blvd, Hwy, nr), references (vs, e.g, i.e, eg, ie, cf, approx), botany (var, cv, ssp, subsp,
+   spp) and units (gal, lb, lbs, oz, qt, cu, sq, yd); looked for within the 32 characters
+   before the full stop, which keeps splitting linear. An uppercase U.S. postal code ("Denver,
+   CO.", "Bozeman, MT.", "Jackson, MS.") is not an abbreviation and does end its sentence.
+   Each delimiter belongs to the sentence it ends. If any sentence overlapping **any
+   occurrence** of the fact's evidence quote contains a configured marker
+   (`cfg.hypothetical_markers`: case-insensitive, word-bounded, a space in a marker matches any
+   whitespace, apostrophes `'` `’` `‘` `ʼ` `´` and the backtick interchangeable; a marker
+   written with a leading `^` counts only at the start of a sentence, after any non-word
+   characters) → reject the fact (`hypothetical_context`); otherwise, if such a sentence ends
+   with `?` → `question_context`. The repository markers are narrow phrases ("would do",
+   "would be", "wish i", "has anyone", "^maybe", ...), never bare "would", "maybe" or
+   "anyone", so "gets maybe 7 hrs of full sun", "would grow it again" and "If anyone's
+   curious, I grow ..." stay reports while "Maybe Sungold in zone 5." is rejected. Joining
+   sentences can only make the guard stricter, so "I'd try Mr. Stripey in zone 5", "I'd try it
+   in Co. Cork in zone 8" and "I'd space them 2.5 feet apart in zone 5" are rejected. A blank
+   configured marker (including a bare `^`) is a config error (`ValueError`).
+   `docs/EXTRACTION_PROMPT.md` lists the configured markers, every reason code, the region
+   vocabulary and the phrasings the loader reads; `tests/test_prompt_consistency.py` keeps
+   them equal to the code and checks that its worked example loads without a rejection.
 7. Conflicts. Within one mention, accepted facts with key `region` (or `zone`) and two or more
    distinct non-null normalised values → reject every fact of that key in that mention. Then,
    across the comment, if the accepted `whole_comment` facts of key `region` (or `zone`) on all
@@ -633,27 +680,34 @@ def filter_options(conn, scope, now) -> FilterOptions   # distinct, sorted, visi
 ```
 
 1. Candidates: `db.visible_comment_ids(conn, scope, now, query.text)` → `db.load_comment_views`.
-   Text search works for comments with no extraction at all. In `build_result`, `query.text`
+   Text search works for comments with no extraction at all, and a variety's other spellings
+   are found through the stored `variety_key` ("Sungold" finds "Sun Gold"). In `build_result`, `query.text`
    never adds or drops a comment; it only chooses the relevant mentions (rule 2).
 2. Mention-level filters — `crop` (`normalize_crop(query.crop)` equals the stored mention crop
    exactly), `topics` (non-empty intersection), `year` (an applicable `growing_year` fact equals
    it), `region_filter` (an applicable `region` fact equals it). If any of these is set, a
-   comment is kept only if ≥ 1 mention passes **all** set filters; those are its relevant
-   mentions (`relevant_mentions` returns `None` otherwise) and the text plays no part. If none
-   is set, comments with zero mentions are kept (`()`) and the **text names the relevant
-   mentions** (SPEC §4: the variety mention is the query unit): a mention is relevant when its
-   whole `variety_as_written` (via `normalization.variety_key`) occurs as consecutive words of
-   the text, or the text names its crop (`normalization.mentions_crop`: 1-3 word windows via
-   `normalize_crop` or `CROP_SYNONYMS`, so "tomatoes" names `tomato` and "chillies" names
-   `pepper`). Both sides are casefolded, stripped of diacritics (NFKD, like the FTS
-   `remove_diacritics`) and split into letter/digit words, so "Black-Krim" names "Black Krim"
-   and "jalapeno" names "Jalapeño"; "Krim" alone does not. **If the text names no mention (or
-   there is no text), every mention stays relevant** — a documented rule, not a fallback for
-   errors: "hornworms" or "pots" behave as before. So "Roma" makes a greenhouse-pepper /
-   outdoor-tomato comment `different` for a greenhouse garden, and strict mode hides it. The
-   text is read once per query (its words joined into one string, and
-   `normalization.crops_named` of them), so each mention costs a substring test and a set
-   lookup; a pasted 100,000-character text stays cheap even before the viewer's
+   comment is kept only if ≥ 1 mention passes **all** set filters (`relevant_mentions` returns
+   `None` otherwise); if none is set, comments with zero mentions are kept (`()`). Among the
+   passing mentions the **text names the relevant mentions** (SPEC §4: the variety mention is
+   the query unit): a mention is relevant when its whole `variety_as_written` occurs in the
+   text as consecutive words, its words split or joined anywhere ("Sun Gold", "Sun-Gold" and
+   "sungold" name each other, as they share a `normalization.variety_key`), or the text names
+   its crop (`normalization.mentions_crop`: 1-3 word windows via `normalize_crop` or
+   `CROP_SYNONYMS`, so "tomatoes" names `tomato` and "chillies" names `pepper`). Both sides are
+   casefolded, stripped of diacritics (NFKD, like the FTS `remove_diacritics`) and split into
+   letter/digit words, so "Black-Krim" names "Black Krim" and "jalapeno" names "Jalapeño";
+   "Krim" alone does not. **If the text names none of the passing mentions (or there is no
+   text), every passing mention stays relevant** — a documented rule, not a fallback for
+   errors: "hornworms" or "pots" behave as before. So a filter only ever narrows the mentions
+   the text names and never lets another variety's conditions decide the group (SPEC §11 #2):
+   "Roma" makes a greenhouse-pepper / outdoor-tomato comment `different` for a greenhouse
+   garden, with or without a topic both mentions share, and strict mode hides it; a "Sungold"
+   search keeps an in-ground Sungold `different` for a container garden when a state click,
+   crop, topic or year filter also keeps its container-grown Juliet sibling; "Roma" with crop
+   `pepper` compares the Jalapeño, because the text names no passing mention. The text is read
+   once per query (its words joined into one string, and `normalization.crops_named` of them);
+   each variety name becomes one cached regular expression that never backtracks and each crop
+   a set lookup, so a pasted 100,000-character text stays cheap even before the viewer's
    `max_query_chars` cap.
    Invalid filters fail loudly (`ValueError`): a year not matching `YEAR_PATTERN`, an unknown
    region code, a blank crop, and duplicate comment ids in the `build_result` input.
@@ -667,8 +721,9 @@ def filter_options(conn, scope, now) -> FilterOptions   # distinct, sorted, visi
    of the best mention's match, prefixed with `"<variety_as_written, else crop, else
    'Unidentified variety'>: "` when the comment has > 1 relevant mention and the explanation is
    not empty. `has_conditions` = an applicable fact of a relevant mention has a non-null
-   normalized value for a comparable key or `region` (a growing year alone or a display-only
-   fact does not count).
+   normalized value for a comparable key (`vocab.COMPARABLE_KEYS`). A region is a location
+   preference that is never compared, so a region alone, like a growing year alone or a
+   display-only fact, does not count.
 5. Groups: no comparable selection → single group `all`. Otherwise groups `match`, `partial`,
    `not_stated`, `different` (in that order; `different` has `collapsed_by_default=True`). Empty
    groups are always omitted, including `all` (zero candidates → `groups == ()`). Within a group
@@ -682,13 +737,14 @@ def filter_options(conn, scope, now) -> FilterOptions   # distinct, sorted, visi
    view has no mentions; always 0 when a mention-level filter is set). Counts are distinct
    comments before hiding, never mentions.
 7. `limitation_message` (independent of whether a garden is selected; "comparable" because a
-   display-only phrase is a mention but cannot be compared; an unanalysed report is never said
-   to lack conditions; reports hidden by strict mode are never said to be shown below):
+   display-only phrase or a region is a mention but cannot be compared; an unanalysed report
+   is never said to lack conditions; reports hidden by strict mode are never said to be shown
+   below):
    - `n_candidates == 0` or every candidate has conditions → `None`.
    - Some but not all have conditions → `"Only {n_with} of {n} reports mention comparable
      growing conditions."` ("mentions" when `n_with == 1`), with `" ({k} not yet analysed)"`
-     before the full stop when `k = n_not_analysed > 0`, e.g. `"Only 34 of 69 reports mention
-     comparable growing conditions (1 not yet analysed)."`.
+     before the full stop when `k = n_not_analysed > 0`, e.g. `"Only 33 of 69 reports mention
+     comparable growing conditions (3 not yet analysed)."` for the whole demo.
    - None has conditions → a reason sentence, then a where sentence. Reason: none analysed →
      `"None of these {n} reports have been analysed for growing conditions yet, so none can be
      compared with your garden."`; none unanalysed → `"None of these {n} reports mention
@@ -888,8 +944,10 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   `"{variety} {crop}, ... · {topics}"` (fallback "Comment") plus a `community report` badge;
   the comment text rendered as **plain text** through `ui.escape_markdown`; then one caption,
   `ui.condition_caption(result, garden)`: the escaped `ui.condition_lines` plus (for an analysed
-  comment) the region line, led by a `reported conditions` badge when any shown line states a
-  condition the commenter gave (a normalized or written value, or a region). Condition lines:
+  comment) the region line, led by a `reported conditions` badge when a condition line shows a
+  comparable condition the commenter gave (a normalized or written value). A region alone gets
+  no badge: it is never compared, the badge would sit before "Growing conditions not stated",
+  and the heading's `community report` badge already labels the region line. Condition lines:
   - never extracted (`parse_status is None`) → only "Not yet analysed for growing conditions"
     (no region line, no badge);
   - with a selection, for the best relevant mention: "Relevant: …" (matches, and imprecise
