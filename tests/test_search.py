@@ -13,7 +13,6 @@ fill an in-memory SQLite database through ``db.sync_source_comments`` and
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -23,13 +22,15 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from crop_explorer import db
-from crop_explorer.config import QuickChip
-from crop_explorer.normalization import normalize_crop, variety_key
+from crop_explorer.config import QuickChip, load_config
+from crop_explorer.extraction import load_extractions
+from crop_explorer.ingest import build_source, import_file
+from crop_explorer.normalization import variety_key
 from crop_explorer.schemas import (
     Applicability,
+    ColumnMapping,
     CommentRecord,
     EnvKey,
-    ParsedComment,
     ParseStatus,
     RightsStatus,
     SourceRecord,
@@ -37,7 +38,6 @@ from crop_explorer.schemas import (
     ValidatedComment,
     ValidatedFact,
     ValidatedMention,
-    to_utc_iso,
 )
 from crop_explorer.search import (
     FilterOptions,
@@ -1186,53 +1186,25 @@ class TestFilterOptions:
 # =========================================================================== synthetic fixtures
 
 
-def fixture_validated(parsed: ParsedComment) -> ValidatedComment:
-    """Adapt one hand-checked fixture line (the real validator lives in extraction.py)."""
-    mentions = tuple(
-        ValidatedMention(
-            crop=None if m.crop is None else normalize_crop(m.crop),
-            variety_as_written=m.variety_as_written,
-            variety_key=None
-            if m.variety_as_written is None
-            else variety_key(m.variety_as_written),
-            topics=tuple(m.topics),
-            evidence_quote=m.evidence_quote,
-            facts=tuple(ValidatedFact(**f.model_dump()) for f in m.environment),
-        )
-        for m in parsed.mentions
-    )
-    return ValidatedComment(
-        comment_id=parsed.comment_id,
-        extractor_version=parsed.extractor_version,
-        status=parsed.status,
-        mentions=mentions,
-        warnings=tuple(parsed.warnings),
-        rejections=(),
-    )
-
-
-def jsonl(path: Path) -> list[str]:
-    return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
 @pytest.fixture(scope="module")
 def synthetic() -> Iterator[sqlite3.Connection]:
+    """The demo fixtures loaded through the production pipeline (ingest, then extraction)."""
     connection = db.connect(Path(":memory:"))
-    rows = [json.loads(line) for line in jsonl(FIXTURES / "synthetic_comments.jsonl")]
-    records = [
-        CommentRecord(
-            comment_id=row["comment_id"],
-            text=row["text"],
-            permalink=row["permalink"],
-            created_at=None if row["created_at"] is None else to_utc_iso(row["created_at"]),
-            source_order=i,
-        )
-        for i, row in enumerate(rows)
-    ]
-    db.sync_source_comments(connection, source_record("synthetic-demo"), records)
-    for line in jsonl(FIXTURES / "synthetic_extractions.jsonl"):
-        parsed = ParsedComment.model_validate_json(line)
-        db.replace_extraction(connection, fixture_validated(parsed), LOADED)
+    comments = FIXTURES / "synthetic_comments.jsonl"
+    source = build_source(
+        comments,
+        source_id="synthetic-demo",
+        kind="synthetic_fixture",
+        rights_status="synthetic",
+        source_url=None,
+        expires_at=None,
+        imported_at=PAST,
+    )
+    import_file(connection, comments, ColumnMapping(), source)
+    report = load_extractions(
+        connection, FIXTURES / "synthetic_extractions.jsonl", load_config().extraction, LOADED
+    )
+    assert report.rejections == ()
     yield connection
     connection.close()
 

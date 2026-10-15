@@ -209,6 +209,10 @@ def test_every_full_region_name_maps_to_its_code(code: str, name: str) -> None:
         ("Hawai\u2019i", "US-HI"),
         ("Georgia-grown", "US-GA"),
         ("not far from Boston, Massachusetts", "US-MA"),
+        ("Kansas City, Missouri", "US-MO"),
+        ("Kansas City, Kansas", "US-KS"),
+        ("Kansas City, MO", "US-MO"),
+        ("Nevada City, California", "US-CA"),
     ],
 )
 def test_region_phrases(written: str, expected: str) -> None:
@@ -238,6 +242,8 @@ def test_region_phrases(written: str, expected: str) -> None:
         "humid",
         "a huge mass.",
         "conn.",
+        "Kansas City",
+        "near Kansas City",
     ],
 )
 def test_region_phrases_that_are_absent_or_ambiguous(written: str) -> None:

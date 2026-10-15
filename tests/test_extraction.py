@@ -68,6 +68,7 @@ KNOWN_REASONS = frozenset(
         "value_not_in_quote",
         "invalid_normalized_value",
         "strict_key_mismatch",
+        "normalized_value_mismatch",
         "hypothetical_context",
         "conflicting_region",
         "conflicting_zone",
@@ -357,6 +358,39 @@ def test_rule5_normalized_value_must_be_a_vocabulary_value() -> None:
     assert reasons(result) == [(0, 0, "invalid_normalized_value")]
 
 
+@pytest.mark.parametrize(
+    ("key", "written", "quote", "claimed"),
+    [
+        ("method", "pots", "in pots", "raised_bed"),
+        ("humidity", "muggy summers", "loves the muggy summers", "dry_air"),
+    ],
+)
+def test_rule5_a_value_contradicting_the_quoted_words_is_rejected(
+    key: EnvKey, written: str, quote: str, claimed: str
+) -> None:
+    """A valid vocabulary value is still refused when the quoted words say otherwise."""
+    result = validate(TEXT_POTS, sungold(fact(key, written, quote, claimed)))
+
+    assert facts_of(result) == []
+    assert reasons(result) == [(0, 0, "normalized_value_mismatch")]
+    assert result.status == "partial"
+
+
+def test_rule5_the_extractor_may_normalise_what_the_loader_cannot() -> None:
+    text = "Sungold sulked on our north-facing balcony railing."
+    result = validate(
+        text,
+        mention(
+            "Sungold sulked",
+            fact("method", "balcony railing", "balcony railing", "container"),
+            variety="Sungold",
+        ),
+    )
+
+    assert facts_of(result) == [("method", "container")]
+    assert result.rejections == ()
+
+
 def test_rule5_missing_normalized_value_is_derived_from_the_written_phrase() -> None:
     result = validate(
         TEXT_POTS,
@@ -396,7 +430,7 @@ def test_rule5_unrecognised_value_is_kept_as_display_only() -> None:
             "Sungold in Kansas City, Missouri was great.",
             "region",
             "Kansas City, Missouri",
-            "US-MO",
+            "US-KS",  # the city name does not make it Kansas
         ),
         ("Sungold did well in Kansas.", "region", "Kansas", "US-MO"),
     ],
@@ -514,6 +548,40 @@ def test_rule6_configured_markers_may_use_either_apostrophe(marker: str) -> None
 def test_rule6_markers_are_word_bounded_and_sentence_scoped(text: str) -> None:
     quote = "Zone 5" if "Zone 5" in text else "zone 5"
     result = validate(text, mention("Glacier", fact("zone", quote, quote, "5"), variety="Glacier"))
+
+    assert result.rejections == ()
+    assert facts_of(result) == [("zone", "5")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'd try Mr. Stripey in zone 5 next spring.",
+        "You should grow it, e.g. in zone 5 where it ripens early.",
+        "I'd space them 2.5 feet apart in zone 5.",
+        "Maybe I'll put Glacier (var. cerasiforme) out in zone 5.",
+        "I'd try it in zone 5...it might ripen.",  # no space after the ellipsis: one sentence
+    ],
+)
+def test_rule6_abbreviations_and_decimals_do_not_end_a_hypothetical_sentence(text: str) -> None:
+    """SPEC §11 #5: a full stop inside "Mr.", "e.g." or "2.5" cannot hide the marker."""
+    result = validate(text, mention(text[:6], fact("zone", "zone 5", "zone 5", "5"), crop=None))
+
+    assert facts_of(result) == []
+    assert reasons(result) == [(0, 0, "hypothetical_context")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Glacier did fine in zone 5. I'd try Brandywine next.",
+        "Glacier did fine in zone 5 out West. I'd try Brandywine next.",
+        'My neighbor wrote "zone 5." I would try it again.',
+        "Glacier did fine in zone 5... I'd try it again.",
+    ],
+)
+def test_rule6_an_ordinary_full_stop_still_ends_the_sentence(text: str) -> None:
+    result = validate(text, mention(text[:6], fact("zone", "zone 5", "zone 5", "5"), crop=None))
 
     assert result.rejections == ()
     assert facts_of(result) == [("zone", "5")]

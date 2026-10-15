@@ -11,20 +11,31 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from loguru import logger
 
-from crop_explorer.ingest import IngestError, build_source, dataset_hash, read_comments
+from crop_explorer import db
+from crop_explorer.config import load_config
+from crop_explorer.extraction import load_extractions
+from crop_explorer.ingest import (
+    IngestError,
+    build_source,
+    dataset_hash,
+    import_file,
+    read_comments,
+)
 from crop_explorer.schemas import (
     RIGHTS_STATUSES,
     ColumnMapping,
     CommentRecord,
+    ImportStats,
     RightsStatus,
     SourceRecord,
 )
@@ -820,3 +831,258 @@ def test_build_source_rejects_invalid_arguments(
 def test_build_source_requires_a_readable_file(tmp_path: Path) -> None:
     with pytest.raises(IngestError, match=r"missing\.csv"):
         make_source(tmp_path / "missing.csv")
+
+
+# --------------------------------------------------------------------------- import_file
+# End-to-end import into SQLite and idempotent re-import (SPEC §8 flow 5, §11 #14).
+
+EXTRACTION_CFG = load_config().extraction
+TABLES = ("sources", "comments", "parses", "mentions", "environment_facts")
+TEXT2_CHANGED = "Cherokee Purple cracked after the downpour."
+C1_EXTRACTION = {
+    "comment_id": "c1",
+    "extractor_version": "test-v1",
+    "status": "parsed",
+    "mentions": [
+        {
+            "crop": "tomatoes",
+            "variety_as_written": "Sun Gold",
+            "topics": ["flavor"],
+            "evidence_quote": "Sun Gold in 5 gallon pots",
+            "environment": [
+                {
+                    "key": "method",
+                    "value_as_written": "5 gallon pots",
+                    "evidence_quote": "Sun Gold in 5 gallon pots",
+                    "applicability": "this_mention",
+                    "basis": "reported_garden_context",
+                },
+                {
+                    "key": "zone",
+                    "value_as_written": "zone 6b",
+                    "evidence_quote": "zone 6b",
+                    "applicability": "whole_comment",
+                    "basis": "reported_garden_context",
+                },
+            ],
+        }
+    ],
+}
+C2_EXTRACTION = {
+    "comment_id": "c2",
+    "extractor_version": "test-v1",
+    "status": "parsed",
+    "mentions": [
+        {
+            "crop": "tomato",
+            "variety_as_written": "Cherokee Purple",
+            "topics": ["disease"],
+            "evidence_quote": "Cherokee Purple split",
+        }
+    ],
+}
+
+
+@pytest.fixture
+def memory_db() -> Iterator[sqlite3.Connection]:
+    conn = db.connect(db.MEMORY_PATH)
+    yield conn
+    conn.close()
+
+
+def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in TABLES
+    }
+
+
+def private_views(conn: sqlite3.Connection) -> list[Any]:
+    return db.load_comment_views(conn, "private", IMPORTED, None)
+
+
+def text_hits(conn: sqlite3.Connection, text: str) -> list[str]:
+    return db.visible_comment_ids(conn, "private", IMPORTED, text)
+
+
+def import_csv(
+    conn: sqlite3.Connection, path: Path, rows: Iterable[Sequence[str]] | None = None
+) -> ImportStats:
+    """(Re)write ``path`` when ``rows`` is given, then import it as source ``export-2024``."""
+    if rows is not None:
+        write_csv(path, HEADER, rows)
+    return import_file(conn, path, DEFAULT, make_source(path))
+
+
+def load_extraction_lines(conn: sqlite3.Connection, path: Path, *lines: object) -> None:
+    write_jsonl(path, lines)
+    report = load_extractions(conn, path, EXTRACTION_CFG, IMPORTED)
+    assert report.rejections == ()
+    assert report.comments_loaded == len(lines)
+
+
+@pytest.fixture
+def extracted_db(
+    memory_db: sqlite3.Connection, two_row_csv: Path, tmp_path: Path
+) -> sqlite3.Connection:
+    """Both comments of ``two_row_csv`` imported and extracted."""
+    import_csv(memory_db, two_row_csv)
+    load_extraction_lines(memory_db, tmp_path / "parsed.jsonl", C1_EXTRACTION, C2_EXTRACTION)
+    return memory_db
+
+
+def test_import_file_stores_exact_records_under_the_source(
+    memory_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    stats = import_csv(memory_db, two_row_csv)
+
+    assert stats == ImportStats(
+        source_id="export-2024", inserted=2, updated=0, unchanged=0, deleted=0
+    )
+    assert [
+        (v.comment_id, v.text, v.permalink, v.created_at, v.source_order, v.parse_status)
+        for v in private_views(memory_db)
+    ] == [
+        ("c1", TEXT1, URL1, "2024-07-01T10:00:00Z", 0, None),
+        ("c2", TEXT2, None, None, 1, None),
+    ]
+    source = memory_db.execute("SELECT * FROM sources").fetchone()
+    assert source["rights_status"] == "private_unverified"
+    assert source["dataset_hash"] == dataset_hash(two_row_csv)
+    assert db.load_comment_views(memory_db, "public", IMPORTED, None) == []
+
+
+def test_reimporting_the_identical_file_changes_nothing_and_keeps_extractions(
+    extracted_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    before_counts, before_views = table_counts(extracted_db), private_views(extracted_db)
+
+    stats = import_csv(extracted_db, two_row_csv)
+
+    assert stats == ImportStats(
+        source_id="export-2024", inserted=0, updated=0, unchanged=2, deleted=0
+    )
+    assert table_counts(extracted_db) == before_counts
+    assert private_views(extracted_db) == before_views
+    assert before_counts["environment_facts"] == 2
+    assert text_hits(extracted_db, "Cherokee") == ["c2"]  # no duplicate FTS rows
+
+
+def test_changed_comment_text_drops_only_that_comments_extraction(
+    extracted_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    stats = import_csv(
+        extracted_db,
+        two_row_csv,
+        [("c1", TEXT1, URL1, "2024-07-01T12:00:00+02:00"), ("c2", TEXT2_CHANGED, "", "")],
+    )
+
+    assert (stats.updated, stats.unchanged, stats.inserted, stats.deleted) == (1, 1, 0, 0)
+    c1, c2 = private_views(extracted_db)
+    assert (c1.parse_status, len(c1.mentions), len(c1.mentions[0].facts)) == ("parsed", 1, 2)
+    assert (c2.text, c2.parse_status, c2.mentions) == (TEXT2_CHANGED, None, ())
+    assert text_hits(extracted_db, "downpour") == ["c2"]
+    assert text_hits(extracted_db, "split") == []
+    assert db.iter_comments_for_extraction(extracted_db, only_unparsed=True, now=IMPORTED) == [
+        ("c2", TEXT2_CHANGED)
+    ]
+
+
+def test_rows_missing_from_a_reimport_are_deleted_with_their_extraction(
+    extracted_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    stats = import_csv(extracted_db, two_row_csv, [("c1", TEXT1, URL1, "2024-07-01")])
+
+    # c1 keeps its text, so it is "unchanged" (and keeps its extraction) but its metadata is
+    # refreshed from the new file.
+    assert (stats.deleted, stats.unchanged, stats.updated) == (1, 1, 0)
+    assert [(v.comment_id, v.created_at) for v in private_views(extracted_db)] == [
+        ("c1", "2024-07-01T00:00:00Z")
+    ]
+    assert db.stored_texts(extracted_db, ["c1", "c2"]) == {"c1": TEXT1}
+    assert text_hits(extracted_db, "Cherokee") == []
+    assert table_counts(extracted_db) == {
+        "sources": 1,
+        "comments": 1,
+        "parses": 1,
+        "mentions": 1,
+        "environment_facts": 2,
+    }
+
+
+def test_invalid_reimport_writes_nothing(
+    extracted_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    before_counts, before_views = table_counts(extracted_db), private_views(extracted_db)
+    old_hash = extracted_db.execute("SELECT dataset_hash FROM sources").fetchone()[0]
+
+    with pytest.raises(IngestError, match="duplicate comment ids"):
+        import_csv(extracted_db, two_row_csv, [("c1", TEXT1, "", ""), ("c1", TEXT2, "", "")])
+
+    assert table_counts(extracted_db) == before_counts
+    assert private_views(extracted_db) == before_views
+    assert extracted_db.execute("SELECT dataset_hash FROM sources").fetchone()[0] == old_hash
+
+
+def test_comment_id_owned_by_another_source_is_rejected_atomically(
+    extracted_db: sqlite3.Connection, tmp_path: Path
+) -> None:
+    before_views = private_views(extracted_db)
+    other = write_csv(tmp_path / "other.csv", HEADER, [("c9", "new", "", ""), ("c1", "x", "", "")])
+
+    with pytest.raises(ValueError, match="c1"):
+        import_file(extracted_db, other, DEFAULT, make_source(other, source_id="other-export"))
+
+    sources = [row[0] for row in extracted_db.execute("SELECT source_id FROM sources")]
+    assert sources == ["export-2024"]
+    assert private_views(extracted_db) == before_views
+
+
+def test_import_refuses_a_file_that_changed_after_its_source_was_built(
+    extracted_db: sqlite3.Connection, two_row_csv: Path
+) -> None:
+    """The stored dataset_hash must describe exactly the bytes whose comments are stored."""
+    before_counts, before_views = table_counts(extracted_db), private_views(extracted_db)
+    stale = make_source(two_row_csv)
+    write_csv(two_row_csv, HEADER, [("c1", TEXT1, URL1, "2024-07-01"), ("c3", "New.", "", "")])
+
+    with pytest.raises(IngestError, match="dataset_hash") as caught:
+        import_file(extracted_db, two_row_csv, DEFAULT, stale)
+
+    assert TEXT1 not in str(caught.value)
+    assert table_counts(extracted_db) == before_counts
+    assert private_views(extracted_db) == before_views
+    fresh = import_file(extracted_db, two_row_csv, DEFAULT, make_source(two_row_csv))
+    assert (fresh.inserted, fresh.deleted) == (1, 1)
+
+
+SMALL_IDS = st.sampled_from(["a", "b", "c", "d"])
+SMALL_TEXTS = st.sampled_from(["Sungold in pots.", "Juliet in the ground.", "Brandywine!"])
+EXPORTS = st.lists(st.tuples(SMALL_IDS, SMALL_TEXTS), max_size=4, unique_by=lambda r: r[0])
+
+
+@settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(first=EXPORTS.filter(bool), second=EXPORTS.filter(bool))
+def test_reimport_leaves_exactly_the_latest_export(
+    tmp_path: Path, first: list[tuple[str, str]], second: list[tuple[str, str]]
+) -> None:
+    """Any import sequence stores exactly the latest file, with exact change counts."""
+    path = tmp_path / "export.jsonl"
+    old, new = dict(first), dict(second)
+    conn = db.connect(db.MEMORY_PATH)
+    try:
+        for rows in (first, second):
+            write_jsonl(path, [{"comment_id": cid, "text": text} for cid, text in rows])
+            stats = import_file(conn, path, DEFAULT, make_source(path))
+        again = import_file(conn, path, DEFAULT, make_source(path))
+        stored = db.stored_texts(conn, sorted(old | new))
+    finally:
+        conn.close()
+
+    assert stored == dict(sorted(new.items()))
+    assert stats.inserted == len(new.keys() - old.keys())
+    assert stats.deleted == len(old.keys() - new.keys())
+    assert stats.updated == sum(old[k] != new[k] for k in old.keys() & new.keys())
+    assert stats.unchanged == sum(old[k] == new[k] for k in old.keys() & new.keys())
+    assert again == ImportStats(
+        source_id="export-2024", inserted=0, updated=0, unchanged=len(new), deleted=0
+    )

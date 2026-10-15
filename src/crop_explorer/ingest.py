@@ -110,15 +110,8 @@ def read_comments(path: Path, mapping: ColumnMapping) -> list[CommentRecord]:
         required column, blank id or text, non-http(s) permalink, unparseable date, duplicate
         ids, or a file with no comments.
     """
-    suffix = _suffix_of(path)
-    _check_mapping(mapping)
-    text = _decode(path, _read_bytes(path))
-    try:
-        records = _records(_rows(suffix, text, mapping), mapping)
-    except IngestError as exc:
-        raise IngestError(f"{path}: {exc}") from exc
-    logger.info("Read {} comments from {}", len(records), path.name)
-    return records
+    _suffix_of(path)  # an unsupported file type fails before the file is read
+    return _parse(path, _read_bytes(path), mapping)
 
 
 def dataset_hash(path: Path) -> str:
@@ -216,15 +209,35 @@ def import_file(
     Raises
     ------
     IngestError
-        If the file is invalid; nothing is written in that case.
+        If the file is invalid, or its bytes no longer match ``source.dataset_hash`` (the file
+        changed after :func:`build_source` hashed it); nothing is written in that case.
     ValueError
         If a comment id already belongs to another source (raised by the database layer).
     """
-    records = read_comments(path, mapping)
-    return db.sync_source_comments(conn, source, records)
+    _suffix_of(path)
+    data = _read_bytes(path)
+    if hashlib.sha256(data).hexdigest() != source.dataset_hash:
+        raise IngestError(
+            f"{path}: file contents do not match the dataset_hash of source "
+            f"{source.source_id!r}; build the source record from this exact file"
+        )
+    return db.sync_source_comments(conn, source, _parse(path, data, mapping))
 
 
 # --------------------------------------------------------------------------- file level
+
+
+def _parse(path: Path, data: bytes, mapping: ColumnMapping) -> list[CommentRecord]:
+    """Validate and parse the bytes of ``path`` (see :func:`read_comments`)."""
+    suffix = _suffix_of(path)
+    _check_mapping(mapping)
+    text = _decode(path, data)
+    try:
+        records = _records(_rows(suffix, text, mapping), mapping)
+    except IngestError as exc:
+        raise IngestError(f"{path}: {exc}") from exc
+    logger.info("Read {} comments from {}", len(records), path.name)
+    return records
 
 
 def _suffix_of(path: Path) -> str:

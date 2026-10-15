@@ -1,0 +1,14 @@
+# Streamlit settings for the viewer (app.py). Never put secrets in this file.
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+# Never render stray expressions: only explicit st.* calls may put content on the page.
+magicEnabled = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+primaryColor = "#2E7D32"

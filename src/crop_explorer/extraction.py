@@ -10,9 +10,10 @@ only. Comment bodies, evidence quotes and extractor warnings are never logged.
 Rejection reasons: ``schema_error``, ``unknown_comment_id``, ``duplicate_comment_id``,
 ``mention_quote_not_substring``, ``variety_not_in_quote``, ``invalid_crop``, ``invalid_variety``,
 ``fact_quote_not_substring``, ``value_not_in_quote``, ``invalid_normalized_value``,
-``strict_key_mismatch``, ``hypothetical_context``, ``conflicting_region`` and
-``conflicting_zone``. Rejection ``mention_index``/``fact_index`` are positions in the extractor's
-input lists; the indexes stored in the database are positions among the accepted records.
+``strict_key_mismatch``, ``normalized_value_mismatch``, ``hypothetical_context``,
+``conflicting_region`` and ``conflicting_zone``. Rejection ``mention_index``/``fact_index``
+are positions in the extractor's input lists; the indexes stored in the database are positions
+among the accepted records.
 """
 
 from __future__ import annotations
@@ -67,13 +68,28 @@ _FACT_QUOTE_NOT_SUBSTRING: Final = "fact_quote_not_substring"
 _VALUE_NOT_IN_QUOTE: Final = "value_not_in_quote"
 _INVALID_NORMALIZED_VALUE: Final = "invalid_normalized_value"
 _STRICT_KEY_MISMATCH: Final = "strict_key_mismatch"
+_NORMALIZED_VALUE_MISMATCH: Final = "normalized_value_mismatch"
 _HYPOTHETICAL_CONTEXT: Final = "hypothetical_context"
 _CONFLICT_REASONS: Final[Mapping[str, str]] = MappingProxyType(
     {"region": "conflicting_region", "zone": "conflicting_zone"}
 )
 
 _STATUSES: Final[tuple[ParseStatus, ...]] = get_args(ParseStatus)
-_SENTENCE_END: Final = re.compile(r"[.!?\n]")
+_SENTENCE_END: Final = re.compile(r"[!?\n]|\.(?=[\s\"')\]\u201d\u2019]|\Z)")
+"""``!``, ``?`` and line breaks always end a sentence; ``.`` only before space, a closing
+quote or bracket, or the end of the text (so ``5.5 gallon`` and ``U.S.A`` stay whole)."""
+_TRAILING_WORD: Final = re.compile(r"(?<![\w.])[^\W\d_]+(?:\.[^\W\d_]+)*\Z")
+_ABBREVIATIONS: Final = frozenset(
+    {
+        "mr", "mrs", "ms", "dr", "prof", "st", "mt", "ft", "jr", "sr",
+        "vs", "e.g", "i.e", "eg", "ie", "cf", "approx",
+        "var", "cv", "ssp", "subsp", "spp",
+        "gal", "lb", "lbs", "oz",
+    }
+)  # fmt: skip
+"""Words whose trailing ``.`` does not end a sentence ("I'd try Mr. Stripey in zone 5").
+
+Joining across an abbreviation can only make the hypothetical guard stricter, never looser."""
 _APOSTROPHES: Final = "'\u2019\u2018\u02bc"
 _APOSTROPHE_CLASS: Final = f"[{_APOSTROPHES}]"
 _UTF8_BOM: Final = b"\xef\xbb\xbf"
@@ -344,6 +360,7 @@ def _normalized_value(key: EnvKey, written: str, given: str | None) -> str | Non
         return derived
     _require(is_valid_normalized(key, given), _INVALID_NORMALIZED_VALUE)
     _require(key not in STRICT_KEYS or given == derived, _STRICT_KEY_MISMATCH)
+    _require(derived is None or given == derived, _NORMALIZED_VALUE_MISMATCH)
     return given
 
 
@@ -396,9 +413,21 @@ def _word_regex(word: str) -> str:
     return "".join(_APOSTROPHE_CLASS if char in _APOSTROPHES else re.escape(char) for char in word)
 
 
+def _ends_sentence(text: str, delimiter: re.Match[str]) -> bool:
+    """Whether a delimiter ends its sentence (a full stop after an abbreviation does not)."""
+    if delimiter.group() != ".":
+        return True
+    word = _TRAILING_WORD.search(text, 0, delimiter.start())
+    return word is None or word.group().casefold() not in _ABBREVIATIONS
+
+
 def _sentence_spans(text: str) -> list[_Span]:
-    """Split on ``.``, ``!``, ``?`` and line breaks; each delimiter ends its sentence."""
-    ends = [match.end() for match in _SENTENCE_END.finditer(text)]
+    """Split on ``.``, ``!``, ``?`` and line breaks; each delimiter ends its sentence.
+
+    A ``.`` ends a sentence only when followed by whitespace, a closing quote or bracket, or
+    the end of the text, and not after a known abbreviation (:data:`_ABBREVIATIONS`).
+    """
+    ends = [m.end() for m in _SENTENCE_END.finditer(text) if _ends_sentence(text, m)]
     starts = [0, *ends]
     bounds = zip(starts, [*ends, len(text)], strict=True)
     return [(start, end) for start, end in bounds if start < end]

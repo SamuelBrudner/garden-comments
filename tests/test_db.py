@@ -655,12 +655,36 @@ def test_id_sequences_must_not_be_bare_strings(mixed: sqlite3.Connection) -> Non
 
 
 def test_iter_comments_for_extraction(mixed: sqlite3.Connection) -> None:
-    every = iter_comments_for_extraction(mixed, only_unparsed=False)
+    every = iter_comments_for_extraction(mixed, only_unparsed=False, now=NOW)
     assert [comment_id for comment_id, _ in every] == ["k1", "d1", "p1", "p2"]
     assert dict(every)["p2"] == "Secret beans."
-    assert iter_comments_for_extraction(mixed, only_unparsed=True) == [("p2", "Secret beans.")]
+    assert iter_comments_for_extraction(mixed, only_unparsed=True, now=NOW) == [
+        ("p2", "Secret beans.")
+    ]
     mark_deleted(mixed, "p2")
-    assert iter_comments_for_extraction(mixed, only_unparsed=True) == []
+    assert iter_comments_for_extraction(mixed, only_unparsed=True, now=NOW) == []
+
+
+def test_iter_comments_for_extraction_skips_expired_sources(mixed: sqlite3.Connection) -> None:
+    """Rights expiry ends processing too, even before purge_expired removes the rows."""
+    sync_source_comments(
+        mixed,
+        make_source("lapsed", "private_unverified", expires_at=NOW),
+        [rec("x1", "Expired okra notes.")],
+    )
+    sync_source_comments(
+        mixed,
+        make_source("current", "private_unverified", expires_at=FUTURE),
+        [rec("y1", "Current okra notes.")],
+    )
+
+    ids = [cid for cid, _ in iter_comments_for_extraction(mixed, only_unparsed=True, now=NOW)]
+    earlier = iter_comments_for_extraction(mixed, only_unparsed=True, now=PAST)
+
+    assert ids == ["y1", "p2"]
+    assert [cid for cid, _ in earlier] == ["y1", "x1", "p2"]  # ordered by source_id
+    with pytest.raises(ValueError, match="now"):
+        iter_comments_for_extraction(mixed, only_unparsed=False, now="2026-10-15")
 
 
 # --------------------------------------------------------------------------- fts_query

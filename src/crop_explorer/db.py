@@ -619,11 +619,14 @@ def stored_texts(conn: sqlite3.Connection, comment_ids: Sequence[str]) -> dict[s
 
 
 def iter_comments_for_extraction(
-    conn: sqlite3.Connection, only_unparsed: bool
+    conn: sqlite3.Connection, only_unparsed: bool, now: str
 ) -> list[tuple[str, str]]:
     """List ``(comment_id, text)`` to send to the offline extractor (pipeline-internal).
 
-    Soft-deleted comments are excluded. Ordered like viewer results.
+    Rights status is ignored (extraction runs on private data), but comments of sources whose
+    ``expires_at`` is at or before ``now`` are excluded: permission to process them has ended
+    even if :func:`purge_expired` has not run yet. Soft-deleted comments are excluded too.
+    Ordered like viewer results.
 
     Parameters
     ----------
@@ -631,18 +634,27 @@ def iter_comments_for_extraction(
         Open connection.
     only_unparsed
         Restrict to comments that have no stored extraction.
+    now
+        Canonical UTC current time.
 
     Returns
     -------
     list[tuple[str, str]]
         Comment ids with their exact stored text.
+
+    Raises
+    ------
+    ValueError
+        If ``now`` is not canonical UTC.
     """
+    require_utc_iso(now, "now")
     rows = conn.execute(
-        "SELECT c.comment_id, c.text FROM comments c"
+        f"SELECT c.comment_id, c.text FROM {_VISIBLE_FROM}"
         " LEFT JOIN parses p ON p.comment_id = c.comment_id"
-        " WHERE c.deleted_at IS NULL AND (? = 0 OR p.comment_id IS NULL)"
+        " WHERE c.deleted_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ?)"
+        " AND (? = 0 OR p.comment_id IS NULL)"
         f" ORDER BY {_ORDER}",
-        (int(only_unparsed),),
+        (now, int(only_unparsed)),
     )
     return [(str(row["comment_id"]), str(row["text"])) for row in rows]
 

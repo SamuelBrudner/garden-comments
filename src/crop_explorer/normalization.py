@@ -368,6 +368,11 @@ _REGION_ALIASES: Final[_SynonymTable] = MappingProxyType(
 )
 """Case-insensitive alternative names (full names come from ``regions.REGION_NAMES``)."""
 
+_REGION_BLOCKERS: Final[tuple[str, ...]] = ("Kansas City", "Nevada City")
+"""City names that contain another region's name: they consume their text without yielding a
+value, so "Kansas City, Missouri" is Missouri and "Nevada City, California" is California,
+while a bare "Kansas City" (which spans two states) stays unresolved."""
+
 _REGION_ABBREVIATIONS: Final[_SynonymTable] = MappingProxyType(
     {
         "US-AL": ("Ala.",),
@@ -559,9 +564,9 @@ def _build_region() -> tuple[_Phrase, ...]:
     insensitive = {
         code: (name, *_REGION_ALIASES.get(code, ())) for code, name in REGION_NAMES.items()
     }
-    _check_table("region names and aliases", insensitive, REGION_NAMES)
+    _check_table("region names and aliases", insensitive, REGION_NAMES, _REGION_BLOCKERS)
     return (
-        *_compile_table(insensitive, re.IGNORECASE),
+        *_compile_table(insensitive, re.IGNORECASE, _REGION_BLOCKERS),
         *_compile_table(_REGION_ABBREVIATIONS, 0),
     )
 

@@ -171,7 +171,8 @@ class CommentResult(BaseModel):
     """``None`` when the viewer selected no region."""
     explanation: str
     has_conditions: bool
-    """Whether any relevant mention carries a normalized environment fact."""
+    """Whether an applicable fact of a relevant mention has a normalized value for a comparable
+    key or ``region`` (a growing year alone, or a display-only fact, does not count)."""
 
 
 class SearchQuery(BaseModel):

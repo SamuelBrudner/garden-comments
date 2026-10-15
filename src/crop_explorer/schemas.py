@@ -205,12 +205,17 @@ def to_utc_iso(value: str | datetime | date) -> str:
     """Normalize a date/datetime (or ISO string) to ``YYYY-MM-DDTHH:MM:SSZ`` in UTC.
 
     Naive datetimes and bare dates are interpreted as UTC. All timestamps stored in the
-    database use this format so that lexicographic comparison equals temporal comparison.
+    database use this format so that lexicographic comparison equals temporal comparison;
+    the year is always four digits (``strftime("%Y")`` does not zero-pad years before 1000
+    on every platform, which would break that ordering).
 
     Raises
     ------
     ValueError
         If ``value`` is a string that is not ISO-8601 parseable.
+    OverflowError
+        If converting to UTC leaves the supported date range (e.g. year 1 with a positive
+        offset).
     """
     if isinstance(value, str):
         value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
@@ -218,7 +223,8 @@ def to_utc_iso(value: str | datetime | date) -> str:
         value = datetime(value.year, value.month, value.day)
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    utc = value.astimezone(UTC)
+    return f"{utc.year:04d}-{utc:%m-%dT%H:%M:%S}Z"
 
 
 def utc_now_iso() -> str:

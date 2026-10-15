@@ -44,6 +44,9 @@ source = ["crop_explorer"]
 line-length = 99
 target-version = "py312"
 src = ["src", "tests"]
+# SPEC.md is the externally supplied product spec, kept verbatim: its illustrative code
+# block must not be rewritten by the formatter.
+extend-exclude = ["SPEC.md"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "PTH", "RUF", "D", "PL", "C90", "N"]
