@@ -62,8 +62,11 @@ VIEWER_VALUES: Final = MappingProxyType(
 )
 """Values a viewer may select per comparable key (events like ``heatwave`` excluded)."""
 
-PROMINENT_KEYS: tuple[ComparableKey, ...] = ("zone", "method", "shelter", "summer_heat")
-"""Comparable keys shown in the always-visible condition row (region is shown separately)."""
+PROMINENT_KEYS: tuple[ComparableKey, ...] = ("zone", "method", "shelter")
+"""Comparable keys always visible besides region (SPEC §2 "Which controls are prominent?").
+
+Heat, season length, humidity, soil, sunlight and watering are one tap away.
+"""
 
 KEY_LABELS: Final = MappingProxyType(
     {

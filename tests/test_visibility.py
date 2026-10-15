@@ -23,7 +23,13 @@ from crop_explorer.config import load_config
 from crop_explorer.geography import choropleth, region_counts
 from crop_explorer.schemas import RIGHTS_STATUSES, RightsStatus, to_utc_iso
 from crop_explorer.search import chip_support, filter_options, search
-from crop_explorer.views import CommentResult, GardenContext, SearchQuery, SearchResult
+from crop_explorer.views import (
+    ChipSupport,
+    CommentResult,
+    GardenContext,
+    SearchQuery,
+    SearchResult,
+)
 from crop_explorer.visibility import (
     PUBLIC_RIGHTS,
     require_utc_iso,
@@ -242,7 +248,12 @@ PRIVATE_TOKENS = (
     '"WY"',
     '"NV"',
 )
-DEMO_CHIPS = {"Containers": 8, "Hot & humid": 6, "Short season": 4, "Greenhouse": 5}
+DEMO_CHIPS = {
+    "Containers": ChipSupport(n_any=8, n_all=8),
+    "Hot & humid": ChipSupport(n_any=6, n_all=2),
+    "Short season": ChipSupport(n_any=4, n_all=4),
+    "Greenhouse": ChipSupport(n_any=5, n_all=5),
+}
 
 PRIVATE_COMMENTS = [
     {
@@ -275,11 +286,13 @@ EXPIRED_COMMENTS = [
 
 
 def fact(
-    key: str, written: str, quote: str, applicability: str = "this_mention"
+    key: str, written: str, normalized: str, quote: str, applicability: str = "this_mention"
 ) -> dict[str, Any]:
+    """One fact; the loader never derives a missing ``normalized_value``, so it is given."""
     return {
         "key": key,
         "value_as_written": written,
+        "normalized_value": normalized,
         "evidence_quote": quote,
         "applicability": applicability,
         "basis": "reported_garden_context",
@@ -313,11 +326,11 @@ PRIVATE_EXTRACTIONS = [
             "okra",
             "Zanzibarquux",
             "Zanzibarquux okra loved the grow bags on my porch in Wyoming",
-            fact("region", "Wyoming", "on my porch in Wyoming", "whole_comment"),
-            fact("zone", "Zone 4a", "Zone 4a", "whole_comment"),
-            fact("method", "grow bags", "loved the grow bags"),
-            fact("summer_heat", "cool summers", "cool summers", "whole_comment"),
-            fact("soil", "loam", "loam in every bag"),
+            fact("region", "Wyoming", "US-WY", "on my porch in Wyoming", "whole_comment"),
+            fact("zone", "Zone 4a", "4a", "Zone 4a", "whole_comment"),
+            fact("method", "grow bags", "container", "loved the grow bags"),
+            fact("summer_heat", "cool summers", "cool", "cool summers", "whole_comment"),
+            fact("soil", "loam", "loam", "loam in every bag"),
         ),
     ),
     parsed_line(
@@ -326,12 +339,12 @@ PRIVATE_EXTRACTIONS = [
             "kohlrabi",
             "Quetzalmoon",
             "Quetzalmoon kohlrabi bolted in the greenhouse",
-            fact("shelter", "greenhouse", "bolted in the greenhouse"),
-            fact("region", "Nevada", "here in Nevada"),
-            fact("growing_year", "2019", "during 2019"),
-            fact("season_length", "Short season", "Short season"),
-            fact("irrigation", "hand watered", "hand watered"),
-            fact("sun", "deep shade", "deep shade"),
+            fact("shelter", "greenhouse", "greenhouse", "bolted in the greenhouse"),
+            fact("region", "Nevada", "US-NV", "here in Nevada"),
+            fact("growing_year", "2019", "2019", "during 2019"),
+            fact("season_length", "Short season", "short_season", "Short season"),
+            fact("irrigation", "hand watered", "hand_watered", "hand watered"),
+            fact("sun", "deep shade", "shade", "deep shade"),
         ),
     ),
     parsed_line(
@@ -340,9 +353,9 @@ PRIVATE_EXTRACTIONS = [
             "beans",
             "Blorptastic Wonderbean",
             "Blorptastic Wonderbean beans in containers",
-            fact("region", "Hartford, CT", "Hartford, CT"),
-            fact("method", "containers", "beans in containers"),
-            fact("humidity", "muggy", "muggy as ever"),
+            fact("region", "Hartford, CT", "US-CT", "Hartford, CT"),
+            fact("method", "containers", "container", "beans in containers"),
+            fact("humidity", "muggy", "humid", "muggy as ever"),
         ),
     ),
     parsed_line(
@@ -351,8 +364,8 @@ PRIVATE_EXTRACTIONS = [
             "pumpkins",
             "Glimmerquash",
             "Glimmerquash pumpkins sprawled across raised beds",
-            fact("method", "raised beds", "across raised beds"),
-            fact("region", "British Columbia", "in British Columbia"),
+            fact("method", "raised beds", "raised_bed", "across raised beds"),
+            fact("region", "British Columbia", "CA-BC", "in British Columbia"),
         ),
     ),
     parsed_line("prv-0005"),  # unresolved, no mentions; prv-0006 is never extracted
@@ -364,8 +377,8 @@ EXPIRED_EXTRACTIONS = [
             "tomatoes",
             "Sungold",
             "Gloriousexpiry Sungold tomatoes thrived in pots",
-            fact("method", "pots", "thrived in pots"),
-            fact("region", "Oregon", "in Oregon"),
+            fact("method", "pots", "container", "thrived in pots"),
+            fact("region", "Oregon", "US-OR", "in Oregon"),
         ),
     )
 ]
@@ -528,10 +541,14 @@ def test_public_tiers_ignore_private_condition_matches(isolation: IsolationDbs) 
     private = search(isolation.mixed, "private", query, NOW)
 
     assert public.tier_counts["match"] == 0
-    assert public.limitation_message == "Only 35 of 69 reports mention growing conditions."
+    assert public.limitation_message == (
+        "Only 35 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+    )
     assert [item.comment.comment_id for item in private.groups[0].results] == ["prv-0001"]
     assert private.groups[0].key == "match"
-    assert private.limitation_message == "Only 39 of 75 reports mention growing conditions."
+    assert private.limitation_message == (
+        "Only 39 of 75 reports mention comparable growing conditions (4 not yet analysed)."
+    )
 
 
 def test_public_counts_chips_options_map_and_summary_ignore_private_sources(
@@ -559,10 +576,10 @@ def test_private_scope_sees_private_counts_chips_options_and_map(isolation: Isol
     private = snapshot(isolation.mixed, "private")
 
     assert private["chips"] == {
-        "Containers": 10,
-        "Hot & humid": 7,
-        "Short season": 5,
-        "Greenhouse": 6,
+        "Containers": ChipSupport(n_any=10, n_all=10),
+        "Hot & humid": ChipSupport(n_any=7, n_all=2),  # prv-0003 is muggy but states no heat
+        "Short season": ChipSupport(n_any=5, n_all=5),
+        "Greenhouse": ChipSupport(n_any=6, n_all=6),
     }
     assert private["summary"] == {
         "sources": 2,

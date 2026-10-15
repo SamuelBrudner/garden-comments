@@ -57,6 +57,8 @@ REPORT_KEYS = [
     "schema_errors",
     "unknown_comment_ids",
     "duplicate_comment_ids",
+    "expired_comment_ids",
+    "stale_texts",
     "comments_loaded",
     "status_counts",
     "mentions_accepted",
@@ -625,6 +627,7 @@ def test_a_file_that_is_not_a_database_is_reported_on_one_line(
 RAW_TEXT = "Zone 6b here and my Sungold loved the grow bags."
 GOOD_LINE = {
     "comment_id": "c1",
+    "text_hash": sha256(RAW_TEXT),
     "extractor_version": "test-v1",
     "status": "parsed",
     "mentions": [
@@ -637,6 +640,7 @@ GOOD_LINE = {
                 {
                     "key": "zone",
                     "value_as_written": "Zone 6b",
+                    "normalized_value": "6b",
                     "evidence_quote": "Zone 6b here",
                     "applicability": "whole_comment",
                     "basis": "reported_garden_context",
@@ -658,7 +662,8 @@ GOOD_LINE = {
 def extraction_file(cli_env: CliEnv, tmp_path: Path) -> Path:
     comments = write_jsonl(tmp_path / "export.jsonl", comment_rows(("c1", RAW_TEXT)))
     ok(cli_env.run("ingest", comments, "--scope", "private"))
-    unknown = {**GOOD_LINE, "comment_id": "ghost", "mentions": []}
+    # A well-formed line (any valid text_hash) for an id that was never imported.
+    unknown = {**GOOD_LINE, "comment_id": "ghost", "text_hash": sha256("ghost"), "mentions": []}
     path = tmp_path / "parsed.jsonl"
     path.write_text(
         "\n".join([json.dumps(GOOD_LINE), json.dumps(unknown), "{not json", ""]),
@@ -676,6 +681,8 @@ def test_load_extractions_prints_counts_only(cli_env: CliEnv, extraction_file: P
         "schema_errors": 1,
         "unknown_comment_ids": 1,
         "duplicate_comment_ids": 0,
+        "expired_comment_ids": 0,
+        "stale_texts": 0,
         "comments_loaded": 1,
         "status_counts": {"parsed": 0, "partial": 1, "unresolved": 0},
         "mentions_accepted": 1,

@@ -33,6 +33,8 @@ from crop_explorer.extraction import (
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import (
     ENV_KEYS,
+    MAX_QUOTE_CHARS,
+    MAX_VALUE_CHARS,
     CommentRecord,
     EnvironmentFact,
     EnvKey,
@@ -1411,7 +1413,10 @@ def test_spec5_hypothetical_zone_is_never_a_growing_report(quote: str) -> None:
 # =========================================================================== SPEC §11 #18
 
 
-@given(text=st.text(min_size=1), quote=st.text(min_size=1))
+@given(
+    text=st.text(min_size=1, max_size=MAX_QUOTE_CHARS),
+    quote=st.text(min_size=1, max_size=MAX_VALUE_CHARS),
+)
 def test_spec18_quotes_not_in_the_text_are_always_rejected(text: str, quote: str) -> None:
     assume(quote not in text)
 

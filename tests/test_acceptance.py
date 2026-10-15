@@ -4,7 +4,8 @@ The database comes from ``python -m crop_explorer demo`` (see ``conftest.py``): 
 fixtures are ingested with rights ``synthetic`` and their offline extractions are validated and
 loaded. Comment ids and expectations come from ``fixtures/SCENARIOS.md``. One test per SPEC §11
 item 1-16 and 18; item 17 (phone-width UI, resets, source links) belongs to the Streamlit app
-and is covered in ``tests/test_app.py``.
+and is covered in ``tests/test_app.py`` (AppTest) and ``tests/test_browser.py`` (a real
+Chromium at phone width; marker ``browser``).
 
 Passing these synthetic tests is not evidence of real-world extraction accuracy (SPEC §11).
 """
@@ -46,7 +47,8 @@ EXTRACTIONS = Path(__file__).resolve().parents[1] / "fixtures" / "synthetic_extr
 EXAMPLE_GARDEN = GardenContext(zone="6b", method="container", humidity="humid")
 CONNECTICUT = ("syn-0006", "syn-0013", "syn-0036", "syn-0063")
 REPORT_BASES = {"observed_experience", "reported_garden_context"}
-OUTSIDE_LABELS = {"regional climate reference", "published external trial"}
+# Outside links are references or outside gardeners' ratings, never "reported conditions".
+OUTSIDE_LABELS = {"regional climate reference", "published external trial", "community report"}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -436,6 +438,7 @@ def test_11_15_public_mode_reveals_no_private_records(
                             {
                                 "key": "method",
                                 "value_as_written": "grow bags",
+                                "normalized_value": "container",
                                 "evidence_quote": "tomatoes in grow bags",
                                 "applicability": "this_mention",
                                 "basis": "reported_garden_context",
@@ -443,6 +446,7 @@ def test_11_15_public_mode_reveals_no_private_records(
                             {
                                 "key": "region",
                                 "value_as_written": "Idaho",
+                                "normalized_value": "US-ID",
                                 "evidence_quote": "in Idaho",
                                 "applicability": "this_mention",
                                 "basis": "reported_garden_context",
@@ -457,7 +461,7 @@ def test_11_15_public_mode_reveals_no_private_records(
     assert public_view() == before
     private = run(demo_conn, "private", text="Zyzzyvaroot")
     assert ids(private) == ["p1"]
-    assert chip_support(demo_conn, "private", NOW, CFG.quick_chips)["Containers"] == 9
+    assert chip_support(demo_conn, "private", NOW, CFG.quick_chips)["Containers"].n_any == 9
     assert state_counts(run(demo_conn, "private"))["US-ID"] == 1
 
 
@@ -474,7 +478,9 @@ def test_11_16_sparse_conditions_still_offer_search_and_explain_the_limitation(
     assert thanks.limitation_message is not None
     assert thanks.limitation_message.startswith(f"None of these {thanks.n_candidates} report")
     overall = run(demo_conn, garden=EXAMPLE_GARDEN)
-    assert overall.limitation_message == "Only 35 of 69 reports mention growing conditions."
+    assert overall.limitation_message == (
+        "Only 35 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+    )
 
     # A corpus where *no* comment states a condition (and none was ever extracted).
     db.delete_source(demo_conn, DEMO_SOURCE)
@@ -491,8 +497,8 @@ def test_11_16_sparse_conditions_still_offer_search_and_explain_the_limitation(
     sparse = run(demo_conn, garden=EXAMPLE_GARDEN)
     assert (sparse.n_candidates, sparse.n_with_conditions) == (3, 0)
     assert sparse.limitation_message == (
-        "None of these 3 reports mention growing conditions, so none can be compared with "
-        "your garden. All are shown below."
+        "None of these 3 reports have been analysed for growing conditions yet, so none can "
+        "be compared with your garden. All are shown below."
     )
     assert [(group.key, len(group.results)) for group in sparse.groups] == [("not_stated", 3)]
     assert ids(run(demo_conn, text="tomato", garden=EXAMPLE_GARDEN)) == ["n2", "n3"]
@@ -501,7 +507,7 @@ def test_11_16_sparse_conditions_still_offer_search_and_explain_the_limitation(
 
 # --------------------------------------------------------------------------- §11 #17
 # Mobile layout, clean resets and source links are properties of the Streamlit viewer; they
-# are tested in tests/test_app.py.
+# are tested in tests/test_app.py and, in a real browser at phone width, tests/test_browser.py.
 
 
 # --------------------------------------------------------------------------- §11 #18

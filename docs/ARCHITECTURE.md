@@ -10,16 +10,26 @@ rules so modules can be built and tested independently. Shared types live in:
 | `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
 | `regions.py` | `US_STATES`, `CA_PROVINCES`, `COUNTRIES`, `REGION_NAMES`, `is_us_state`, `us_postal`, `region_name` |
 | `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus`, `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` |
-| `config.py` | `AppConfig` and sub-models, `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`) |
+| `config.py` | `AppConfig` and sub-models, `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
 | `logging_setup.py` | `configure_logging(cfg)` |
 
 ## Engineering rules (all modules)
 
 - Python ≥ 3.12, full type hints, `mypy --strict` clean (`uv run mypy`, files `src` and `app.py`).
 - `uv run ruff check .` and `uv run ruff format --check .` clean (`SPEC.md` is excluded from the
-  formatter because it is kept verbatim). Ruff enforces numpy docstrings on public functions,
-  ≤ 15 statements / ≤ 8 branches / ≤ 6 args per function, complexity ≤ 8. Keep functions small
-  and pure; push I/O to thin edges.
+  formatter because it is kept verbatim). Ruff limits every function to ≤ 15 statements
+  (`PLR0915`), ≤ 8 branches, ≤ 6 arguments and complexity ≤ 8.
+- **Function size: at most 15 code lines.** `tests/test_code_standards.py` parses `src/` and
+  `app.py` and fails for any function (including methods and nested functions) whose body has
+  more than 15 non-blank, non-comment lines, not counting the signature, decorators and
+  docstring. Long SQL and literal tables live in module-level constants.
+- **Docstrings: numpy convention.** Ruff's pydocstyle rules (`D`, `convention = "numpy"`)
+  require a docstring on every public module, class, method and function and check its
+  formatting and section layout. They do **not** require a `Parameters` / `Returns` section to
+  exist or to list every argument (`D417` is off under the numpy convention): public functions
+  with non-obvious inputs document them in numpy sections by convention, and one-line helpers
+  often do not. Tests are exempt from `D`.
+- Keep functions small and pure; push I/O to thin edges.
 - `pathlib.Path` only. No magic numbers: tunables come from `AppConfig`.
 - **Fail loud and fast.** Raise on invalid input (`ValueError` subclasses with clear messages);
   no silent fallbacks. The only "drop and continue" path is extraction validation, which must
@@ -171,8 +181,11 @@ on private data) but excludes soft-deleted comments **and comments of sources wh
 `expires_at <= now`** (permission to process them has ended even before `purge_expired` runs).
 Each item carries the stored `text_hash` (sha256 of the UTF-8 text) so the loader can tell
 which version of the text an extraction was made from. Ordered `(source_id, source_order,
-comment_id)`. `extractable_texts` applies the same filter to a list of ids (ordered by id); the
-extraction loader uses it instead of `stored_texts`, which ignores expiry and soft deletion.
+comment_id)`. `extractable_texts` applies the same filter to a list of ids (ordered by id). The
+extraction loader uses both reads: `stored_texts` (which ignores expiry and soft deletion) only
+to tell an unknown id (`unknown_comment_id`) from a stored comment that may no longer be
+processed (`source_expired`), and `extractable_texts` for the text and hash it validates
+against.
 
 `fts_query(text)`: NFC-normalise, then take words = runs of Unicode word characters (`\w`)
 together with the combining marks inside them (a mark never starts a word; a decomposed
@@ -278,6 +291,7 @@ def resolve_spans(key: EnvKey, text: str) -> tuple[WrittenSpan, ...]
 def normalize_written(key: EnvKey, written: str) -> str | None
 def normalize_crop(crop: str) -> str
 CROP_SYNONYMS: Mapping[str, str]          # casefolded word -> normalized crop ("cukes" -> "cucumber")
+def crops_named(text: str) -> frozenset[str]
 def mentions_crop(text: str, crop: str) -> bool
 def variety_key(variety: str) -> str
 def parse_zone(value: str) -> tuple[int, str | None]      # "6b" -> (6, "b"); "6" -> (6, None)
@@ -302,6 +316,11 @@ own country). A validator can therefore judge a short value at its position insi
 "humid" in "it wasn't humid" lies in a `"negated"` span, "Virginia" in "West Virginia" in a
 `US-WV` span, "Kansas" in "Kansas City" in a `"blocked"` span, "zone 6b" in "zone 6b/7a" in a
 range span.
+
+Cost: resolution is near-linear in the text length. Kept spans are found by bisection over the
+already kept (disjoint) spans, and the negation check looks up precomputed clause-break and word
+positions, so a long repetitive text ("z6 z6 z6 ...", 50,000 characters) resolves in about a
+tenth of a second.
 
 Rules:
 
@@ -399,6 +418,12 @@ split on whitespace, hyphens and punctuation; inner apostrophes kept), after `no
 via `CROP_SYNONYMS`, equals `crop` normalized the same way. Word-bounded ("pepperoni" does not
 name pepper, "Tom" does not name tomato); a synonym adds a name, it never replaces one
 ("chillies" names both `chilli` and `pepper`). A crop with no letters or digits → `ValueError`.
+It is computed as `normalize_crop(crop) in crops_named(text)`.
+
+`crops_named(text)`: every crop the 1–3 word windows of `text` name (each window casefolded,
+after `normalize_crop`, and via `CROP_SYNONYMS`; the set also holds the casefolded windows
+themselves). Compute it once to test many crops against one text: search does this once per
+query instead of rescanning the query text for every mention.
 
 `variety_key`: casefold; typographic apostrophes/hyphens → ASCII; keep hyphens and apostrophes
 only between two word characters; every other quote/punctuation mark becomes a space; collapse
@@ -625,7 +650,11 @@ def filter_options(conn, scope, now) -> FilterOptions   # distinct, sorted, visi
    and "jalapeno" names "Jalapeño"; "Krim" alone does not. **If the text names no mention (or
    there is no text), every mention stays relevant** — a documented rule, not a fallback for
    errors: "hornworms" or "pots" behave as before. So "Roma" makes a greenhouse-pepper /
-   outdoor-tomato comment `different` for a greenhouse garden, and strict mode hides it.
+   outdoor-tomato comment `different` for a greenhouse garden, and strict mode hides it. The
+   text is read once per query (its words joined into one string, and
+   `normalization.crops_named` of them), so each mention costs a substring test and a set
+   lookup; a pasted 100,000-character text stays cheap even before the viewer's
+   `max_query_chars` cap.
    Invalid filters fail loudly (`ValueError`): a year not matching `YEAR_PATTERN`, an unknown
    region code, a blank crop, and duplicate comment ids in the `build_result` input.
 3. For each relevant mention: `facts = applicable_facts(...)`, `match = match_context(...)`.
@@ -783,7 +812,8 @@ demo                                             # ingest fixtures as synthetic 
 
 ## Viewer (`app.py`, thin) + `ui.py` (pure helpers)
 
-`uv run streamlit run app.py [-- --scope private --db PATH --config PATH]`. One Browse screen
+`uv run streamlit run app.py [--server.address localhost] [-- --scope private --db PATH
+--config PATH]`. One Browse screen
 (`layout="centered"`, phone-friendly; Streamlit stacks columns on narrow screens). Every
 function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
 (`tests/test_code_standards.py`).
@@ -809,7 +839,8 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   comments. Do not publish or share." A `private_unverified` row in public scope raises.
 - **My growing conditions** panel (always visible, works with nothing selected), laid out per
   SPEC §2 "Which controls are prominent?": Region (selectbox: "Not set", then U.S. states,
-  Canadian provinces, countries, each by name) and `ui.ALWAYS_VISIBLE_KEYS` = zone (with a
+  Canadian provinces, countries, each by name) and `ui.ALWAYS_VISIBLE_KEYS`
+  (= `vocab.PROMINENT_KEYS`) = zone (with a
   note on what zones do not describe), growing method, setting; the "More conditions"
   expander holds `ui.MORE_KEYS` = summer heat, humidity, rainfall, season length, sun, soil,
   watering. The expander's label names the conditions set inside it
@@ -836,7 +867,8 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   the visible data mid-session are reset (`ui.stale_state_fixes`).
 - "Optional outside context" expander directly before the tabs (SPEC §2 mockup), listing
   config links each tagged with its label badge (`regional climate reference`, `published
-  external trial`, `community report` for outside gardeners' ratings).
+  external trial`, `community report` for outside gardeners' ratings such as Cornell's; never
+  on an official host, see `config.is_official_host`).
 - Tabs: **Comments** | **Map**. The Comments tab starts with the active hard-filter notes, each
   with its reset button: "Showing only reports that say they grew in YEAR." + "Any year"
   (`ui.year_filter_note`), and the reported-state note + "Show all states". Then the

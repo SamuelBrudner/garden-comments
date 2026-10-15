@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import re
 import string
+import time
 
 import pytest
 from hypothesis import given
@@ -14,6 +15,7 @@ from crop_explorer.normalization import (
     CROP_SYNONYMS,
     STRICT_KEYS,
     WrittenSpan,
+    crops_named,
     mentions_crop,
     normalize_crop,
     normalize_written,
@@ -223,6 +225,27 @@ def test_resolve_spans_examples(
     key: EnvKey, text: str, expected: list[tuple[str, str | None, str]]
 ) -> None:
     assert _slices(text, resolve_spans(key, text)) == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "unit"),
+    [
+        ("zone", "z6 "),
+        ("method", "dwc "),
+        ("region", "Ohio "),
+        ("humidity", "not humid "),
+        ("sun", "part shade "),
+        ("growing_year", "2023 "),
+    ],
+)
+def test_span_resolution_stays_fast_on_long_repetitive_text(key: EnvKey, unit: str) -> None:
+    """Thousands of candidate phrases resolve in near-linear time (F38: was quadratic)."""
+    text = unit * (50_000 // len(unit))
+    start = time.perf_counter()
+    spans = resolve_spans(key, text)
+    normalize_written(key, text)
+    assert time.perf_counter() - start < 2.0
+    assert len(spans) > 1_000
 
 
 def test_resolve_spans_offsets_point_into_the_original_text() -> None:
@@ -1385,3 +1408,29 @@ def test_parse_zone_round_trips_every_zone(zone: str) -> None:
     assert 1 <= number <= 13
     assert f"{number}{subzone or ''}" == zone
     assert normalize_written("zone", zone) == zone
+
+
+@pytest.mark.parametrize(
+    ("text", "named", "not_named"),
+    [
+        ("My peppers and the cukes did fine", {"pepper", "cucumber"}, {"tomato"}),
+        ("Pak-choi bolted, chillies thrived", {"pak choi", "pepper", "chilli"}, {"choy"}),
+        ("Great video, thanks!", set(), {"pepper", "tomato"}),
+        ("", set(), {"pepper"}),
+    ],
+)
+def test_crops_named_lists_every_crop_mentions_crop_finds(
+    text: str, named: set[str], not_named: set[str]
+) -> None:
+    crops = crops_named(text)
+    assert named <= crops
+    assert not (not_named & crops)
+    for crop in named | not_named:
+        assert mentions_crop(text, crop) is (crop in crops)
+
+
+def test_crops_named_is_fast_on_a_huge_text() -> None:
+    started = time.perf_counter()
+    crops = crops_named("a " * 50_000 + "tomatoes")
+    assert time.perf_counter() - started < 1.0
+    assert "tomato" in crops

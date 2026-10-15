@@ -32,7 +32,7 @@ from crop_explorer.environment_match import (
     match_context,
     region_status,
 )
-from crop_explorer.normalization import mentions_crop, normalize_crop, variety_key
+from crop_explorer.normalization import crops_named, normalize_crop, variety_key
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import EnvKey, Topic
 from crop_explorer.views import (
@@ -108,6 +108,21 @@ class FilterOptions(BaseModel):
 
 
 @dataclass(frozen=True)
+class _TextNames:
+    """The search text's words, computed once per query so each mention is a cheap lookup."""
+
+    joined: str
+    """The words joined by single spaces, with a space at each end."""
+    crops: frozenset[str]
+    """The normalized crops the words name (:func:`~crop_explorer.normalization.crops_named`)."""
+
+
+def _text_names(text: str) -> _TextNames:
+    words = _words(text)
+    return _TextNames(f" {' '.join(words)} ", crops_named(" ".join(words)))
+
+
+@dataclass(frozen=True)
 class _MentionFilter:
     """The validated mention-level filters of a query (``None``/empty means not set)."""
 
@@ -115,8 +130,8 @@ class _MentionFilter:
     topics: frozenset[Topic]
     year: str | None
     region: str | None
-    text_words: tuple[str, ...]
-    """Words of the search text; they pick the relevant mentions only when nothing else is set."""
+    text: _TextNames
+    """What the search text names; it picks the relevant mentions only when nothing else is set."""
 
     def is_set(self) -> bool:
         return any((self.crop, self.topics, self.year, self.region))
@@ -142,21 +157,18 @@ def _words(text: str) -> tuple[str, ...]:
     return tuple(_SEARCH_WORD.findall(plain))
 
 
-def _contains(words: Sequence[str], phrase: Sequence[str]) -> bool:
-    """Whether the non-empty ``phrase`` occurs in ``words`` as consecutive words."""
-    size = len(phrase)
-    return size > 0 and any(
-        tuple(words[i : i + size]) == tuple(phrase) for i in range(len(words) - size + 1)
-    )
+def _names(text: _TextNames, mention: MentionView) -> bool:
+    """Whether the search text names the mention's whole variety name, or its crop.
 
-
-def _names(words: tuple[str, ...], mention: MentionView) -> bool:
-    """Whether search ``words`` name the mention's whole variety name, or its crop."""
+    Words contain no spaces, so a space-delimited substring test is exactly "occurs as
+    consecutive words".
+    """
     variety = mention.variety_as_written
-    if variety is not None and _contains(words, _words(variety_key(variety))):
+    phrase = () if variety is None else _words(variety_key(variety))
+    if phrase and f" {' '.join(phrase)} " in text.joined:
         return True
-    crop = mention.crop
-    return crop is not None and mentions_crop(" ".join(words), " ".join(_words(crop)))
+    crop = () if mention.crop is None else _words(mention.crop)
+    return bool(crop) and normalize_crop(" ".join(crop)) in text.crops
 
 
 def _mention_filter(query: SearchQuery) -> _MentionFilter:
@@ -173,8 +185,8 @@ def _mention_filter(query: SearchQuery) -> _MentionFilter:
     if query.region_filter is not None and query.region_filter not in REGION_NAMES:
         raise ValueError(f"Unknown region_filter code {query.region_filter!r}")
     crop = None if query.crop is None else normalize_crop(query.crop)
-    words = _words(query.text or "")
-    return _MentionFilter(crop, frozenset(query.topics), query.year, query.region_filter, words)
+    text = _text_names(query.text or "")
+    return _MentionFilter(crop, frozenset(query.topics), query.year, query.region_filter, text)
 
 
 def _relevant(
@@ -188,7 +200,7 @@ def _relevant(
     )
     if mention_filter.is_set():
         return kept or None
-    named = tuple(match for match in kept if _names(mention_filter.text_words, match.mention))
+    named = tuple(match for match in kept if _names(mention_filter.text, match.mention))
     return named or kept
 
 

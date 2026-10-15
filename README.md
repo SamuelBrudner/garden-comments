@@ -41,15 +41,36 @@ The demo loads 69 fictional comments (`fixtures/synthetic_comments.jsonl`) and t
 extractions, imported with rights status `synthetic`; the viewer labels them as demo data. See
 [`fixtures/SCENARIOS.md`](fixtures/SCENARIOS.md) for what each one exercises.
 
-To browse your own private imports locally (never for publication):
+To browse your own private imports on this computer only (never for publication):
 
 ```bash
-uv run streamlit run app.py -- --scope private
+uv run streamlit run app.py --server.address localhost -- --scope private
 ```
 
-Viewer options go after `--`: `--scope {public,private}`, `--db PATH` and `--config PATH`. If the
-database does not exist yet, the app tells you to run the `demo` command instead of creating an
-empty one.
+The viewer has no accounts, so a private view refuses to run (an error, no comments) unless
+the server listens on this computer alone. The shipped `.streamlit/config.toml` already binds
+`localhost`; `--server.address localhost` makes the command safe even with another Streamlit
+configuration. Only a **public**-scope demo may ever be served on a network address.
+
+Viewer options go after `--`: `--scope {public,private}`, `--db PATH` and `--config PATH`. An
+unknown or mistyped option (for example `--database`) stops the viewer with an error instead of
+silently opening the default database. If the database does not exist yet, or was created by an
+older version (see "Upgrading" below), the app says so and shows the `demo` command instead of
+creating an empty one.
+
+What the Browse screen offers: Region, Hardiness zone, Growing method and Setting are always
+visible; summer heat, humidity, rainfall, season length, sun, soil and watering sit under
+"More conditions" (its label lists any that are set). Quick chips ("Containers", "Hot &
+humid", ...) appear only when enough reports support them, and their tooltip says how many
+state any and how many state all of the chip's conditions. Under the search box, **Crop |
+Topics | Year grown** are hard filters ("Showing only reports that say they grew in 2023", with
+an "Any year" reset). Each card carries a `community report` badge and its condition lines a
+`reported conditions` badge; a comment that has not been extracted yet reads "Not yet analysed
+for growing conditions", and a condition stated in words the app cannot compare reads
+"Mentioned as written, not comparable: soil "rocky hillside dirt"". Each result group shows
+`viewer.page_size` cards at a time with a "Show N more" button. "Optional outside context"
+(official references, published trials and outside gardeners' ratings, each badged) sits just
+above the Comments and Map tabs.
 
 ## Working with real comments (CLI round trip)
 
@@ -61,32 +82,71 @@ the app.
 
 ```bash
 # 1. Import a CSV or JSONL export as one private source (idempotent; re-run after updates).
-#    Columns default to comment_id, text, permalink, created_at; map others with
-#    --id-col, --text-col, --permalink-col and --date-col. --expires-at sets a rights expiry.
+#    The source id defaults to the file stem, so give each export its own --source-id.
+#    Columns default to comment_id and text, plus permalink and created_at when present.
+#    Map others with --id-col and --text-col; --permalink-col / --date-col name an optional
+#    column that must then exist (a typo is an error, never a silent "no links / no dates").
+#    --expires-at sets a rights expiry (see "Rights and the publication gate").
 uv run python -m crop_explorer ingest data/comments.csv --scope private --source-id my-export
 
-# 2. Export what still needs extraction: owner-only (0600) JSONL of {"comment_id", "text"}.
+# 2. Export what still needs extraction: an owner-only (0600) JSONL file of
+#    {"comment_id", "text", "text_hash"} lines. text_hash is the SHA-256 of the exact text.
 uv run python -m crop_explorer export-for-extraction --out data/to_extract.jsonl --only-unparsed
 
 # 3. Model step (offline): follow Part 2 of docs/EXTRACTION_PROMPT.md over
 #    data/to_extract.jsonl and write data/parsed_comments.jsonl (one ParsedComment per line).
+#    The model must copy each line's comment_id AND text_hash unchanged into its output.
 
 # 4. Validate against the stored text and load. Prints counts only; every rejection is
 #    written as {comment_id, line_number, mention_index, fact_index, reason}.
 uv run python -m crop_explorer load-extractions data/parsed_comments.jsonl \
     --rejections-out data/rejections.jsonl
 
-# 5. Browse privately.
-uv run streamlit run app.py -- --scope private
+# 5. Browse privately, on this computer only.
+uv run streamlit run app.py --server.address localhost -- --scope private
 ```
 
-The loader keeps nothing it cannot verify: every evidence quote must be an exact substring of
-the stored comment, region/zone/year values must equal the loader's own normalisation of the
-quoted words, a value may not contradict the quoted words ("pots" is never `raised_bed`), and
-facts from sentences containing advice or hypothetical markers ("I'd try these in zone 5") are
-rejected. A rejected fact never removes the comment from full-text search. Re-loading the same
-file is idempotent; re-importing a comment with changed text drops its old extraction, so run
-step 2 with `--only-unparsed` again.
+`ingest` options for re-imports:
+
+- Re-running `ingest` for the same source refreshes it: changed comments are updated, missing
+  ones deleted. A re-import **without** `--expires-at` keeps the stored expiry (leaving the flag
+  out never lifts it); `--clear-expiry` removes it, and it cannot be combined with
+  `--expires-at`. A source whose expiry has passed cannot be re-imported until it is removed
+  with `purge-expired` or `delete-source`.
+- `--replace` is required to load a **different** export under an existing source id (an
+  import sharing no comment id with what is stored, for example a second file that is also
+  called `comments.csv`) or to change a stored source's `--scope`. Without it the command
+  exits 2 and changes nothing.
+- The JSON printed by `ingest` reports the counts and the source's effective `rights_status`
+  and `expires_at`.
+
+What the loader keeps (anything it cannot verify is rejected and listed with a reason code):
+
+- Each line's `text_hash` must equal the stored text's hash. An extraction made from an older
+  version of a comment is rejected as `stale_text` and writes nothing; re-run step 2 with
+  `--only-unparsed` to export the new text. Lines for unknown ids, ids repeated in the file and
+  comments whose source has expired are rejected too (`unknown_comment_id`,
+  `duplicate_comment_id`, `source_expired`).
+- Every evidence quote must be an exact substring of the stored comment, and variety names and
+  values must occur in their quote as whole words ("Roma" is not in "aroma", "Maine" is not in
+  "remained"). A crop-only mention must name its crop in its quote (`crop_not_in_quote`).
+- A value is judged **where it occurs in its quote**: a negated phrase ("it wasn't humid") is
+  `negated_value`; a look-alike ("clay pots", "Kansas City", "Perth, WA", "Lake Michigan",
+  "Sunset zone 9") is `blocked_value`; a different value, a longer place or a range there
+  ("Virginia" in "West Virginia", "zone 6b" in "zone 6b/7a") is `normalized_value_mismatch`.
+  Region, zone and year values must be readable by the loader where they are quoted
+  (`strict_key_mismatch`). A place named inside a variety name ("Arkansas Traveler") is
+  `value_in_variety_name`.
+- A `normalized_value` of `null` is never filled in: such a fact is shown as written but never
+  used for matching.
+- Facts quoted from advice, plans, wishes or questions ("I'd try these in zone 5", "Wish I had
+  a greenhouse", "Does it do well in zone 6b?") are rejected (`hypothetical_context`,
+  `question_context`), as are whole-comment regions or zones that disagree across mentions
+  (`conflicting_region`, `conflicting_zone`).
+
+A rejected fact never removes the comment from full-text search. Re-loading the same file is
+idempotent; re-importing a comment with changed text drops its old extraction. The full rule
+list is in `docs/EXTRACTION_PROMPT.md` and `docs/ARCHITECTURE.md`.
 
 Other commands:
 
@@ -99,8 +159,19 @@ uv run python -m crop_explorer --help
 
 Every command prints one line of JSON with ids and counts and exits 0; invalid input prints one
 `error: ...` line to stderr and exits 2. Comment text is never printed or logged; only
-`export-for-extraction` writes it, to an owner-only file. `--db PATH` and `--config PATH` work
-with every command.
+`export-for-extraction` writes it, to an owner-only file. `--out` and `--rejections-out` are
+checked before anything is read or loaded: they refuse a directory, a symlink, the database
+(and its `-wal`/`-journal`/`-shm` files) and, for `--rejections-out`, the input file.
+`--db PATH` and `--config PATH` work with every command.
+
+The database holds comment text verbatim: a new database file is created owner-only (0600), in
+a directory created owner-only (0700) when missing. Deleting or purging a source also removes
+its words from the full-text index and zeroes the freed pages.
+
+**Upgrading.** Databases record a schema version. A database created by an earlier version of
+this code (or by another program) is refused with "unsupported database schema"; rebuild into
+a new file (`demo`, or `ingest` + `load-extractions` again with `--db new.sqlite`). Crop names
+are normalised at load time, so re-loading extractions also refreshes them.
 
 ## Rights and the publication gate
 
@@ -115,13 +186,15 @@ The first deliverable is a **private local prototype**, not a public copy of any
 
 - `private_unverified` content never reaches a public result, count, quick chip, filter option,
   map cell, snippet or cache. Every viewer-facing database read applies one shared rights and
-  expiry clause (`crop_explorer.visibility`), and the viewer never caches query results.
+  expiry clause (`crop_explorer.visibility`), and the viewer never caches query results. The
+  private view itself only runs on a loopback address (see Quickstart).
 - The public-safe mode is the synthetic demo. Use `--scope cleared` only after the specific
   distribution and storage workflow for those comments has been cleared. A creator's approval
   does not by itself grant permission to republish other people's comments, and it does not
-  override platform terms.
+  override platform terms. Synthetic rows never get a source link, even if they carry one.
 - Sources can carry an expiry (`--expires-at`): expired sources disappear from every view
-  immediately, are skipped by `export-for-extraction`, and are removed by `purge-expired`.
+  immediately, are skipped by `export-for-extraction`, have their extraction lines rejected,
+  and are removed by `purge-expired`. A later `ingest` without `--expires-at` keeps the expiry.
   `delete-source` cascades through comments, extractions, search index, counts and map.
 - Before any public use of YouTube-derived content, review:
   [YouTube Developer Policies](https://developers.google.com/youtube/terms/developer-policies),
@@ -140,17 +213,21 @@ config file):
 |---|---|
 | `database.path` | SQLite file (default `data/crop_explorer.sqlite`; `--db` overrides it). |
 | `viewer.scope` | Default viewer scope, `public` (fail-safe) or `private`. |
-| `viewer.min_reports_for_chip` | A quick chip ("Containers", "Hot & humid", ...) appears only when at least this many visible reports support it. |
-| `map.public_min_cell_count` | In public scope, states with fewer reports are shown as "fewer than k". Raise it (e.g. to 5) before publishing real cleared comments. |
-| `extraction.hypothetical_markers` | Words that make a sentence advice or a plan; facts quoted from such sentences are rejected. |
+| `viewer.min_reports_for_chip` | A quick chip ("Containers", "Hot & humid", ...) appears only when at least this many visible reports state at least one of its conditions. |
+| `viewer.max_query_chars` | Longest search text accepted (the search box is capped; it bounds full-text search cost). |
+| `viewer.page_size` | Cards shown per result group before "Show N more". |
+| `map.public_min_cell_count` | In public scope, map cells with fewer reports are drawn as "fewer than k". This **only coarsens the map display**: cards still show each comment's text and region, and filtering by that state still lists the reports, so it is not a privacy control. Only publish comments whose source is cleared. |
+| `extraction.hypothetical_markers` | Words that make a sentence advice, a plan or a wish; facts quoted from such sentences (and from questions) are rejected. |
 | `quick_chips` | Label plus the garden conditions each chip sets. |
-| `outside_context` | Opt-in outbound links (USDA zone map, NOAA normals, variety trials), each labelled `regional climate reference` or `published external trial`. |
+| `outside_context` | Opt-in outbound links, each badged with its evidence type: `regional climate reference` (USDA zone map, NOAA normals, NASA climatology), `published external trial` (university variety trials) or `community report` (outside gardeners' own ratings, e.g. Cornell's Vegetable Varieties for Gardeners; never this channel's comments). `reported conditions` is not allowed here, and a government host (`*.gov`, `*.mil`, `*.gov.au`, `*.gc.ca`, ...) can never be labelled `community report`. |
 | `logging.level`, `logging.json_path` | Loguru level and optional JSON-lines log file (never receives comment text). |
 
 ## Testing and quality
 
 ```bash
-uv run pytest                                              # whole suite (unit, property, CLI, AppTest end-to-end)
+uv run playwright install chromium                         # once: the browser for tests/test_browser.py
+uv run pytest                                              # whole suite (unit, property, CLI, AppTest, browser)
+uv run pytest -m "not browser"                             # everything except the real-browser test
 uv run pytest --cov=crop_explorer --cov-report=term-missing
 uv run ruff check .
 uv run ruff format --check .
@@ -160,10 +237,19 @@ uv run pre-commit run --all-files                          # ruff, format and my
 
 Tests were written first and use synthetic comments only. They include Hypothesis property
 tests for the pure logic (normalisation, matching, grouping, visibility, escaping), every SPEC
-§11 acceptance case (`tests/test_acceptance.py`; #17, phone-width inputs and resets, in
-`tests/test_app.py`), rights-isolation checks across search, chips, filters, counts and the map,
-and Streamlit `AppTest` runs of the viewer. CI
-(`.github/workflows/ci.yml`) runs the pre-commit hooks and the tests with coverage.
+§11 acceptance case (`tests/test_acceptance.py`, including end-to-end validator cases pushed
+through `load-extractions`), rights-isolation checks across search, chips, filters, counts and
+the map, and Streamlit `AppTest` runs of the viewer. SPEC §11 #17 (phone width, resets, source
+references) is covered by `tests/test_app.py` (Clear, the "Source ↗" link of a cleared comment,
+the synthetic and no-link notes) and by `tests/test_browser.py`: it starts `streamlit run`
+headless on a free loopback port and drives Chromium at 390x844 (no sideways scrolling, search
+box and the always-visible selects on screen, a zone choice regroups the reports, Clear restores
+the first-load labels, the source link's address), then a desktop smoke test. That test is
+marked `browser`, takes about 15 seconds and needs Playwright's Chromium (`uv run playwright
+install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
+`tests/test_code_standards.py` fails for any function in `src/` or `app.py` with more than 15
+code lines. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
+runs the tests with coverage.
 
 ## Project layout
 
@@ -183,7 +269,7 @@ and Streamlit `AppTest` runs of the viewer. CI
 │   ├── schemas.py                # extraction contract, raw records, canonical UTC time
 │   ├── vocab.py, regions.py      # controlled vocabulary and region codes
 │   ├── views.py                  # read-side types (garden, views, match and search results)
-│   ├── config.py, logging_setup.py
+│   ├── config.py, logging_setup.py # validated config.yaml (labels, limits); loguru sinks
 │   ├── ingest.py                 # CSV/JSONL import
 │   ├── extraction.py             # extractor-output validator and loader
 │   ├── normalization.py          # small deterministic synonym tables
@@ -193,7 +279,8 @@ and Streamlit `AppTest` runs of the viewer. CI
 │   ├── db.py                     # SQLite + FTS5 persistence and scope-gated reads
 │   ├── visibility.py             # rights/expiry gate shared by every viewer read
 │   └── ui.py                     # pure viewer helpers (escaping, card text, state)
-└── tests/                        # unit tests per module, plus acceptance, CLI and viewer tests
+└── tests/                        # unit tests per module, plus acceptance, CLI, viewer (AppTest),
+                                  # browser (Playwright) and code-standards tests
 ```
 
 ## Limitations
@@ -206,16 +293,22 @@ and Streamlit `AppTest` runs of the viewer. CI
 - Extraction quality depends on the model you run offline and on following
   `docs/EXTRACTION_PROMPT.md`. Review `rejections.jsonl` and the extractor's warnings.
 - Normalisation is deliberately conservative: negated, ambiguous or combined phrases ("not
-  humid", "sandy loam", "zones 6-7", "Kansas City") stay display-only and are never used for
-  matching. The hypothetical guard works sentence by sentence, so advice phrased without a
-  configured marker is not caught.
+  humid", "sandy loam", "zones 6-7", "Kansas City", "Perth, WA") stay display-only and are
+  never used for matching. A non-North-American "City, XX" address whose code is also a U.S.
+  or Canadian postal code ("Perth, WA", "Catania, CT") is never mapped; the country is recorded
+  only when the comment names it ("Perth, WA, Australia"). The hypothetical guard works
+  sentence by sentence, so advice phrased without a configured marker is not caught, and the
+  position checks read the evidence quote only: a quote cut just after a negation ("humid"
+  taken from "it wasn't humid") is not caught, which is why the prompt asks for full phrases.
 - Regions are coarse (U.S. states, Canadian provinces, countries); the map shows U.S. states
-  only. Small-cell suppression is per cell; with a threshold above 1, a suppressed count can
-  sometimes be derived by subtraction from the "not reported" totals, so add complementary
-  suppression before publishing real data with small cells.
+  only. Small-cell suppression only coarsens the map display (see Configuration); it is per
+  cell, so with a threshold above 1 a suppressed count can also be derived by subtraction from
+  the "not reported" totals. Plotly loads the state outlines from `cdn.plot.ly`, so an offline
+  browser shows the counts and the state selector but an empty map.
 - Built for small datasets: each viewer rerun loads all visible comments into Python (fine for
-  thousands of comments, not millions). CSV cells over 131,072 characters are rejected.
-- The viewer is a local, single-user tool with no accounts. Never expose a private-scope
-  viewer on a network. Text copied from cards contains invisible U+2060 characters (part of
-  rendering untrusted text literally).
+  thousands of comments, not millions); result groups are paged. CSV cells over 131,072
+  characters are rejected.
+- The viewer is a local, single-user tool with no accounts. A private-scope viewer refuses to
+  run on a non-loopback address; never work around that. Text copied from cards contains
+  invisible U+2060 characters (part of rendering untrusted text literally).
 - `demo` reads the fixtures from the source tree, so it needs a checkout or an editable install.

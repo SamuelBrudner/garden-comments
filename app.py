@@ -1,8 +1,8 @@
 """Browse screen of "What Gardeners Are Saying" (SPEC §2), a thin Streamlit layer.
 
-Run with ``uv run streamlit run app.py [-- --scope private --db PATH --config PATH]``. A private
-view only runs while the server listens on this computer alone (``--server.address localhost``,
-the shipped ``.streamlit/config.toml`` default).
+Run with ``uv run streamlit run app.py [--server.address localhost] [-- --scope private --db PATH
+--config PATH]``. A private view only runs while the server listens on this computer alone
+(``--server.address localhost``, the shipped ``.streamlit/config.toml`` default).
 
 All behaviour lives in the library (:mod:`crop_explorer.search`, :mod:`crop_explorer.geography`,
 :mod:`crop_explorer.db`) and in the pure helpers of :mod:`crop_explorer.ui`; this file only lays

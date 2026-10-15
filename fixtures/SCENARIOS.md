@@ -127,14 +127,17 @@ loader never fills in a `null`.
 - **Sparsity:** 31 of 69 comments (45%) have no environment fact at all, including the 3 that
   were never extracted. 35 of 69 have a normalized comparable or region fact. Facts that are
   only a growing year (syn-0035, syn-0065) or an un-normalized value (syn-0034) do not count as
-  conditions. So a typical search produces the “Only N of M reports mention growing
-  conditions.” message.
+  conditions. So a typical search produces the “Only N of M reports mention comparable growing
+  conditions (3 not yet analysed).” message.
 - **Totals after loading:** 69 comments, 66 parsed comments, 71 mentions, 82 facts.
-- **Quick chips** (`config.yaml`, shown at ≥ 3 supporting reports):
+- **Quick chips** (`config.yaml`, shown at ≥ 3 reports stating any of the chip's conditions;
+  `search.chip_support` gives `ChipSupport(n_any, n_all)`):
   Containers 8 (syn-0001, 0003, 0005, 0006, 0011, 0013, 0053, 0057).
   Greenhouse 5 (syn-0007, 0023, 0024, 0045, 0046).
   Short season 4 (syn-0021, 0023, 0038, 0040).
-  Hot & humid 6 (syn-0001, 0003, 0006, 0041, 0043, 0052).
+  Hot & humid: 6 state hot summers or humid (syn-0001, 0003, 0006, 0041, 0043, 0052); only 2
+  state both for one mention (syn-0001, 0041), so its tooltip reads “6 reports mention hot
+  summers or humid; 2 mention both”.
 - **Regions:** 18 U.S. states (AZ, CO, CT, GA, ME, MI, MN, MT, NC, NJ, NY, OH, OK, OR, PA, TX,
   VT, WI). Connecticut appears in 4 comments (syn-0006, 0013, 0036, 0063). Alberta (`CA-AB`)
   once, Ontario (`CA-ON`) once, United Kingdom (`GB`) once. Every other comment is

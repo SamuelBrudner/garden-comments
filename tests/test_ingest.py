@@ -947,6 +947,8 @@ def test_build_source_requires_a_readable_file(tmp_path: Path) -> None:
 EXTRACTION_CFG = load_config().extraction
 TABLES = ("sources", "comments", "parses", "mentions", "environment_facts")
 TEXT2_CHANGED = "Cherokee Purple cracked after the downpour."
+
+
 def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1109,7 +1111,7 @@ def test_changed_comment_text_drops_only_that_comments_extraction(
     assert text_hits(extracted_db, "downpour") == ["c2"]
     assert text_hits(extracted_db, "split") == []
     assert db.iter_comments_for_extraction(extracted_db, only_unparsed=True, now=IMPORTED) == [
-        ("c2", TEXT2_CHANGED, hashlib.sha256(TEXT2_CHANGED.encode("utf-8")).hexdigest())
+        ("c2", TEXT2_CHANGED, sha256_hex(TEXT2_CHANGED))
     ]
 
 

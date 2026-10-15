@@ -14,6 +14,7 @@ fill an in-memory SQLite database through ``db.sync_source_comments`` and
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -536,6 +537,16 @@ class TestTextNamesTheRelevantMentions:
         mixed_card = card(result, "mixed")
         assert mixed_card.region_status == "elsewhere"
         assert [mm.mention.crop for mm in mixed_card.mention_matches] == ["pepper"]
+
+    def test_a_huge_pasted_text_names_mentions_in_linear_time(self) -> None:
+        """F37: the text is read once per query, not once per mention."""
+        views = [self.SPLIT, three_varieties(), two_crops()]
+        started = time.perf_counter()
+        for text in ("a " * 50_000, " ".join(f"x{i}" for i in range(20_000)) + " Roma"):
+            build_result(views, ask(text=text, shelter="greenhouse"))
+        assert time.perf_counter() - started < 2.0
+        result = build_result([self.SPLIT], ask(text="x " * 20_000 + "Roma", shelter="greenhouse"))
+        assert self.varieties(result) == ["Roma"]
 
     @settings(deadline=None)
     @given(view=comment_views("c0"), text=st.sampled_from(SEARCH_TEXTS))

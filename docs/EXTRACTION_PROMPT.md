@@ -35,8 +35,8 @@ uv run python -m crop_explorer export-for-extraction --out data/to_extract.jsonl
 uv run python -m crop_explorer load-extractions data/parsed_comments.jsonl \
     --rejections-out data/rejections.jsonl
 
-# 5. Browse locally
-uv run streamlit run app.py -- --scope private
+# 5. Browse locally (the private view only runs while the server listens on this computer)
+uv run streamlit run app.py --server.address localhost -- --scope private
 ```
 
 - **Private data stays private.** `data/` is git-ignored. The export holds comment text and

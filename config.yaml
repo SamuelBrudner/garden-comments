@@ -11,12 +11,14 @@ viewer:
   min_reports_for_chip: 3
   # The search box accepts at most this many characters (bounds full-text search cost).
   max_query_chars: 200
-  # Result cards shown per page.
+  # Cards shown per result group; "Show N more" adds another page of this size.
   page_size: 20
 
 map:
-  # Public-scope region cells with fewer distinct comments than this are suppressed.
-  # Raise (e.g. to 5) before publishing any real, cleared comments.
+  # Public-scope map cells with fewer distinct comments than this are hidden from the map.
+  # This only coarsens the map display: cards still show each comment's text and region,
+  # and the state filter still lists the reports, so it is not a privacy control. Only
+  # publish comments whose source is cleared.
   public_min_cell_count: 1
 
 extraction:

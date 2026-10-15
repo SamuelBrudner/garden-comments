@@ -21,6 +21,7 @@ text, so a caller can check what a phrase means at its own position inside a lon
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -926,17 +927,53 @@ def _priority(span: _Span) -> tuple[int, int, str]:
 
 
 def _longest_first(spans: Iterable[_Span]) -> list[_Span]:
-    """Greedily keep the longest spans that do not overlap an already kept span."""
+    """Greedily keep the longest spans that do not overlap an already kept span.
+
+    Kept spans are disjoint, so each candidate is checked only against its neighbours in
+    start order (found by bisection): O(k log k) rather than O(k^2) for k candidates. The
+    result is in text order.
+    """
+    starts: list[int] = []
     kept: list[_Span] = []
     for span in sorted(spans, key=_priority):
-        if all(span.end <= other.start or other.end <= span.start for other in kept):
-            kept.append(span)
+        index = bisect_right(starts, span.start)
+        before_ok = index == 0 or kept[index - 1].end <= span.start
+        if before_ok and (index == len(kept) or span.end <= kept[index].start):
+            starts.insert(index, span.start)
+            kept.insert(index, span)
     return kept
 
 
-def _is_negated(text: str, span: _Span) -> bool:
-    clause = _CLAUSE_BREAK.split(text[: span.start])[-1]
-    preceding = _WORD.findall(clause.casefold())[-_NEGATION_WINDOW:]
+@dataclass(frozen=True, slots=True)
+class _Clauses:
+    """Clause breaks and word positions of a text, computed once per text."""
+
+    text: str
+    breaks: tuple[int, ...]
+    word_starts: tuple[int, ...]
+    word_ends: tuple[int, ...]
+
+
+def _clauses(text: str) -> _Clauses:
+    words = list(_WORD.finditer(text))
+    breaks = tuple(match.start() for match in _CLAUSE_BREAK.finditer(text))
+    return _Clauses(text, breaks, tuple(w.start() for w in words), tuple(w.end() for w in words))
+
+
+def _is_negated(clauses: _Clauses, span: _Span) -> bool:
+    """Whether one of the last few words before ``span`` in its clause is a negation cue.
+
+    Uses bisection over the precomputed positions, so checking every span of a long text
+    stays O(k log n) instead of rescanning the text before each span.
+    """
+    n_breaks = bisect_left(clauses.breaks, span.start)
+    clause_start = clauses.breaks[n_breaks - 1] + 1 if n_breaks else 0
+    last = bisect_left(clauses.word_starts, span.start)
+    first = max(bisect_left(clauses.word_starts, clause_start), last - _NEGATION_WINDOW)
+    preceding = {
+        clauses.text[clauses.word_starts[i] : min(clauses.word_ends[i], span.start)].casefold()
+        for i in range(first, last)
+    }
     return not _NEGATION_CUES.isdisjoint(preceding)
 
 
@@ -982,12 +1019,14 @@ class WrittenSpan:
     kind: SpanKind
 
 
-def _written_span(key: EnvKey, canonical: _Canonical, span: _Span) -> WrittenSpan:
+def _written_span(
+    key: EnvKey, canonical: _Canonical, clauses: _Clauses, span: _Span
+) -> WrittenSpan:
     start, end = canonical.original(span)
     if span.value is None:
         return WrittenSpan(start, end, None, "blocked")
     value = span.value if is_valid_normalized(key, span.value) else None
-    kind: SpanKind = "negated" if _is_negated(canonical.text, span) else "value"
+    kind: SpanKind = "negated" if _is_negated(clauses, span) else "value"
     return WrittenSpan(start, end, value, kind)
 
 
@@ -1021,8 +1060,9 @@ def resolve_spans(key: EnvKey, text: str) -> tuple[WrittenSpan, ...]:
     if finder is None:
         raise ValueError(f"Unknown environment key: {key!r}")
     canonical = _canonicalize(text)
-    kept = sorted(_longest_first(finder(canonical.text)), key=lambda span: span.start)
-    return tuple(_written_span(key, canonical, span) for span in kept)
+    clauses = _clauses(canonical.text)
+    kept = _longest_first(finder(canonical.text))
+    return tuple(_written_span(key, canonical, clauses, span) for span in kept)
 
 
 def normalize_written(key: EnvKey, written: str) -> str | None:
@@ -1194,9 +1234,36 @@ def _crop_words(text: str) -> list[str]:
     return _CROP_WORD.findall(text.translate(_TYPOGRAPHIC))
 
 
-def _names_crop(window: str, crop: str) -> bool:
+def _crops_of(window: str) -> set[str]:
     forms = {window.casefold(), normalize_crop(window)}
-    return crop in forms or any(CROP_SYNONYMS.get(form) == crop for form in forms)
+    return forms | {CROP_SYNONYMS[form] for form in forms if form in CROP_SYNONYMS}
+
+
+def crops_named(text: str) -> frozenset[str]:
+    """Return every normalized crop that ``text`` names as whole words.
+
+    A crop is named when a window of 1-3 consecutive words of ``text`` (words split on
+    whitespace, hyphens and punctuation), casefolded, after :func:`normalize_crop` or via
+    :data:`CROP_SYNONYMS`, equals it. Compute this once per text and test membership to check
+    many crops against one text (``mentions_crop`` for each would rescan the text).
+
+    Parameters
+    ----------
+    text
+        Text to search, e.g. a search box query or an evidence quote.
+
+    Returns
+    -------
+    frozenset of str
+        The crops named (it also holds the casefolded windows themselves).
+    """
+    words = _crop_words(text)
+    windows = {
+        " ".join(words[i : i + n])
+        for n in range(1, _MAX_CROP_WORDS + 1)
+        for i in range(len(words) - n + 1)
+    }
+    return frozenset(crop for window in windows for crop in _crops_of(window))
 
 
 def mentions_crop(text: str, crop: str) -> bool:
@@ -1224,13 +1291,7 @@ def mentions_crop(text: str, crop: str) -> bool:
     ValueError
         If ``crop`` has no letters or digits.
     """
-    target = normalize_crop(" ".join(_crop_words(crop)))
-    words = _crop_words(text)
-    return any(
-        _names_crop(" ".join(words[i : i + n]), target)
-        for n in range(1, _MAX_CROP_WORDS + 1)
-        for i in range(len(words) - n + 1)
-    )
+    return normalize_crop(" ".join(_crop_words(crop))) in crops_named(text)
 
 
 _NON_NAME_CHARACTERS: Final = re.compile(r"[^\w\s'-]|_")

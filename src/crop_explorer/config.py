@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Self
+from typing import Final, Literal, Self
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -86,14 +87,54 @@ class QuickChip(BaseModel):
         return GardenContext.model_validate(self.conditions)
 
 
+_OFFICIAL_TOP_LEVEL: Final = frozenset({"gov", "mil"})
+"""Top-level domains of official (government) hosts: ``planthardiness.ars.usda.gov``."""
+_OFFICIAL_SECOND_LEVEL: Final = frozenset({"gov", "gc", "gouv", "gob", "govt", "go"})
+"""Second-level labels of official hosts elsewhere: ``bom.gov.au``, ``agr.gc.ca``."""
+
+
+def is_official_host(url: str) -> bool:
+    """Return whether ``url`` points at a government host (``.gov``, ``.mil``, ``.gov.au`` ...).
+
+    Parameters
+    ----------
+    url
+        An absolute URL.
+
+    Returns
+    -------
+    bool
+        True when the host's top-level label is ``gov``/``mil`` or its second-to-last label is
+        a government label such as ``gov``, ``gc`` or ``gouv``.
+    """
+    labels = (urlsplit(url).hostname or "").split(".")
+    return labels[-1] in _OFFICIAL_TOP_LEVEL or (
+        len(labels) > 2 and labels[-2] in _OFFICIAL_SECOND_LEVEL
+    )
+
+
 class OutsideLink(BaseModel):
-    """An opt-in outbound context resource, labelled by evidence type (:data:`OutsideLabel`)."""
+    """An opt-in outbound context resource, labelled by evidence type (:data:`OutsideLabel`).
+
+    An official (government) resource is a reference or a trial, never gardener testimony, so
+    a ``"community report"`` label on a government host is rejected at load time.
+    """
 
     model_config = _STRICT
     title: str = Field(min_length=1)
     url: str = Field(pattern=r"^https://")
     label: OutsideLabel
     note: str
+
+    @model_validator(mode="after")
+    def _official_is_not_community(self) -> Self:
+        if self.label == "community report" and is_official_host(self.url):
+            raise ValueError(
+                f"Outside link {self.title!r} is an official resource; label it "
+                "'regional climate reference' or 'published external trial', "
+                "not 'community report'"
+            )
+        return self
 
 
 class LoggingConfig(BaseModel):

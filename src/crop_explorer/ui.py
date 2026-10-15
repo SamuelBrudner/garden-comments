@@ -52,6 +52,7 @@ from crop_explorer.views import (
 from crop_explorer.vocab import (
     COMPARABLE_KEYS,
     KEY_LABELS,
+    PROMINENT_KEYS,
     VIEWER_VALUES,
     ComparableKey,
     value_label,
@@ -226,7 +227,7 @@ PAGE_QUERY_KEY: Final = "page_query"
 """Session key holding the query the per-group page counts belong to."""
 _GROUP_KEYS: Final[tuple[GroupKey, ...]] = get_args(GroupKey)
 
-ALWAYS_VISIBLE_KEYS: Final[tuple[ComparableKey, ...]] = ("zone", "method", "shelter")
+ALWAYS_VISIBLE_KEYS: Final[tuple[ComparableKey, ...]] = PROMINENT_KEYS
 """Conditions always shown besides Region (SPEC §2 "Which controls are prominent?")."""
 MORE_KEYS: Final[tuple[ComparableKey, ...]] = tuple(
     key for key in COMPARABLE_KEYS if key not in ALWAYS_VISIBLE_KEYS
