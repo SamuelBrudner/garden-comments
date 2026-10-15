@@ -1,0 +1,549 @@
+"""Deterministic, explainable comparison of reported growing conditions with the viewer's garden.
+
+Pure functions only: no I/O, no database, no model calls. Matching looks exclusively at each
+fact's ``key`` and ``normalized_value``; quotes, as-written phrases, topics and outcome words
+(failure, success, ...) never influence a status or tier. A phrase the vocabulary could not map
+is kept as a display-only ``written_value`` and quoted by :func:`explain`, but never compared.
+Missing information is reported as ``not_stated`` and is never treated as a mismatch. Region is
+a location preference handled by :func:`region_status` and is never part of the relevance tier.
+Summer heat, humidity, rainfall and season length are the gardener's own, uncalibrated words
+(``SELF_DESCRIBED_KEYS``): an equal value still matches, but an opposite one is
+``described_differently`` and is never counted as a mismatch.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from types import MappingProxyType
+from typing import Final, get_args
+
+from crop_explorer.regions import REGION_NAMES
+from crop_explorer.schemas import EnvKey
+from crop_explorer.views import (
+    DimensionMatch,
+    FactView,
+    GardenContext,
+    MatchResult,
+    MatchStatus,
+    MentionView,
+    RegionStatus,
+    Tier,
+)
+from crop_explorer.vocab import (
+    COMPARABLE_KEYS,
+    DESCRIBED_AS,
+    KEY_LABELS,
+    SELF_DESCRIBED_KEYS,
+    VIEWER_VALUES,
+    ComparableKey,
+    is_valid_normalized,
+    value_label,
+)
+
+__all__ = [
+    "applicable_facts",
+    "compare_dimension",
+    "explain",
+    "match_context",
+    "region_status",
+    "tier_of",
+    "values_with",
+]
+
+_MATCH_STATUSES: Final[frozenset[str]] = frozenset(get_args(MatchStatus))
+_AGGREGATE_PRIORITY: Final[tuple[MatchStatus, ...]] = (
+    "match",
+    "imprecise",
+    "different",
+    "described_differently",
+)
+_NOTHING_STATED: Final = "None of your selected conditions were stated."
+_NOT_A_MISMATCH: Final = "self-descriptions aren't counted as a mismatch"
+_SUBDIVISION_SEPARATOR: Final = "-"
+"""Region codes of a country's subdivisions are ``<country>-<code>`` (``US-CT``, ``CA-ON``)."""
+
+_FactIdentity = tuple[str, str | None, str]
+
+# --------------------------------------------------------------------------- applicability
+
+
+def _identity(fact: FactView) -> _FactIdentity:
+    return (fact.key, fact.normalized_value, fact.value_as_written)
+
+
+def _dedupe(facts: Iterable[FactView]) -> tuple[FactView, ...]:
+    """Keep the first fact of each ``(key, normalized_value, value_as_written)``."""
+    first_by_identity: dict[_FactIdentity, FactView] = {}
+    for fact in facts:
+        first_by_identity.setdefault(_identity(fact), fact)
+    return tuple(first_by_identity.values())
+
+
+def applicable_facts(
+    mention: MentionView, siblings: Sequence[MentionView]
+) -> tuple[FactView, ...]:
+    """Return the facts that describe the growing episode of ``mention``.
+
+    Parameters
+    ----------
+    mention : MentionView
+        The mention being evaluated.
+    siblings : Sequence[MentionView]
+        The other mentions of the same comment, in mention order. ``mention`` itself may be
+        included; it is recognised by ``mention_id`` and not counted as its own sibling.
+
+    Returns
+    -------
+    tuple[FactView, ...]
+        The mention's own facts (fact order), then ``whole_comment`` facts of siblings for keys
+        the mention does not state itself (mention order, fact order), deduplicated by
+        ``(key, normalized_value, value_as_written)``. A sibling's ``this_mention`` facts never
+        apply.
+    """
+    own_keys = {fact.key for fact in mention.facts}
+    inherited = (
+        fact
+        for sibling in siblings
+        if sibling.mention_id != mention.mention_id
+        for fact in sibling.facts
+        if fact.applicability == "whole_comment" and fact.key not in own_keys
+    )
+    return _dedupe((*mention.facts, *inherited))
+
+
+# --------------------------------------------------------------------------- per-value rules
+
+
+def _split_zone(zone: str) -> tuple[str, str | None]:
+    """Split a validated zone like ``"6b"`` into ``("6", "b")``; ``"6"`` gives ``("6", None)``."""
+    if zone[-1] in "ab":
+        return zone[:-1], zone[-1]
+    return zone, None
+
+
+def _zone_status(reported: str, viewer: str) -> MatchStatus:
+    if reported == viewer:
+        return "match"
+    reported_number, reported_sub = _split_zone(reported)
+    viewer_number, viewer_sub = _split_zone(viewer)
+    one_side_coarse = (reported_sub is None) != (viewer_sub is None)
+    if reported_number == viewer_number and one_side_coarse:
+        return "imprecise"
+    return "different"
+
+
+def _summer_heat_status(reported: str, viewer: str) -> MatchStatus:
+    """Compare summer heat; a heatwave is an event, comparable only with "hot" (imprecisely)."""
+    if reported == viewer:
+        return "match"
+    if reported == "heatwave":
+        return "imprecise" if viewer == "hot" else "not_stated"
+    return "different"
+
+
+def _equality_status(reported: str, viewer: str) -> MatchStatus:
+    return "match" if reported == viewer else "different"
+
+
+_VALUE_RULES: Final[Mapping[str, Callable[[str, str], MatchStatus]]] = MappingProxyType(
+    {"zone": _zone_status, "summer_heat": _summer_heat_status}
+)
+"""Per-key value comparison rules; every other comparable key uses plain equality."""
+
+
+def _value_status(key: ComparableKey, reported: str, viewer: str) -> MatchStatus:
+    """Compare one reported value; ``not_stated`` means "not comparable, ignore".
+
+    An opposite value of a self-described key is ``described_differently``, never
+    ``different``: the gardener's own words are not calibrated against the viewer's.
+    """
+    status = _VALUE_RULES.get(key, _equality_status)(reported, viewer)
+    if status == "different" and key in SELF_DESCRIBED_KEYS:
+        return "described_differently"
+    return status
+
+
+def _aggregate(statuses: Iterable[MatchStatus]) -> MatchStatus:
+    present = set(statuses)
+    for status in _AGGREGATE_PRIORITY:
+        if status in present:
+            return status
+    return "not_stated"
+
+
+# --------------------------------------------------------------------------- validation
+
+
+def _check_comparable(key: str, viewer_value: str) -> None:
+    if key not in COMPARABLE_KEYS:
+        raise ValueError(
+            f"Key {key!r} is not a comparable dimension; expected one of "
+            f"{', '.join(COMPARABLE_KEYS)}"
+        )
+    if viewer_value not in VIEWER_VALUES[key]:
+        raise ValueError(f"Viewer value {viewer_value!r} is not selectable for {key!r}")
+
+
+def _stated(key: EnvKey, facts: Sequence[FactView]) -> tuple[tuple[FactView, str], ...]:
+    """Return ``(fact, normalized_value)`` for facts of ``key`` with a normalized value.
+
+    Raises
+    ------
+    ValueError
+        If a normalized value is not valid for ``key`` (corrupt or unvalidated data).
+    """
+    stated = tuple(
+        (fact, value)
+        for fact in facts
+        if fact.key == key and (value := fact.normalized_value) is not None
+    )
+    for fact, value in stated:
+        if not is_valid_normalized(key, value):
+            raise ValueError(
+                f"Fact {fact.fact_id!r} has invalid normalized value {value!r} for {key!r}"
+            )
+    return stated
+
+
+def _written(key: EnvKey, facts: Sequence[FactView]) -> tuple[str, ...]:
+    """Return the distinct as-written phrases of ``key`` facts that have no normalized value."""
+    return tuple(
+        dict.fromkeys(
+            fact.value_as_written
+            for fact in facts
+            if fact.key == key and fact.normalized_value is None
+        )
+    )
+
+
+# --------------------------------------------------------------------------- public matching
+
+
+def compare_dimension(
+    key: ComparableKey, viewer_value: str, facts: Sequence[FactView]
+) -> DimensionMatch:
+    """Compare one viewer-selected dimension with the reported facts.
+
+    Parameters
+    ----------
+    key : ComparableKey
+        The dimension to compare (never ``region`` or ``growing_year``).
+    viewer_value : str
+        The viewer's selected value; must be selectable for ``key``.
+    facts : Sequence[FactView]
+        Applicable facts; only those of ``key`` with a normalized value are compared.
+
+    Returns
+    -------
+    DimensionMatch
+        ``match`` if any reported value matches, else ``imprecise`` if any is imprecise, else
+        ``different`` if any differs (``described_differently`` for a key in
+        ``SELF_DESCRIBED_KEYS``), else ``not_stated``. ``written_values`` holds the
+        as-written phrases of ``key`` facts without a normalized value (display only; they
+        never affect the status).
+
+    Raises
+    ------
+    ValueError
+        If ``key`` is not comparable, ``viewer_value`` is not selectable, or a fact carries a
+        normalized value that is invalid for ``key``.
+    """
+    _check_comparable(key, viewer_value)
+    stated = _stated(key, facts)
+    reported = tuple(dict.fromkeys(value for _, value in stated))
+    status = _aggregate(_value_status(key, value, viewer_value) for value in reported)
+    return DimensionMatch(
+        key=key,
+        status=status,
+        viewer_value=viewer_value,
+        reported_values=reported,
+        written_values=_written(key, facts),
+        evidence=tuple(fact for fact, _ in stated),
+    )
+
+
+def values_with(dimension: DimensionMatch, status: MatchStatus) -> tuple[str, ...]:
+    """Return the reported values whose own comparison with the viewer's value gave ``status``.
+
+    A dimension's status aggregates its reported values (any match, else any imprecise, else
+    any different or described differently), so a card should label only the values that
+    produced it: for a hot-summer viewer, "mild summers" plus "a heatwave" is imprecise because
+    of the heatwave alone.
+
+    Parameters
+    ----------
+    dimension : DimensionMatch
+        A comparison from :func:`compare_dimension`.
+    status : MatchStatus
+        The status to select; ``not_stated`` selects reported values that are not comparable
+        with the viewer's value (a heatwave against mild or cool summers).
+
+    Returns
+    -------
+    tuple[str, ...]
+        The matching normalized values, in ``reported_values`` order (possibly empty).
+
+    Raises
+    ------
+    ValueError
+        If ``status`` is not a known match status.
+    """
+    if status not in _MATCH_STATUSES:
+        raise ValueError(f"Unknown match status: {status!r}")
+    return tuple(
+        value
+        for value in dimension.reported_values
+        if _value_status(dimension.key, value, dimension.viewer_value) == status
+    )
+
+
+def tier_of(statuses: Sequence[MatchStatus]) -> Tier:
+    """Combine per-dimension statuses into a contextual-relevance tier.
+
+    Parameters
+    ----------
+    statuses : Sequence[MatchStatus]
+        One status per selected dimension.
+
+    Returns
+    -------
+    Tier
+        ``different`` if any dimension differs; ``match`` if all match; ``partial`` if any
+        matches or is imprecise; otherwise ``not_stated``. So ``described_differently`` never
+        gives ``different``: alone it gives ``not_stated``, next to a match ``partial``.
+
+    Raises
+    ------
+    ValueError
+        If ``statuses`` is empty or contains an unknown status.
+    """
+    if not statuses:
+        raise ValueError("tier_of needs at least one dimension status")
+    unknown = sorted(set(statuses) - _MATCH_STATUSES)
+    if unknown:
+        raise ValueError(f"Unknown match status(es): {', '.join(map(repr, unknown))}")
+    if "different" in statuses:
+        return "different"
+    if all(status == "match" for status in statuses):
+        return "match"
+    if "match" in statuses or "imprecise" in statuses:
+        return "partial"
+    return "not_stated"
+
+
+def match_context(garden: GardenContext, facts: Sequence[FactView]) -> MatchResult | None:
+    """Compare a mention's applicable facts with every condition the viewer selected.
+
+    Parameters
+    ----------
+    garden : GardenContext
+        The viewer's voluntary garden description.
+    facts : Sequence[FactView]
+        The mention's applicable facts (see :func:`applicable_facts`).
+
+    Returns
+    -------
+    MatchResult or None
+        ``None`` when no comparable dimension is selected; otherwise one
+        :class:`DimensionMatch` per selected key in canonical order, plus the tier.
+    """
+    selected = garden.selected()
+    if not selected:
+        return None
+    dimensions = tuple(compare_dimension(key, value, facts) for key, value in selected.items())
+    return MatchResult(tier=tier_of([d.status for d in dimensions]), dimensions=dimensions)
+
+
+def region_status(garden_region: str | None, facts: Sequence[FactView]) -> RegionStatus | None:
+    """Relate reported regions to the viewer's region (a preference, never a climate match).
+
+    Parameters
+    ----------
+    garden_region : str or None
+        The viewer's region code (e.g. ``US-CT``), or ``None`` when not set.
+    facts : Sequence[FactView]
+        Applicable facts; only normalized ``region`` facts are considered.
+
+    Returns
+    -------
+    RegionStatus or None
+        ``None`` without a garden region; ``same`` if any reported region equals it;
+        otherwise ``same_country`` if the garden region is a country and a reported region is
+        one of its subdivisions (``US`` and ``US-CT``; never the reverse); otherwise
+        ``elsewhere`` if other regions are reported; otherwise ``not_stated``.
+
+    Raises
+    ------
+    ValueError
+        If ``garden_region`` or a reported region is not a known region code.
+    """
+    if garden_region is None:
+        return None
+    if garden_region not in REGION_NAMES:
+        raise ValueError(f"Unknown garden region code: {garden_region!r}")
+    reported = {value for _, value in _stated("region", facts)}
+    if garden_region in reported:
+        return "same"
+    subdivision = f"{garden_region}{_SUBDIVISION_SEPARATOR}"
+    if any(code.startswith(subdivision) for code in reported):
+        return "same_country"
+    return "elsewhere" if reported else "not_stated"
+
+
+# --------------------------------------------------------------------------- explanation
+
+
+def _join(items: Sequence[str]) -> str:
+    """Join as English prose: ``a``, ``a and b``, ``a, b and c``."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _labels_with(dimension: DimensionMatch, status: MatchStatus) -> str:
+    """Return the labels of the reported values whose own comparison gave ``status``."""
+    return _join([value_label(dimension.key, value) for value in values_with(dimension, status)])
+
+
+def _viewer_label(dimension: DimensionMatch) -> str:
+    return value_label(dimension.key, dimension.viewer_value)
+
+
+def _with(result: MatchResult, status: MatchStatus) -> list[DimensionMatch]:
+    return [d for d in result.dimensions if d.status == status]
+
+
+def _different_clause(result: MatchResult) -> str:
+    items = [
+        f"{_labels_with(d, 'different')} (you: {_viewer_label(d)})"
+        for d in _with(result, "different")
+    ]
+    return f"Different: {', '.join(items)}" if items else ""
+
+
+def _self_described(dimension: DimensionMatch) -> bool:
+    return dimension.key in SELF_DESCRIBED_KEYS
+
+
+def _matched_clause(result: MatchResult) -> str:
+    labels = [_viewer_label(d) for d in _with(result, "match") if not _self_described(d)]
+    return f"Matches your {_join(labels)}" if labels else ""
+
+
+def _descriptions(values: Iterable[str]) -> str:
+    """Phrase self-described values as "<subject> as <description>", grouped by subject."""
+    by_subject: dict[str, list[str]] = {}
+    for value in values:
+        subject, description = DESCRIBED_AS[value]
+        by_subject.setdefault(subject, []).append(description)
+    return _join([f"{subject} as {_join(words)}" for subject, words in by_subject.items()])
+
+
+def _described_clause(result: MatchResult) -> str:
+    """Phrase matched self-described keys as what the gardener said (never "Matches")."""
+    values = [d.viewer_value for d in _with(result, "match") if _self_described(d)]
+    return f"they described {_descriptions(values)}" if values else ""
+
+
+def _described_differently_clause(result: MatchResult) -> str:
+    items = [
+        f"{_descriptions(values_with(d, 'described_differently'))} (you chose {_viewer_label(d)})"
+        for d in _with(result, "described_differently")
+    ]
+    return f"they described {_join(items)}; {_NOT_A_MISMATCH}" if items else ""
+
+
+def _imprecise_qualifier(dimension: DimensionMatch) -> str:
+    if dimension.key == "zone" and _split_zone(dimension.viewer_value)[1] is not None:
+        return "subzone unknown"
+    return f"you: {_viewer_label(dimension)}"
+
+
+def _imprecise_clause(result: MatchResult) -> str:
+    items = [
+        f"{_labels_with(d, 'imprecise')} reported ({_imprecise_qualifier(d)})"
+        for d in _with(result, "imprecise")
+    ]
+    return ", ".join(items)
+
+
+def _not_comparable_clause(result: MatchResult) -> str:
+    items = [
+        f"{KEY_LABELS[d.key]} not comparable ({_labels_with(d, 'not_stated')} reported)"
+        for d in _with(result, "not_stated")
+        if d.reported_values
+    ]
+    return ", ".join(items)
+
+
+def _only_written(dimension: DimensionMatch) -> bool:
+    """Whether the dimension's only statements are display-only phrases."""
+    return not dimension.reported_values and bool(dimension.written_values)
+
+
+def _written_item(dimension: DimensionMatch) -> str:
+    quoted = [f'"{" ".join(phrase.split())}"' for phrase in dimension.written_values]
+    return f"{KEY_LABELS[dimension.key]} mentioned as {_join(quoted)} (not comparable)"
+
+
+def _written_clause(result: MatchResult) -> str:
+    items = [_written_item(d) for d in _with(result, "not_stated") if _only_written(d)]
+    return ", ".join(items)
+
+
+def _unmentioned(dimension: DimensionMatch) -> bool:
+    return not dimension.reported_values and not dimension.written_values
+
+
+def _not_stated_clause(result: MatchResult) -> str:
+    keys = [KEY_LABELS[d.key] for d in _with(result, "not_stated") if _unmentioned(d)]
+    return f"{_join(keys)} not stated" if keys else ""
+
+
+def _sentence(text: str) -> str:
+    return f"{text[0].upper()}{text[1:]}." if text else ""
+
+
+_SECOND_SENTENCE: Final[tuple[Callable[[MatchResult], str], ...]] = (
+    _matched_clause,
+    _described_clause,
+    _imprecise_clause,
+    _not_comparable_clause,
+    _written_clause,
+    _not_stated_clause,
+)
+"""Clauses joined with "; " into the sentence between "Different: ..." and self-descriptions."""
+
+
+def explain(result: MatchResult | None) -> str:
+    """Describe, in plain words, why a report was placed in its tier.
+
+    Parameters
+    ----------
+    result : MatchResult or None
+        A mention's comparison, or ``None`` when the viewer selected no condition.
+
+    Returns
+    -------
+    str
+        Up to three short sentences (``""`` for ``None``): "Different: ..." for hard keys that
+        differ; then the matching, imprecise, not comparable and unstated conditions, where a
+        matched self-described key is what the gardener said ("they described it as humid");
+        then the self-described keys described differently ("They described summers as mild
+        (you chose hot summers); self-descriptions aren't counted as a mismatch"), which are
+        never called different. A selected key whose only statements are display-only phrases
+        is "mentioned as" those phrases, quoted with whitespace collapsed (untrusted comment
+        text: render it as plain text), never "not stated". Never mentions outcomes, quality
+        or scores.
+    """
+    if result is None:
+        return ""
+    if all(d.status == "not_stated" and _unmentioned(d) for d in result.dimensions):
+        return _NOTHING_STATED
+    second = "; ".join(clause for build in _SECOND_SENTENCE if (clause := build(result)))
+    sentences = (
+        _different_clause(result),
+        second,
+        _described_differently_clause(result),
+    )
+    return " ".join(_sentence(text) for text in sentences if text)

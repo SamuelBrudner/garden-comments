@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install locked environment
+        run: uv sync --locked
+      - name: Pre-commit hooks (ruff, format, mypy --strict)
+        run: uv run pre-commit run --all-files
+      - name: Install Chromium for the browser tests
+        run: uv run playwright install --with-deps chromium
+      - name: Tests
+        run: uv run pytest --cov --cov-report=term-missing

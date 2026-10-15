@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# crop_explorer local data (private imports, SQLite DBs, logs, diagnostics)
+data/
+*.sqlite
+*.sqlite-journal
+.venv/
+conda_env/
+.ruff_cache/
+.mypy_cache/
+screenshots/

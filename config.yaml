@@ -1,0 +1,122 @@
+# Runtime configuration for crop_explorer. Validated by crop_explorer.config.AppConfig.
+
+database:
+  path: data/crop_explorer.sqlite
+
+viewer:
+  # public  -> only `synthetic` and `cleared` sources are visible (fail-safe default).
+  # private -> also shows `private_unverified` imports; local exploration only.
+  scope: public
+  # Quick-condition chips appear only when at least this many visible reports support them.
+  min_reports_for_chip: 3
+  # The search box accepts at most this many characters (bounds full-text search cost).
+  max_query_chars: 200
+  # Cards shown per result group; "Show N more" adds another page of this size.
+  page_size: 20
+
+map:
+  # Public-scope map cells with fewer distinct comments than this are hidden from the map.
+  # This only coarsens the map display: cards still show each comment's text and region,
+  # and the state filter still lists the reports, so it is not a privacy control. Only
+  # publish comments whose source is cleared.
+  public_min_cell_count: 1
+
+extraction:
+  # A fact is rejected when the sentence containing its evidence quote contains one of
+  # these markers (case-insensitive, word-bounded): advice, plans and hypotheticals are
+  # not growing reports. Conservative by design: false rejections only lose structure,
+  # never searchable text. A marker that starts with "^" counts only at the start of a
+  # sentence. docs/EXTRACTION_PROMPT.md lists the same markers (checked by a test).
+  hypothetical_markers:
+    - "i'd"
+    - "i would"
+    - "would try"
+    - "i'll"
+    - "i will"
+    - "should"
+    - "could"
+    - "might"
+    - "if you"
+    - "recommend"
+    - "suggest"
+    - "next year"
+    - "planning"
+    - "plan to"
+    - "going to try"
+    - "want to try"
+    # Unpunctuated and plan/wish phrasings (apostrophes ' ’ ‘ ʼ ´ ` are interchangeable).
+    - "id try"
+    - "ill try"
+    - "id grow"
+    - "if i had"
+    - "if only"
+    - "gonna"
+    - "hoping to"
+    - "hope to"
+    - "thinking of"
+    - "we'll"
+    - "we'd"
+    - "you'd"
+    # Narrow forms only: a bare "would" is also a firsthand report ("would grow it again",
+    # "would wilt every afternoon"), a bare "maybe" an estimate ("gets maybe 7 hrs of sun")
+    # and a bare "anyone" an aside ("If anyone's curious, I grow ...").
+    - "would do"
+    - "would be"
+    - "would work"
+    - "would thrive"
+    - "would love"
+    - "wish i"
+    - "i wish"
+    - "^maybe"
+    - "maybe try"
+    - "maybe i'll"
+    - "maybe next"
+    - "has anyone"
+    - "does anyone"
+
+quick_chips:
+  - label: Containers
+    conditions: {method: container}
+  - label: Hot & humid
+    conditions: {summer_heat: hot, humidity: humid}
+  - label: Short season
+    conditions: {season_length: short_season}
+  - label: Greenhouse
+    conditions: {shelter: greenhouse}
+
+outside_context:
+  - title: USDA Plant Hardiness Zone Map
+    url: https://planthardiness.ars.usda.gov/
+    label: regional climate reference
+    note: >-
+      Zones reflect the average annual extreme minimum winter temperature only. They do not
+      describe summer heat, humidity, season length, soil or sunlight.
+  - title: How to use the USDA zone map
+    url: https://planthardiness.ars.usda.gov/pages/how-to-use-the-maps
+    label: regional climate reference
+    note: Official guidance on what a hardiness zone does and does not tell you.
+  - title: NOAA U.S. Climate Normals (1991-2020)
+    url: https://www.ncei.noaa.gov/products/land-based-station/us-climate-normals
+    label: regional climate reference
+    note: >-
+      30-year statistical averages for a place, not the weather any gardener experienced in
+      a particular season.
+  - title: NASA POWER climatology
+    url: https://power.larc.nasa.gov/docs/services/api/temporal/climatology/
+    label: regional climate reference
+    note: Gridded long-term climatology; coarse spatial resolution.
+  - title: Cornell Vegetable Varieties for Gardeners
+    url: https://vegvariety.cce.cornell.edu/
+    label: community report
+    note: >-
+      Variety ratings by outside home gardeners, hosted by Cornell Cooperative Extension. These
+      are not this channel's comments and not a controlled trial.
+  - title: Nebraska Vegetable Variety Navigator
+    url: https://agronomy.unl.edu/vegetable-variety-navigator/
+    label: published external trial
+    note: Published variety trial context from the University of Nebraska-Lincoln.
+
+logging:
+  level: INFO
+  # JSON-lines sink for structured logs; null disables it. Never receives comment bodies.
+  json_path: data/logs/crop_explorer.jsonl
