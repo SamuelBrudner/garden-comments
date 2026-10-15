@@ -6,6 +6,9 @@ fact's ``key`` and ``normalized_value``; quotes, as-written phrases, topics and 
 is kept as a display-only ``written_value`` and quoted by :func:`explain`, but never compared.
 Missing information is reported as ``not_stated`` and is never treated as a mismatch. Region is
 a location preference handled by :func:`region_status` and is never part of the relevance tier.
+Summer heat, humidity, rainfall and season length are the gardener's own, uncalibrated words
+(``SELF_DESCRIBED_KEYS``): an equal value still matches, but an opposite one is
+``described_differently`` and is never counted as a mismatch.
 """
 
 from __future__ import annotations
@@ -28,7 +31,9 @@ from crop_explorer.views import (
 )
 from crop_explorer.vocab import (
     COMPARABLE_KEYS,
+    DESCRIBED_AS,
     KEY_LABELS,
+    SELF_DESCRIBED_KEYS,
     VIEWER_VALUES,
     ComparableKey,
     is_valid_normalized,
@@ -46,8 +51,14 @@ __all__ = [
 ]
 
 _MATCH_STATUSES: Final[frozenset[str]] = frozenset(get_args(MatchStatus))
-_AGGREGATE_PRIORITY: Final[tuple[MatchStatus, ...]] = ("match", "imprecise", "different")
+_AGGREGATE_PRIORITY: Final[tuple[MatchStatus, ...]] = (
+    "match",
+    "imprecise",
+    "different",
+    "described_differently",
+)
 _NOTHING_STATED: Final = "None of your selected conditions were stated."
+_NOT_A_MISMATCH: Final = "self-descriptions aren't counted as a mismatch"
 _SUBDIVISION_SEPARATOR: Final = "-"
 """Region codes of a country's subdivisions are ``<country>-<code>`` (``US-CT``, ``CA-ON``)."""
 
@@ -141,8 +152,15 @@ _VALUE_RULES: Final[Mapping[str, Callable[[str, str], MatchStatus]]] = MappingPr
 
 
 def _value_status(key: ComparableKey, reported: str, viewer: str) -> MatchStatus:
-    """Compare one reported value; ``not_stated`` means "not comparable, ignore"."""
-    return _VALUE_RULES.get(key, _equality_status)(reported, viewer)
+    """Compare one reported value; ``not_stated`` means "not comparable, ignore".
+
+    An opposite value of a self-described key is ``described_differently``, never
+    ``different``: the gardener's own words are not calibrated against the viewer's.
+    """
+    status = _VALUE_RULES.get(key, _equality_status)(reported, viewer)
+    if status == "different" and key in SELF_DESCRIBED_KEYS:
+        return "described_differently"
+    return status
 
 
 def _aggregate(statuses: Iterable[MatchStatus]) -> MatchStatus:
@@ -219,7 +237,8 @@ def compare_dimension(
     -------
     DimensionMatch
         ``match`` if any reported value matches, else ``imprecise`` if any is imprecise, else
-        ``different`` if any differs, else ``not_stated``. ``written_values`` holds the
+        ``different`` if any differs (``described_differently`` for a key in
+        ``SELF_DESCRIBED_KEYS``), else ``not_stated``. ``written_values`` holds the
         as-written phrases of ``key`` facts without a normalized value (display only; they
         never affect the status).
 
@@ -247,8 +266,9 @@ def values_with(dimension: DimensionMatch, status: MatchStatus) -> tuple[str, ..
     """Return the reported values whose own comparison with the viewer's value gave ``status``.
 
     A dimension's status aggregates its reported values (any match, else any imprecise, else
-    any different), so a card should label only the values that produced it: for a hot-summer
-    viewer, "mild summers" plus "a heatwave" is imprecise because of the heatwave alone.
+    any different or described differently), so a card should label only the values that
+    produced it: for a hot-summer viewer, "mild summers" plus "a heatwave" is imprecise because
+    of the heatwave alone.
 
     Parameters
     ----------
@@ -289,7 +309,8 @@ def tier_of(statuses: Sequence[MatchStatus]) -> Tier:
     -------
     Tier
         ``different`` if any dimension differs; ``match`` if all match; ``partial`` if any
-        matches or is imprecise; otherwise ``not_stated``.
+        matches or is imprecise; otherwise ``not_stated``. So ``described_differently`` never
+        gives ``different``: alone it gives ``not_stated``, next to a match ``partial``.
 
     Raises
     ------
@@ -400,9 +421,36 @@ def _different_clause(result: MatchResult) -> str:
     return f"Different: {', '.join(items)}" if items else ""
 
 
+def _self_described(dimension: DimensionMatch) -> bool:
+    return dimension.key in SELF_DESCRIBED_KEYS
+
+
 def _matched_clause(result: MatchResult) -> str:
-    labels = [_viewer_label(d) for d in _with(result, "match")]
+    labels = [_viewer_label(d) for d in _with(result, "match") if not _self_described(d)]
     return f"Matches your {_join(labels)}" if labels else ""
+
+
+def _descriptions(values: Iterable[str]) -> str:
+    """Phrase self-described values as "<subject> as <description>", grouped by subject."""
+    by_subject: dict[str, list[str]] = {}
+    for value in values:
+        subject, description = DESCRIBED_AS[value]
+        by_subject.setdefault(subject, []).append(description)
+    return _join([f"{subject} as {_join(words)}" for subject, words in by_subject.items()])
+
+
+def _described_clause(result: MatchResult) -> str:
+    """Phrase matched self-described keys as what the gardener said (never "Matches")."""
+    values = [d.viewer_value for d in _with(result, "match") if _self_described(d)]
+    return f"they described {_descriptions(values)}" if values else ""
+
+
+def _described_differently_clause(result: MatchResult) -> str:
+    items = [
+        f"{_descriptions(values_with(d, 'described_differently'))} (you chose {_viewer_label(d)})"
+        for d in _with(result, "described_differently")
+    ]
+    return f"they described {_join(items)}; {_NOT_A_MISMATCH}" if items else ""
 
 
 def _imprecise_qualifier(dimension: DimensionMatch) -> str:
@@ -456,6 +504,17 @@ def _sentence(text: str) -> str:
     return f"{text[0].upper()}{text[1:]}." if text else ""
 
 
+_SECOND_SENTENCE: Final[tuple[Callable[[MatchResult], str], ...]] = (
+    _matched_clause,
+    _described_clause,
+    _imprecise_clause,
+    _not_comparable_clause,
+    _written_clause,
+    _not_stated_clause,
+)
+"""Clauses joined with "; " into the sentence between "Different: ..." and self-descriptions."""
+
+
 def explain(result: MatchResult | None) -> str:
     """Describe, in plain words, why a report was placed in its tier.
 
@@ -467,23 +526,24 @@ def explain(result: MatchResult | None) -> str:
     Returns
     -------
     str
-        One or two short sentences naming the differing, matching, imprecise, not comparable
-        and unstated conditions (``""`` for ``None``). A selected key whose only statements are
-        display-only phrases is "mentioned as" those phrases, quoted with whitespace collapsed
-        (untrusted comment text: render it as plain text), never "not stated". Never mentions
-        outcomes, quality or scores.
+        Up to three short sentences (``""`` for ``None``): "Different: ..." for hard keys that
+        differ; then the matching, imprecise, not comparable and unstated conditions, where a
+        matched self-described key is what the gardener said ("they described it as humid");
+        then the self-described keys described differently ("They described summers as mild
+        (you chose hot summers); self-descriptions aren't counted as a mismatch"), which are
+        never called different. A selected key whose only statements are display-only phrases
+        is "mentioned as" those phrases, quoted with whitespace collapsed (untrusted comment
+        text: render it as plain text), never "not stated". Never mentions outcomes, quality
+        or scores.
     """
     if result is None:
         return ""
     if all(d.status == "not_stated" and _unmentioned(d) for d in result.dimensions):
         return _NOTHING_STATED
-    rest = (
-        _matched_clause,
-        _imprecise_clause,
-        _not_comparable_clause,
-        _written_clause,
-        _not_stated_clause,
+    second = "; ".join(clause for build in _SECOND_SENTENCE if (clause := build(result)))
+    sentences = (
+        _different_clause(result),
+        second,
+        _described_differently_clause(result),
     )
-    second = "; ".join(clause for build in rest if (clause := build(result)))
-    sentences = (_sentence(_different_clause(result)), _sentence(second))
-    return " ".join(sentence for sentence in sentences if sentence)
+    return " ".join(_sentence(text) for text in sentences if text)

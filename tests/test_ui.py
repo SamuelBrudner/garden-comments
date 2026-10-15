@@ -38,9 +38,11 @@ from crop_explorer.views import (
 from crop_explorer.vocab import (
     COMPARABLE_KEYS,
     KEY_LABELS,
+    SELF_DESCRIBED_KEYS,
     VIEWER_VALUES,
     ComparableKey,
     is_valid_normalized,
+    value_label,
 )
 
 # --------------------------------------------------------------------------- builders
@@ -348,7 +350,10 @@ class TestConditionLines:
         garden = GardenContext(summer_heat="mild")
         view = comment(mentions=[mention(facts=[fact("summer_heat", "heatwave", "heat wave")])])
         lines = ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden)
-        assert lines == ("Not stated: summer heat (only a heatwave reported, not comparable)",)
+        assert lines == (
+            "In their own words: “heat wave” (a heatwave; you chose mild summers) · "
+            "not comparable",
+        )
 
     def test_comment_without_mentions_states_every_selected_condition_as_unknown(self) -> None:
         unresolved = comment(analysed=True)  # extracted, but no variety mention was found
@@ -467,16 +472,21 @@ class TestConditionLines:
         ]
         garden = GardenContext(summer_heat="hot")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
-        assert ui.condition_lines(found, garden) == ("Relevant: a heatwave (you: hot summers)",)
+        assert ui.condition_lines(found, garden) == (
+            "In their own words: “a heat wave hit” (a heatwave; you chose hot summers)",
+        )
 
-    def test_hot_summers_with_a_heatwave_label_only_the_climate_as_different(self) -> None:
+    def test_hot_summers_with_a_heatwave_label_only_the_climate_as_described(self) -> None:
         facts = [
             fact("summer_heat", "hot", "hot summers", fact_id="a"),
             fact("summer_heat", "heatwave", "a heat wave", fact_id="b"),
         ]
         garden = GardenContext(summer_heat="mild")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
-        assert ui.condition_lines(found, garden) == ("Different: hot summers (you: mild summers)",)
+        assert ui.condition_lines(found, garden) == (
+            "In their own words: “hot summers” (hot summers; you chose mild summers) · "
+            "not counted as a difference",
+        )
 
     def test_imprecise_zone_ignores_a_differing_zone(self) -> None:
         facts = [
@@ -573,6 +583,288 @@ class TestConditionLines:
                 line for line in lines if line.startswith("Not stated:")
             )
             assert KEY_LABELS[key] not in relevant
+
+
+_OWN_WORDS_VALUES = (
+    "6b",
+    "6",
+    "7a",
+    "container",
+    "in_ground",
+    "hot",
+    "mild",
+    "cool",
+    "heatwave",
+    "humid",
+    "dry_air",
+    "rainy",
+    "dry_season",
+    "short_season",
+    "long_season",
+    "full_sun",
+)
+
+
+def own_words_of(
+    facts: Sequence[FactView], garden: GardenContext, text: str | None = None
+) -> tuple[str, ...]:
+    """Return the condition lines of a one-mention comment for ``garden``."""
+    query = SearchQuery(text=text, garden=garden)
+    return ui.condition_lines(result_of(comment(mentions=[mention(facts=facts)]), query), garden)
+
+
+class TestOwnWords:
+    """Self-described conditions (``vocab.SELF_DESCRIBED_KEYS``) are quoted in the commenter's
+    words with the report's region, because "hot" or "humid" is relative to where they garden;
+    one described unlike the viewer's is never called different."""
+
+    def test_matched_self_description_is_quoted_and_counted_with_the_region(self) -> None:
+        facts = [
+            fact("zone", "6b", "Zone 6b", fact_id="a"),
+            fact("method", "container", "pots", fact_id="b"),
+            fact("humidity", "humid", "brutal and muggy", fact_id="c"),
+            fact("region", "US-CT", "Connecticut", fact_id="d"),
+        ]
+        garden = GardenContext(zone="6b", method="container", humidity="humid")
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        assert found.tier == "match"
+        assert ui.condition_lines(found, garden) == (
+            "Relevant: zone 6b · containers",
+            "In their own words: “brutal and muggy” (counted as humid) · Connecticut",
+        )
+
+    def test_self_description_unlike_yours_is_not_counted_as_a_difference(self) -> None:
+        garden = GardenContext(summer_heat="hot")
+        view = comment(mentions=[mention(facts=[fact("summer_heat", "mild", "mild summers")])])
+        found = result_of(view, SearchQuery(garden=garden))
+        assert found.tier == "not_stated"
+        assert ui.condition_lines(found, garden) == (
+            "In their own words: “mild summers” (mild summers; you chose hot summers) · "
+            "not counted as a difference",
+        )
+
+    def test_heatwave_for_hot_summers_names_the_heatwave_and_the_region(self) -> None:
+        facts = [
+            fact("summer_heat", "heatwave", "that July heat wave", fact_id="a"),
+            fact("region", "US-TX", "North Texas", fact_id="b"),
+        ]
+        assert own_words_of(facts, GardenContext(summer_heat="hot")) == (
+            "In their own words: “that July heat wave” (a heatwave; you chose hot summers) · "
+            "Texas",
+        )
+
+    def test_self_described_conditions_leave_the_relevant_line(self) -> None:
+        facts = [
+            fact("method", "container", "pots", fact_id="a"),
+            fact("summer_heat", "hot", "scorching", fact_id="b"),
+            fact("humidity", "humid", "sticky", fact_id="c"),
+        ]
+        garden = GardenContext(method="container", summer_heat="hot", humidity="humid")
+        assert own_words_of(facts, garden) == (
+            "Relevant: containers",
+            "In their own words: “scorching” (counted as hot summers)",
+            "In their own words: “sticky” (counted as humid)",
+        )
+
+    def test_unstated_self_described_condition_is_still_not_stated(self) -> None:
+        garden = GardenContext(summer_heat="hot", humidity="humid")
+        assert own_words_of([fact("humidity", "humid", "muggy")], garden) == (
+            "Not stated: summer heat",
+            "In their own words: “muggy” (counted as humid)",
+        )
+
+    def test_counted_words_come_before_words_not_counted(self) -> None:
+        facts = [
+            fact("summer_heat", "mild", "mild", fact_id="a"),
+            fact("humidity", "humid", "humid", fact_id="b"),
+        ]
+        garden = GardenContext(summer_heat="hot", humidity="humid")
+        assert own_words_of(facts, garden) == (
+            "In their own words: “humid” (counted as humid)",
+            "In their own words: “mild” (mild summers; you chose hot summers) · "
+            "not counted as a difference",
+        )
+
+    def test_a_checkable_difference_still_reads_different(self) -> None:
+        """SPEC §5 last row, "I grow it in the ground in dry conditions": only the method
+        differs; the dry air is the gardener's own description."""
+        facts = [
+            fact("method", "in_ground", "in the ground", fact_id="a"),
+            fact("humidity", "dry_air", "dry conditions", fact_id="b"),
+        ]
+        garden = GardenContext(zone="6b", method="container", humidity="humid")
+        assert own_words_of(facts, garden) == (
+            "Not stated: hardiness zone",
+            "Different: in the ground (you: containers)",
+            "In their own words: “dry conditions” (dry air; you chose humid) · "
+            "not counted as a difference",
+        )
+
+    def test_words_are_deduplicated_with_whitespace_collapsed(self) -> None:
+        facts = [
+            fact("humidity", "humid", "so\n  muggy", fact_id="a"),
+            fact("humidity", "humid", "so muggy", fact_id="b"),
+            fact("humidity", "humid", "sticky", fact_id="c"),
+        ]
+        assert own_words_of(facts, GardenContext(humidity="humid")) == (
+            "In their own words: “so muggy” / “sticky” (counted as humid)",
+        )
+
+    def test_every_value_unlike_yours_is_named(self) -> None:
+        facts = [
+            fact("summer_heat", "mild", "mild", fact_id="a"),
+            fact("summer_heat", "cool", "cool nights", fact_id="b"),
+        ]
+        assert own_words_of(facts, GardenContext(summer_heat="hot")) == (
+            "In their own words: “mild” / “cool nights” (mild summers / cool summers; "
+            "you chose hot summers) · not counted as a difference",
+        )
+
+    @pytest.mark.parametrize(
+        ("key", "value", "viewer", "expected"),
+        [
+            ("precipitation", "rainy", "dry_season", "rainy; you chose dry spell / dry season"),
+            (
+                "season_length",
+                "long_season",
+                "short_season",
+                "long season; you chose short season",
+            ),
+            ("humidity", "humid", "dry_air", "humid; you chose dry air"),
+        ],
+    )
+    def test_each_self_described_key_is_not_counted_as_a_difference(
+        self, key: ComparableKey, value: str, viewer: str, expected: str
+    ) -> None:
+        garden = GardenContext.model_validate({key: viewer})
+        assert own_words_of([fact(key, value, "as they put it")], garden) == (
+            f"In their own words: “as they put it” ({expected}) · not counted as a difference",
+        )
+
+    def test_region_is_inherited_from_a_whole_comment_fact(self) -> None:
+        shared = [
+            fact("region", "US-GA", "Georgia", applicability="whole_comment", fact_id="a"),
+            fact("summer_heat", "hot", "brutally hot", applicability="whole_comment", fact_id="b"),
+        ]
+        view = comment(
+            mentions=[
+                mention("c1#m0", variety="Cherokee Purple", facts=shared),
+                mention("c1#m1", variety="Juliet"),
+            ]
+        )
+        garden = GardenContext(summer_heat="hot")
+        found = result_of(view, SearchQuery(text="Juliet", garden=garden))
+        assert ui.condition_lines(found, garden) == (
+            "In their own words: “brutally hot” (counted as hot summers) · Georgia",
+        )
+
+    def test_several_regions_and_an_unmapped_region(self) -> None:
+        hot = fact("summer_heat", "hot", "hot", fact_id="a")
+        regions = [
+            fact("region", "US-CT", "Connecticut", fact_id="b"),
+            fact("region", "US-ME", "Maine", fact_id="c"),
+        ]
+        garden = GardenContext(summer_heat="hot")
+        assert own_words_of([hot, *regions], garden) == (
+            "In their own words: “hot” (counted as hot summers) · Connecticut, Maine",
+        )
+        cape_cod = fact("region", None, "Cape Cod", fact_id="d")
+        assert own_words_of([hot, cape_cod], garden) == (
+            "In their own words: “hot” (counted as hot summers) · Cape Cod (not mapped)",
+        )
+
+    def test_region_is_the_shown_mentions_own(self) -> None:
+        view = comment(
+            mentions=[
+                mention("c1#m0", facts=[fact("region", "US-ME", "Maine", fact_id="a")]),
+                mention(
+                    "c1#m1", variety="Roma", facts=[fact("summer_heat", "hot", "hot", fact_id="b")]
+                ),
+            ]
+        )
+        garden = GardenContext(summer_heat="hot")
+        assert ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden) == (
+            "Shown for Roma (1 of 2 mentions)",
+            "In their own words: “hot” (counted as hot summers)",
+            "Sungold: Not stated: summer heat",
+        )
+
+    def test_another_mention_described_differently_states_its_own_words(self) -> None:
+        view = comment(
+            mentions=[
+                mention("c1#m0", facts=[fact("summer_heat", "hot", "hot", fact_id="a")]),
+                mention(
+                    "c1#m1",
+                    variety="Roma",
+                    facts=[fact("summer_heat", "mild", "mild", fact_id="b")],
+                ),
+            ]
+        )
+        garden = GardenContext(summer_heat="hot")
+        assert ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden) == (
+            "Shown for Sungold (1 of 2 mentions)",
+            "In their own words: “hot” (counted as hot summers)",
+            "Roma: In their own words: “mild” (mild summers; you chose hot summers) · "
+            "not counted as a difference",
+        )
+
+    def test_another_partial_mention_states_its_counted_words(self) -> None:
+        view = comment(
+            mentions=[
+                mention(
+                    "c1#m0",
+                    facts=[
+                        fact("method", "container", "pots", fact_id="a"),
+                        fact("summer_heat", "hot", "hot", fact_id="b"),
+                    ],
+                ),
+                mention(
+                    "c1#m1",
+                    variety="Roma",
+                    facts=[fact("summer_heat", "hot", "really hot", fact_id="c")],
+                ),
+            ]
+        )
+        garden = GardenContext(method="container", summer_heat="hot")
+        assert ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden) == (
+            "Shown for Sungold (1 of 2 mentions)",
+            "Relevant: containers",
+            "In their own words: “hot” (counted as hot summers)",
+            "Roma: In their own words: “really hot” (counted as hot summers)",
+        )
+
+    @settings(max_examples=300)
+    @given(
+        st.dictionaries(st.sampled_from(COMPARABLE_KEYS), st.sampled_from(_OWN_WORDS_VALUES)),
+        st.dictionaries(st.sampled_from(COMPARABLE_KEYS), st.sampled_from(_OWN_WORDS_VALUES)),
+    )
+    def test_property_one_own_words_line_per_described_condition_never_different(
+        self, reported: dict[ComparableKey, str], selected: dict[ComparableKey, str]
+    ) -> None:
+        facts = [
+            fact(key, value, f"said {value}", fact_id=f"c1#m0#f{i}")
+            for i, (key, value) in enumerate(reported.items())
+            if is_valid_normalized(key, value)
+        ]
+        garden = GardenContext.model_validate(
+            {k: v for k, v in selected.items() if v in VIEWER_VALUES[k]}
+        )
+        found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
+        lines = ui.condition_lines(found, garden)
+        stated = {f.key for f in facts}
+        described = [k for k in garden.selected() if k in SELF_DESCRIBED_KEYS and k in stated]
+        own = [line for line in lines if line.startswith("In their own words: ")]
+        assert len(own) == len(described)
+        assert all(line.endswith("") for line in own)
+        assert any(line.startswith("Different:") for line in lines) == (found.tier == "different")
+        relevant = next((line for line in lines if line.startswith("Relevant:")), "")
+        for key in described:
+            assert value_label(key, garden.selected()[key]) not in relevant
+        statuses = [
+            d.status for mm in found.mention_matches if mm.match for d in mm.match.dimensions
+        ]
+        n_not_counted = sum("not counted as a difference" in line for line in lines)
+        assert n_not_counted == statuses.count("described_differently")
 
 
 # --------------------------------------------------------------------------- region_line
@@ -692,6 +984,34 @@ class TestCardLabels:
         )
         caption = ui.condition_caption(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
         assert caption.startswith(":green-badge[reported conditions] Shown for Sungold")
+
+    @pytest.mark.parametrize(
+        ("value", "viewer"), [("mild", "hot"), ("heatwave", "mild"), ("heatwave", "hot")]
+    )
+    def test_caption_badges_a_self_description_whatever_its_status(
+        self, value: str, viewer: str
+    ) -> None:
+        """A self-description unlike yours or not comparable is still a stated condition, so
+        its own-words line carries the badge (the report itself is in the not-stated group)."""
+        garden = GardenContext(summer_heat=viewer)
+        view = comment(mentions=[mention(facts=[fact("summer_heat", value, "the summer")])])
+        caption = ui.condition_caption(result_of(view, SearchQuery(garden=garden)), garden)
+        assert caption.startswith(":green-badge[reported conditions] In their own words")
+        assert caption.endswith(ui.escape_markdown("\nRegion not reported"))
+
+    def test_another_mentions_self_description_in_the_same_tier_gets_no_badge(self) -> None:
+        """The other mention's line is only shown when its tier differs, so no badge here."""
+        view = comment(
+            mentions=[
+                mention("c1#m0"),
+                mention("c1#m1", variety="Roma", facts=[fact("summer_heat", "mild", fact_id="x")]),
+            ]
+        )
+        garden = GardenContext(summer_heat="hot")
+        caption = ui.condition_caption(result_of(view, SearchQuery(garden=garden)), garden)
+        assert caption == ui.escape_markdown(
+            "Shown for Sungold (1 of 2 mentions)\nNot stated: summer heat\nRegion not reported"
+        )
 
     def test_unanalysed_caption_omits_region_and_badge(self) -> None:
         found = result_of(comment(analysed=False), QUERY_6B_POTS)
@@ -1109,11 +1429,25 @@ class TestChips:
 
     def test_help_of_a_multi_condition_chip_states_both_counts(self) -> None:
         """F18: the tooltip never implies that every counted report states every condition."""
+        chip = QuickChip(
+            label="Pots under cover", conditions={"method": "container", "shelter": "greenhouse"}
+        )
+        assert ui.chip_help(chip, support(6, 2)) == (
+            "6 reports mention containers or greenhouse / tunnel; 2 mention both"
+        )
+        assert ui.chip_help(chip, support(1, 1)) == (
+            "1 report mentions containers or greenhouse / tunnel; 1 mentions both"
+        )
+
+    def test_help_of_a_self_described_chip_counts_descriptions_in_their_own_words(self) -> None:
+        """Hot and humid are the gardeners' own, uncalibrated words, and the tooltip says so."""
         assert ui.chip_help(CHIPS[1], support(6, 2)) == (
-            "6 reports mention hot summers or humid; 2 mention both"
+            "6 reports describe hot summers or humid conditions in their own words; "
+            "2 describe both"
         )
         assert ui.chip_help(CHIPS[1], support(1, 1)) == (
-            "1 report mentions hot summers or humid; 1 mentions both"
+            "1 report describes hot summers or humid conditions in their own words; "
+            "1 describes both"
         )
 
     def test_help_of_a_three_condition_chip(self) -> None:
@@ -1122,12 +1456,22 @@ class TestChips:
             conditions={"summer_heat": "hot", "humidity": "humid", "method": "container"},
         )
         assert ui.chip_help(chip, support(5, 0)) == (
-            "5 reports mention hot summers, humid or containers; 0 mention all of them"
+            "5 reports describe hot summers, humid conditions or containers in their own words; "
+            "0 describe all of them"
         )
 
     def test_help_of_a_single_condition_chip(self) -> None:
         assert ui.chip_help(CHIPS[0], support(8)) == "Set this condition (8 reports state it)"
         assert ui.chip_help(CHIPS[2], support(1)) == "Set this condition (1 report states it)"
+
+    def test_help_of_a_single_self_described_chip(self) -> None:
+        chip = QuickChip(label="Short season", conditions={"season_length": "short_season"})
+        assert ui.chip_help(chip, support(4)) == (
+            "Set this condition (4 reports describe it in their own words)"
+        )
+        assert ui.chip_help(chip, support(1)) == (
+            "Set this condition (1 report describes it in their own words)"
+        )
 
     def test_chip_state_maps_conditions_to_widget_keys(self) -> None:
         assert ui.chip_state(CHIPS[1]) == {
@@ -1188,7 +1532,8 @@ class TestSummaries:
     def test_count_summary_with_selection_lists_every_tier(self) -> None:
         found = search_of(sample_views(), QUERY_6B_POTS)
         assert ui.count_summary(found) == (
-            "4 reports · 1 matching · 1 partially matching · 1 not stated · 1 different"
+            "4 reports · 1 matching · 1 partially matching · 1 not stated or not comparable · "
+            "1 different"
         )
 
     def test_group_heading_counts_reports(self) -> None:
@@ -1196,7 +1541,7 @@ class TestSummaries:
         assert [ui.group_heading(g) for g in found.groups] == [
             "Matching reported conditions (1)",
             "Partially matching conditions (1)",
-            "Conditions not stated (1)",
+            "Conditions not stated or not comparable (1)",
             "Different reported conditions (1)",
         ]
 
@@ -1208,13 +1553,14 @@ class TestSummaries:
         strict = QUERY_6B_POTS.model_copy(update={"only_stated_matches": True})
         found = search_of(sample_views(), strict)
         assert ui.strict_note(found, strict) == (
-            "2 reports hidden because their conditions were not stated or differ."
+            "2 reports hidden because their conditions were not stated, not comparable or differ."
         )
 
     def test_strict_note_previews_what_would_be_hidden(self) -> None:
         found = search_of(sample_views(), QUERY_6B_POTS)
         assert ui.strict_note(found, QUERY_6B_POTS) == (
-            "Ticking this would hide 2 reports whose conditions were not stated or differ."
+            "Ticking this would hide 2 reports whose conditions were not stated, not "
+            "comparable or differ."
         )
 
     def test_strict_note_without_selection(self) -> None:

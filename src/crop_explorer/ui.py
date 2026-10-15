@@ -8,8 +8,10 @@ shows (:func:`scope_banner`), which session keys the Clear button resets
 (:func:`reset_state_keys`), how results are paged (:func:`paging_fixes`), and which startup
 options and server addresses are accepted (:func:`parse_app_args`,
 :func:`is_loopback_address`). Wording follows SPEC §2 and §5: a condition that was not stated
-is never called a match, words that could not be mapped are shown as written, and reports are
-grouped by stated circumstances, never by variety quality.
+is never called a match, words that could not be mapped are shown as written, self-described
+conditions (summer heat, humidity, rainfall, season length) are quoted in the commenter's own words
+and never called different, and reports are grouped by stated circumstances, never by variety
+quality.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ from crop_explorer.vocab import (
     COMPARABLE_KEYS,
     KEY_LABELS,
     PROMINENT_KEYS,
+    SELF_DESCRIBED_KEYS,
     VIEWER_VALUES,
     ComparableKey,
     value_label,
@@ -172,6 +175,8 @@ WORD_JOINER: Final = "\u2060"
 _NOT_SET: Final = "Not set"
 _MORE_CONDITIONS: Final = "More conditions"
 _STRICT_CHECKBOX: Final = '"Only show stated matches"'
+_HIDDEN_CONDITIONS: Final = "not stated, not comparable or differ"
+"""What strict mode hides: the "not stated or not comparable" and "different" groups."""
 _STRICT_NEEDS_CONDITION: Final = (
     "Choose at least one growing condition first: until then nothing is hidden."
 )
@@ -197,10 +202,11 @@ _TIER_WORDS: Final = MappingProxyType(
     {
         "match": "matching",
         "partial": "partially matching",
-        "not_stated": "not stated",
+        "not_stated": "not stated or not comparable",
         "different": "different",
     }
 )
+"""Count-summary words, one per tier, echoing ``views.GROUP_TITLES``."""
 _UNSAFE_URL_CHARS: Final = frozenset("<>\"' \t\r\n")
 _BADGE_COLORS: Final[Mapping[ContextLabel, str]] = MappingProxyType(
     {
@@ -582,9 +588,15 @@ def chip_is_active(chip: QuickChip, state: Mapping[str, Any]) -> bool:
     return all(state.get(key) == value for key, value in chip_state(chip).items())
 
 
+_CHIP_LABELS: Final[Mapping[str, str]] = MappingProxyType(
+    {"humid": "humid conditions", "rainy": "rainy conditions"}
+)
+"""Tooltip wording for values whose short label is a bare adjective ("describe humid ...")."""
+
+
 def _condition_value_label(condition: str, value: str) -> str:
     _state_key(condition)  # validates that the condition is a garden condition
-    return value_label(cast("EnvKey", condition), value)
+    return _CHIP_LABELS.get(value) or value_label(cast("EnvKey", condition), value)
 
 
 def _or_join(items: Sequence[str]) -> str:
@@ -593,6 +605,13 @@ def _or_join(items: Sequence[str]) -> str:
 
 def _verb(n: int, singular: str, plural: str) -> str:
     return singular if n == 1 else plural
+
+
+def _chip_verbs(described: bool, single: bool) -> tuple[str, str]:
+    """Return a tooltip's verb (singular, plural): self-reports are described, not stated."""
+    if described:
+        return ("describes", "describe")
+    return ("states", "state") if single else ("mentions", "mention")
 
 
 def chip_help(chip: QuickChip, support: ChipSupport) -> str:
@@ -609,7 +628,11 @@ def chip_help(chip: QuickChip, support: ChipSupport) -> str:
     -------
     str
         ``"Set this condition (8 reports state it)"`` for one condition; for several, both
-        counts, e.g. ``"6 reports mention hot summers or humid; 2 mention both"``.
+        counts, e.g. ``"6 reports mention containers or greenhouse / tunnel; 2 mention both"``.
+        A chip with a self-described condition (``vocab.SELF_DESCRIBED_KEYS``) counts reports
+        that describe it in their own, uncalibrated words, and says so: ``"6 reports describe
+        hot summers or humid conditions in their own words; 2 describe both"``, ``"Set this
+        condition (4 reports describe it in their own words)"``.
 
     Raises
     ------
@@ -617,15 +640,17 @@ def chip_help(chip: QuickChip, support: ChipSupport) -> str:
         If a chip condition is not a garden condition.
     """
     labels = [_condition_value_label(key, value) for key, value in chip.conditions.items()]
+    described = any(key in SELF_DESCRIBED_KEYS for key in chip.conditions)
+    singular, plural = _chip_verbs(described, single=len(labels) == 1)
+    suffix = " in their own words" if described else ""
     n_any, n_all = support.n_any, support.n_all
     if len(labels) == 1:
-        return (
-            f"Set this condition ({_plural(n_any, 'report')} {_verb(n_any, 'states', 'state')} it)"
-        )
+        counted = f"{_plural(n_any, 'report')} {_verb(n_any, singular, plural)} it{suffix}"
+        return f"Set this condition ({counted})"
     every = "both" if len(labels) == 2 else "all of them"
     return (
-        f"{_plural(n_any, 'report')} {_verb(n_any, 'mentions', 'mention')} {_or_join(labels)}; "
-        f"{n_all} {_verb(n_all, 'mentions', 'mention')} {every}"
+        f"{_plural(n_any, 'report')} {_verb(n_any, singular, plural)} {_or_join(labels)}{suffix}; "
+        f"{n_all} {_verb(n_all, singular, plural)} {every}"
     )
 
 
@@ -688,11 +713,11 @@ def strict_note(result: SearchResult, query: SearchQuery) -> str | None:
         return _strict_note_without_conditions(query)
     if query.only_stated_matches:
         hidden = _plural(result.n_hidden_by_strict, "report")
-        return f"{hidden} hidden because their conditions were not stated or differ."
+        return f"{hidden} hidden because their conditions were {_HIDDEN_CONDITIONS}."
     n_hideable = result.tier_counts["not_stated"] + result.tier_counts["different"]
     return (
         f"Ticking this would hide {_plural(n_hideable, 'report')} whose conditions "
-        "were not stated or differ."
+        f"were {_HIDDEN_CONDITIONS}."
     )
 
 
@@ -823,11 +848,20 @@ def _best(matches: Sequence[MentionMatch]) -> MentionMatch | None:
 _RELEVANT: Final = "Relevant"
 _NOT_STATED: Final = "Not stated"
 _DIFFERENT: Final = "Different"
+_OWN_WORDS: Final = "In their own words"
+_COUNTED: Final = "own words, counted"
+"""Part holding the own-words lines of self-described conditions that match (or imprecisely)."""
+_NOT_COUNTED: Final = "own words, not counted"
+"""Part holding the own-words lines described differently or not comparable."""
+_COUNTED_STATUSES: Final[frozenset[MatchStatus]] = frozenset({"match", "imprecise"})
+_OWN_WORDS_NOTES: Final[Mapping[str, str]] = MappingProxyType(
+    {"described_differently": "not counted as a difference", "not_stated": "not comparable"}
+)
 _TIER_PARTS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
-        "match": (_RELEVANT,),
-        "partial": (_RELEVANT,),
-        "not_stated": (_NOT_STATED, WRITTEN_LABEL),
+        "match": (_RELEVANT, _COUNTED),
+        "partial": (_RELEVANT, _COUNTED),
+        "not_stated": (_NOT_STATED, WRITTEN_LABEL, _NOT_COUNTED),
         "different": (_DIFFERENT,),
     }
 )
@@ -884,39 +918,103 @@ def _different_item(dimension: DimensionMatch) -> str:
     return f"{_labels(dimension, 'different')} (you: {_viewer_label(dimension)})"
 
 
-def _match_parts(match: MatchResult) -> dict[str, str]:
-    """Return the non-empty condition-line bodies of one mention's match, keyed by lead."""
-    dims = match.dimensions
+def _in_own_words(dimension: DimensionMatch) -> bool:
+    """Whether a dimension is a self-described condition the commenter gave a comparable value.
+
+    Such a dimension gets its own line in the commenter's words instead of a place in
+    "Relevant", "Not stated" or "Different" (``vocab.SELF_DESCRIBED_KEYS``).
+    """
+    return dimension.key in SELF_DESCRIBED_KEYS and bool(dimension.reported_values)
+
+
+def _typographic(phrase: str) -> str:
+    """Quote untrusted words in typographic quotes, with runs of whitespace collapsed."""
+    return f"“{' '.join(phrase.split())}”"
+
+
+def _own_words_quotes(dimension: DimensionMatch) -> str:
+    """Quote, once each, the words behind the reported values that produced the status."""
+    values = values_with(dimension, dimension.status)
+    words = (f.value_as_written for f in dimension.evidence if f.normalized_value in values)
+    return " / ".join(_unique(_typographic(phrase) for phrase in words))
+
+
+def _own_words_reading(dimension: DimensionMatch) -> str:
+    """Say how the words were read: counted as the viewer's value, or their label beside it."""
+    if dimension.status == "match":
+        return f"counted as {_viewer_label(dimension)}"
+    return f"{_labels(dimension, dimension.status)}; you chose {_viewer_label(dimension)}"
+
+
+def _own_words_region(facts: Iterable[FactView]) -> str:
+    """Name the regions a mention's applicable facts state (unmapped ones as written).
+
+    Empty when none is stated: the card's own region line already says so.
+    """
+    regions = [fact for fact in facts if fact.key == "region"]
+    names = _unique(REGION_NAMES[code] for f in regions if (code := f.normalized_value))
+    unmapped = _unique(
+        f"{f.value_as_written} (not mapped)" for f in regions if not f.normalized_value
+    )
+    return ", ".join(names or unmapped)
+
+
+def _own_words_line(dimension: DimensionMatch, region: str) -> str:
+    """Quote a self-described condition in the commenter's words, how it was read and where."""
+    note = _OWN_WORDS_NOTES.get(dimension.status, "")
+    parts = (f"{_own_words_quotes(dimension)} ({_own_words_reading(dimension)})", note, region)
+    return f"{_OWN_WORDS}: {_ITEM_SEPARATOR.join(part for part in parts if part)}"
+
+
+def _own_words_parts(
+    dims: Sequence[DimensionMatch], facts: Iterable[FactView]
+) -> dict[str, tuple[str, ...]]:
+    """Return the own-words lines that count (match, imprecise), then those that do not."""
+    region = _own_words_region(facts)
+    counted = tuple(_own_words_line(d, region) for d in dims if d.status in _COUNTED_STATUSES)
+    others = tuple(_own_words_line(d, region) for d in dims if d.status not in _COUNTED_STATUSES)
+    return {part: lines for part, lines in ((_COUNTED, counted), (_NOT_COUNTED, others)) if lines}
+
+
+def _hard_parts(dims: Sequence[DimensionMatch]) -> dict[str, tuple[str, ...]]:
+    """Return the non-empty "Relevant", "Not stated", written and "Different" lines by lead."""
     unstated = [d for d in dims if d.status == "not_stated"]
     parts = {
-        _RELEVANT: [_relevant_item(d) for d in dims if d.status in ("match", "imprecise")],
+        _RELEVANT: [_relevant_item(d) for d in dims if d.status in _COUNTED_STATUSES],
         _NOT_STATED: [_not_stated_item(d) for d in unstated if not _only_written(d)],
         WRITTEN_LABEL: [_written_item(d) for d in unstated if _only_written(d)],
         _DIFFERENT: [_different_item(d) for d in dims if d.status == "different"],
     }
     separators = {_NOT_STATED: ", "}
     return {
-        lead: separators.get(lead, _ITEM_SEPARATOR).join(items)
+        lead: (f"{lead}: {separators.get(lead, _ITEM_SEPARATOR).join(items)}",)
         for lead, items in parts.items()
         if items
     }
 
 
-def _match_lines(match: MatchResult) -> tuple[str, ...]:
-    return tuple(f"{lead}: {body}" for lead, body in _match_parts(match).items())
+def _match_parts(match: MatchResult, facts: Iterable[FactView]) -> dict[str, tuple[str, ...]]:
+    """Return one mention's non-empty condition lines, keyed by part, in display order."""
+    own = [d for d in match.dimensions if _in_own_words(d)]
+    hard = [d for d in match.dimensions if not _in_own_words(d)]
+    return {**_hard_parts(hard), **_own_words_parts(own, facts)}
 
 
-def _tier_line(match: MatchResult) -> str:
+def _match_lines(match: MatchResult, facts: Iterable[FactView]) -> tuple[str, ...]:
+    return tuple(line for lines in _match_parts(match, facts).values() for line in lines)
+
+
+def _tier_line(match: MatchResult, facts: Iterable[FactView]) -> str:
     """Return the one condition line that explains a mention's tier."""
-    parts = _match_parts(match)
-    lead = next(lead for lead in _TIER_PARTS[match.tier] if lead in parts)
-    return f"{lead}: {parts[lead]}"
+    parts = _match_parts(match, facts)
+    part = next(part for part in _TIER_PARTS[match.tier] if part in parts)
+    return parts[part][0]
 
 
 def _other_mention_lines(matches: Sequence[MentionMatch], best: MatchResult) -> tuple[str, ...]:
     """State the tier line of every other relevant mention whose tier differs from the best."""
     return tuple(
-        f"{_mention_label(m.mention)}: {_tier_line(m.match)}"
+        f"{_mention_label(m.mention)}: {_tier_line(m.match, m.facts)}"
         for m in matches
         if m.match is not None and m.match.tier != best.tier
     )
@@ -973,7 +1071,7 @@ def _reported_lines(matches: Sequence[MentionMatch]) -> tuple[str, ...]:
 
 
 def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, ...]:
-    """Explain a card's conditions as "Relevant", "Not stated" and "Different" lines.
+    """Explain a card's conditions as "Relevant", "Not stated", "Different" and own-words lines.
 
     Parameters
     ----------
@@ -989,11 +1087,21 @@ def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, 
         comparable conditions selected: the best relevant mention's ``Relevant: ...``
         (matches, and imprecise matches with both values), ``Not stated: ...``,
         ``Mentioned as written, not comparable: ...`` (display-only phrases, quoted) and
-        ``Different: ...`` lines, each only when non-empty and each naming only the reported
-        values that produced its status. With several relevant mentions these are led by
-        ``Shown for X (1 of n mentions)`` and followed by one ``"Y: <tier line>"`` per other
-        mention whose tier differs. Without a selection: the conditions each mention reported,
-        then display-only phrases, or ``"Growing conditions not stated"``.
+        ``Different: ...`` lines for zone, method, setting, sun, soil and watering, each only
+        when non-empty and each naming only the reported values that produced its status;
+        then one ``In their own words: ...`` line per self-described condition
+        (``vocab.SELF_DESCRIBED_KEYS``) with a reported value, those that count first:
+        ``In their own words: “brutal and muggy” (counted as humid) · Connecticut``,
+        ``In their own words: “that July heat wave” (a heatwave; you chose hot summers) ·
+        Texas``, ``In their own words: “mild summers” (mild summers; you chose hot summers) ·
+        not counted as a difference`` (``· not comparable`` for a
+        heatwave against mild or cool summers). Those words are the facts'
+        ``value_as_written`` behind the values that produced the status (untrusted text,
+        deduplicated, whitespace collapsed); the region is that mention's own. With several
+        relevant mentions these are led by ``Shown for X (1 of n mentions)`` and followed by
+        one ``"Y: <tier line>"`` per other mention whose tier differs. Without a selection:
+        the conditions each mention reported, then display-only phrases, or ``"Growing
+        conditions not stated"``.
     """
     if result.comment.parse_status is None:
         return (NOT_ANALYSED_LINE,)
@@ -1003,9 +1111,9 @@ def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, 
     if match is None:
         return _reported_lines(matches)
     if best is None or len(matches) == 1:
-        return _match_lines(match)
+        return _match_lines(match, best.facts if best is not None else ())
     lead = f"Shown for {_mention_label(best.mention)} (1 of {len(matches)} mentions)"
-    return (lead, *_match_lines(match), *_other_mention_lines(matches, match))
+    return (lead, *_match_lines(match, best.facts), *_other_mention_lines(matches, match))
 
 
 def _shows_reported_conditions(result: CommentResult) -> bool:

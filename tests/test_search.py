@@ -730,7 +730,9 @@ class TestExplainableMatch:
             GROUP_TITLES[key] for key in ("match", "partial", "not_stated", "different")
         ]
         full = card(result, "full")
-        assert full.explanation == "Matches your zone 6b, containers and humid."
+        assert (
+            full.explanation == "Matches your zone 6b and containers; they described it as humid."
+        )
         dimensions = match_of(full.mention_matches[0]).dimensions
         assert [(d.key, d.status) for d in dimensions] == [
             ("zone", "match"),
@@ -745,8 +747,9 @@ class TestExplainableMatch:
         )
         assert card(result, "unknown").explanation == NOTHING_STATED
         assert card(result, "different").explanation == (
-            "Different: in the ground (you: containers), dry air (you: humid). "
-            "Hardiness zone not stated."
+            "Different: in the ground (you: containers). Hardiness zone not stated. "
+            "They described the air as dry (you chose humid); self-descriptions aren't counted "
+            "as a mismatch."
         )
 
     def test_coarse_zone_is_never_elevated_to_a_full_match(self) -> None:
@@ -758,6 +761,44 @@ class TestExplainableMatch:
     def test_tier_counts_count_every_candidate_once(self) -> None:
         result = build_result(self.spec_example(), SPEC_GARDEN)
         assert result.tier_counts == {"match": 1, "partial": 1, "not_stated": 1, "different": 1}
+
+
+class TestSelfDescribedConditions:
+    """Summer heat, humidity, rainfall and season length are the gardener's own, uncalibrated
+    words (``vocab.SELF_DESCRIBED_KEYS``): one unlike the viewer's is never "different"."""
+
+    NOT_COMPARABLE_TITLE = "Conditions not stated or not comparable"
+
+    def test_a_description_unlike_yours_is_not_comparable_rather_than_different(self) -> None:
+        result = build_result([reporting("humid", HUMID)], ask(humidity="dry_air"))
+        assert layout(result) == {"not_stated": ["humid"]}
+        (group,) = result.groups
+        assert (group.title, group.collapsed_by_default) == (self.NOT_COMPARABLE_TITLE, False)
+        assert card(result, "humid").explanation == (
+            "They described it as humid (you chose dry air); self-descriptions aren't counted "
+            "as a mismatch."
+        )
+        assert result.tier_counts == {**ALL_TIERS_ZERO, "not_stated": 1}
+
+    def test_strict_mode_hides_a_report_whose_only_condition_was_described_differently(
+        self,
+    ) -> None:
+        strict = build_result(
+            [reporting("humid", HUMID)], ask(humidity="dry_air", only_stated=True)
+        )
+        assert (strict.groups, strict.n_hidden_by_strict) == ((), 1)
+
+    def test_a_description_unlike_yours_beside_a_match_is_partial(self) -> None:
+        result = build_result(
+            [reporting("pots", CONTAINER, HUMID)], ask(method="container", humidity="dry_air")
+        )
+        assert layout(result) == {"partial": ["pots"]}
+
+    def test_a_checkable_difference_still_makes_a_report_different(self) -> None:
+        result = build_result(
+            [reporting("ground", IN_GROUND, HUMID)], ask(method="container", humidity="dry_air")
+        )
+        assert layout(result) == {"different": ["ground"]}
 
 
 class TestDifferentPractice:
@@ -1704,6 +1745,47 @@ class TestSyntheticFixtures:
     ) -> None:
         result_card = card(search(synthetic, "public", EXAMPLE_GARDEN, NOW), comment_id)
         assert (result_card.tier, result_card.region_status) == (tier, region_status)
+
+    @pytest.mark.parametrize(
+        ("garden", "described_differently", "matching"),
+        [
+            (
+                {"humidity": "dry_air"},
+                {"syn-0001", "syn-0003", "syn-0006", "syn-0041", "syn-0052"},
+                {"syn-0019"},
+            ),
+            ({"summer_heat": "mild"}, {"syn-0001", "syn-0041", "syn-0043"}, set()),
+            ({"summer_heat": "cool"}, {"syn-0001", "syn-0041", "syn-0043"}, set()),
+            ({"precipitation": "dry_season"}, {"syn-0015", "syn-0052"}, {"syn-0051"}),
+            ({"precipitation": "rainy"}, {"syn-0051"}, {"syn-0015", "syn-0052"}),
+            (
+                {"season_length": "long_season"},
+                {"syn-0021", "syn-0023", "syn-0038", "syn-0040"},
+                set(),
+            ),
+            ({"summer_heat": "hot", "humidity": "humid"}, {"syn-0019"}, {"syn-0001", "syn-0041"}),
+        ],
+        ids=["dry-air", "mild", "cool", "dry-season", "rainy", "long-season", "hot-and-humid"],
+    )
+    def test_self_descriptions_unlike_yours_leave_the_different_group(
+        self,
+        synthetic: sqlite3.Connection,
+        garden: dict[str, str],
+        described_differently: set[str],
+        matching: set[str],
+    ) -> None:
+        """Reports that called their summers hot, the air humid, it rainy or the season short
+        are not comparable with the opposite choice, never "different"."""
+        result = search(synthetic, "public", ask(**garden), NOW)
+        groups = layout(result)
+        assert "different" not in groups
+        assert set(groups.get("match", ())) == matching
+        described = {
+            r.comment.comment_id: r.tier
+            for r in shown(result)
+            if any(match_of(mm).keys_with("described_differently") for mm in r.mention_matches)
+        }
+        assert described == dict.fromkeys(described_differently, "not_stated")
 
     def test_full_matches_put_same_region_first_and_ignore_outcomes(
         self, synthetic: sqlite3.Connection

@@ -4,10 +4,11 @@
 database: the synthetic demo fixtures with their extractions, plus one ``cleared`` comment with a
 permalink. Headless Chromium then checks, at 390x844, that the page never scrolls sideways, that
 the search box and the always-visible condition selects are on screen, that choosing a zone
-regroups the reports, that Clear restores the first-load labels (never "Choose an option"), and
-that a source reference opens the comment's permalink; then a 1280x900 smoke test. Marked
-``browser`` (deselect with ``-m "not browser"``); CI installs Chromium with
-``uv run playwright install --with-deps chromium``.
+regroups the reports, that Clear restores the first-load labels (never "Choose an option"),
+that a source reference opens the comment's permalink, and that the Hot & humid chip's "In their
+own words" condition lines fit; then a 1280x900 smoke test. Marked ``browser`` (deselect with
+``-m "not browser"``); CI installs Chromium with ``uv run playwright install --with-deps
+chromium``.
 """
 
 from __future__ import annotations
@@ -265,6 +266,17 @@ def test_phone_width_more_conditions_are_one_tap_away(browser: Browser, viewer_u
     page.get_by_text("More conditions", exact=True).click()
     expect(combobox(page, "Summer heat")).to_be_visible()
     assert_no_horizontal_overflow(page)
+
+
+def test_phone_width_own_words_lines_fit(browser: Browser, viewer_url: str) -> None:
+    """The Hot & humid chip's cards quote the commenters' own words without sideways scroll."""
+    page = open_viewer(browser, viewer_url, 390, 844)
+    page.get_by_role("button", name="Hot & humid", exact=True).click()
+    expect(heading(page, re.compile(r"^Matching reported conditions \(\d+\)$"))).to_be_visible()
+    own_words = page.get_by_text(re.compile(r"In their own words.*counted as hot summers"))
+    expect(own_words.first).to_be_visible()
+    assert_no_horizontal_overflow(page)
+    assert_no_exception(page)
 
 
 def test_desktop_smoke(browser: Browser, viewer_url: str) -> None:

@@ -19,7 +19,10 @@ from crop_explorer.schemas import (
 from crop_explorer.vocab import COMPARABLE_KEYS, VIEWER_VALUES, ComparableKey
 
 ViewerScope = Literal["public", "private"]
-MatchStatus = Literal["match", "imprecise", "not_stated", "different"]
+MatchStatus = Literal["match", "imprecise", "not_stated", "described_differently", "different"]
+"""How one selected dimension compares with a report. ``described_differently`` is an opposite
+value of a self-described key (``vocab.SELF_DESCRIBED_KEYS``: the gardener's own, uncalibrated
+words such as "hot" or "humid"); unlike ``different`` it is never counted as a mismatch."""
 Tier = Literal["match", "partial", "not_stated", "different"]
 RegionStatus = Literal["same", "same_country", "elsewhere", "not_stated"]
 """How a report's region relates to the viewer's: ``same`` code, ``same_country`` (the viewer
@@ -35,7 +38,7 @@ GROUP_TITLES: Final = MappingProxyType(
         "all": "Reports",
         "match": "Matching reported conditions",
         "partial": "Partially matching conditions",
-        "not_stated": "Conditions not stated",
+        "not_stated": "Conditions not stated or not comparable",
         "different": "Different reported conditions",
     }
 )

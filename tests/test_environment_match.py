@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any, get_args
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from crop_explorer.environment_match import (
@@ -32,6 +32,8 @@ from crop_explorer.views import (
 from crop_explorer.vocab import (
     CATEGORICAL_VALUES,
     COMPARABLE_KEYS,
+    DESCRIBED_AS,
+    SELF_DESCRIBED_KEYS,
     VIEWER_VALUES,
     ZONE_VALUES,
     ComparableKey,
@@ -109,6 +111,13 @@ SPEC_GARDEN = GardenContext(zone="6b", method="container", humidity="humid")
         (["different"], "different"),
         (["match", "match", "different"], "different"),
         (["not_stated", "different"], "different"),
+        (["described_differently"], "not_stated"),
+        (["described_differently", "described_differently"], "not_stated"),
+        (["described_differently", "not_stated"], "not_stated"),
+        (["match", "described_differently"], "partial"),
+        (["imprecise", "described_differently"], "partial"),
+        (["match", "match", "described_differently"], "partial"),
+        (["described_differently", "different"], "different"),
     ],
 )
 def test_tier_of_follows_contract(given_statuses: list[MatchStatus], expected: str) -> None:
@@ -267,8 +276,8 @@ def test_zone_imprecise_beats_different() -> None:
     ("reported", "viewer", "expected"),
     [
         ("hot", "hot", "match"),
-        ("mild", "hot", "different"),
-        ("cool", "mild", "different"),
+        ("mild", "hot", "described_differently"),
+        ("cool", "mild", "described_differently"),
         ("heatwave", "hot", "imprecise"),
         ("heatwave", "cool", "not_stated"),
         ("heatwave", "mild", "not_stated"),
@@ -282,9 +291,20 @@ def test_summer_heat_heatwave_is_an_event(
     )
 
 
-def test_ignored_heatwave_does_not_mask_a_difference() -> None:
+@pytest.mark.parametrize(
+    ("viewer", "tier"),
+    [("hot", "partial"), ("mild", "not_stated"), ("cool", "not_stated")],
+)
+def test_heatwave_tiers_are_unchanged(viewer: str, tier: str) -> None:
+    """A heatwave stays an event: imprecise for hot summers, not comparable with mild/cool."""
+    result = match_context(GardenContext(summer_heat=viewer), [fact("summer_heat", "heatwave")])
+    assert result is not None
+    assert result.tier == tier
+
+
+def test_ignored_heatwave_does_not_mask_a_disagreement() -> None:
     facts = [fact("summer_heat", "heatwave"), fact("summer_heat", "mild")]
-    assert compare_dimension("summer_heat", "cool", facts).status == "different"
+    assert compare_dimension("summer_heat", "cool", facts).status == "described_differently"
 
 
 MILD_AND_HEATWAVE = [fact("summer_heat", "mild"), fact("summer_heat", "heatwave")]
@@ -295,11 +315,18 @@ HOT_AND_HEATWAVE = [fact("summer_heat", "hot"), fact("summer_heat", "heatwave")]
     ("facts", "viewer", "status", "expected"),
     [
         pytest.param(MILD_AND_HEATWAVE, "hot", "imprecise", ("heatwave",), id="hot-imprecise"),
-        pytest.param(MILD_AND_HEATWAVE, "hot", "different", ("mild",), id="hot-different"),
+        pytest.param(
+            MILD_AND_HEATWAVE, "hot", "described_differently", ("mild",), id="hot-described"
+        ),
+        pytest.param(MILD_AND_HEATWAVE, "hot", "different", (), id="hot-never-different"),
         pytest.param(MILD_AND_HEATWAVE, "hot", "match", (), id="hot-match"),
-        pytest.param(MILD_AND_HEATWAVE, "cool", "different", ("mild",), id="cool-different"),
+        pytest.param(
+            MILD_AND_HEATWAVE, "cool", "described_differently", ("mild",), id="cool-described"
+        ),
         pytest.param(MILD_AND_HEATWAVE, "cool", "not_stated", ("heatwave",), id="cool-ignored"),
-        pytest.param(HOT_AND_HEATWAVE, "mild", "different", ("hot",), id="mild-different"),
+        pytest.param(
+            HOT_AND_HEATWAVE, "mild", "described_differently", ("hot",), id="mild-described"
+        ),
         pytest.param(HOT_AND_HEATWAVE, "mild", "not_stated", ("heatwave",), id="mild-ignored"),
         pytest.param(HOT_AND_HEATWAVE, "hot", "match", ("hot",), id="hot-match-only"),
         pytest.param(
@@ -307,6 +334,13 @@ HOT_AND_HEATWAVE = [fact("summer_heat", "hot"), fact("summer_heat", "heatwave")]
         ),
         pytest.param(
             [fact("zone", "7a"), fact("zone", "6")], "6b", "different", ("7a",), id="zone-other"
+        ),
+        pytest.param(
+            [fact("zone", "7a"), fact("zone", "6")],
+            "6b",
+            "described_differently",
+            (),
+            id="zone-never-described",
         ),
     ],
 )
@@ -330,6 +364,228 @@ def test_values_with_rejects_an_unknown_status() -> None:
     bogus: Any = "great"
     with pytest.raises(ValueError, match="great"):
         values_with(dimension, bogus)
+
+
+# --------------------------------------------------------------------------- self-described keys
+
+HARD_KEYS: tuple[ComparableKey, ...] = tuple(
+    k for k in COMPARABLE_KEYS if k not in SELF_DESCRIBED_KEYS
+)
+
+SELF_DESCRIBED_DISAGREEMENTS = [
+    pytest.param(key, viewer, reported, id=f"{key}-{reported}-vs-{viewer}")
+    for key in SELF_DESCRIBED_KEYS
+    for viewer in VIEWER_VALUES[key]
+    for reported in VIEWER_VALUES[key]
+    if reported != viewer
+]
+"""Every opposite value of a self-described key (a heatwave is an event, never opposite)."""
+
+HARD_DISAGREEMENTS = [
+    pytest.param(key, viewer, reported, id=f"{key}-{reported}-vs-{viewer}")
+    for key in HARD_KEYS
+    if key != "zone"
+    for viewer in VIEWER_VALUES[key]
+    for reported in VIEWER_VALUES[key]
+    if reported != viewer
+]
+
+
+def test_self_described_keys_are_the_uncalibrated_climate_words() -> None:
+    assert SELF_DESCRIBED_KEYS == ("summer_heat", "humidity", "precipitation", "season_length")
+    assert HARD_KEYS == ("zone", "method", "shelter", "sun", "soil", "irrigation")
+    assert "region" not in set(SELF_DESCRIBED_KEYS)
+
+
+def test_described_as_phrases_cover_every_comparable_self_described_value() -> None:
+    selectable = {value for key in SELF_DESCRIBED_KEYS for value in VIEWER_VALUES[key]}
+    assert set(DESCRIBED_AS) == selectable
+    assert all(subject and adjective for subject, adjective in DESCRIBED_AS.values())
+
+
+@pytest.mark.parametrize(("key", "viewer", "reported"), SELF_DESCRIBED_DISAGREEMENTS)
+def test_self_described_opposite_is_described_differently_never_different(
+    key: ComparableKey, viewer: str, reported: str
+) -> None:
+    dimension = compare_dimension(key, viewer, [fact(key, reported)])
+    assert dimension.status == "described_differently"
+    assert dimension.reported_values == (reported,)
+    assert values_with(dimension, "described_differently") == (reported,)
+    assert values_with(dimension, "different") == ()
+    result = match_context(GardenContext.model_validate({key: viewer}), [fact(key, reported)])
+    assert result is not None
+    assert result.tier == "not_stated"
+    text = explain(result)
+    assert "different" not in text.casefold()
+    assert "you chose" in text
+
+
+@pytest.mark.parametrize(("key", "viewer", "reported"), SELF_DESCRIBED_DISAGREEMENTS)
+def test_self_described_opposite_next_to_a_match_is_partial(
+    key: ComparableKey, viewer: str, reported: str
+) -> None:
+    garden = GardenContext.model_validate({"method": "container", key: viewer})
+    result = match_context(garden, [fact("method", "container"), fact(key, reported)])
+    assert result is not None
+    assert result.tier == "partial"
+    assert statuses(result) == {"method": "match", key: "described_differently"}
+
+
+@pytest.mark.parametrize(("key", "viewer", "reported"), HARD_DISAGREEMENTS)
+def test_hard_key_opposite_stays_different(key: ComparableKey, viewer: str, reported: str) -> None:
+    result = match_context(GardenContext.model_validate({key: viewer}), [fact(key, reported)])
+    assert result is not None
+    assert statuses(result) == {key: "different"}
+    assert result.tier == "different"
+    assert explain(result).startswith("Different: ")
+
+
+def test_hard_zone_difference_stays_different() -> None:
+    result = match_context(GardenContext(zone="6b", humidity="humid"), [fact("zone", "7a")])
+    assert result is not None
+    assert result.tier == "different"
+    assert explain(result) == "Different: zone 7a (you: zone 6b). Humidity not stated."
+
+
+@pytest.mark.parametrize(
+    ("key", "viewer", "reported", "explanation"),
+    [
+        pytest.param(
+            "summer_heat",
+            "hot",
+            "mild",
+            "They described summers as mild (you chose hot summers); "
+            "self-descriptions aren't counted as a mismatch.",
+            id="summer-heat",
+        ),
+        pytest.param(
+            "humidity",
+            "humid",
+            "dry_air",
+            "They described the air as dry (you chose humid); "
+            "self-descriptions aren't counted as a mismatch.",
+            id="humidity",
+        ),
+        pytest.param(
+            "precipitation",
+            "rainy",
+            "dry_season",
+            "They described it as having a dry spell or dry season (you chose rainy); "
+            "self-descriptions aren't counted as a mismatch.",
+            id="precipitation",
+        ),
+        pytest.param(
+            "season_length",
+            "short_season",
+            "long_season",
+            "They described the season as long (you chose short season); "
+            "self-descriptions aren't counted as a mismatch.",
+            id="season-length",
+        ),
+    ],
+)
+def test_explain_described_differently_per_key(
+    key: ComparableKey, viewer: str, reported: str, explanation: str
+) -> None:
+    result = match_context(GardenContext.model_validate({key: viewer}), [fact(key, reported)])
+    assert explain(result) == explanation
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "explanation"),
+    [
+        pytest.param("summer_heat", "hot", "They described summers as hot.", id="summer-heat"),
+        pytest.param("humidity", "humid", "They described it as humid.", id="humidity"),
+        pytest.param(
+            "precipitation",
+            "dry_season",
+            "They described it as having a dry spell or dry season.",
+            id="precipitation",
+        ),
+        pytest.param(
+            "season_length", "short_season", "They described the season as short.", id="season"
+        ),
+    ],
+)
+def test_explain_matched_self_described_key_is_what_they_said(
+    key: ComparableKey, value: str, explanation: str
+) -> None:
+    result = match_context(GardenContext.model_validate({key: value}), [fact(key, value)])
+    assert result is not None
+    assert result.tier == "match"
+    assert explain(result) == explanation
+
+
+def test_explain_matched_hard_and_self_described_keys() -> None:
+    """Item 4: hard keys "match"; a self-described key is what the gardener said."""
+    facts = [fact("zone", "6b"), fact("method", "container"), fact("humidity", "humid")]
+    assert explain(match_context(SPEC_GARDEN, facts)) == (
+        "Matches your zone 6b and containers; they described it as humid."
+    )
+
+
+def test_explain_groups_matched_descriptions_by_subject() -> None:
+    garden = GardenContext(summer_heat="hot", humidity="humid", precipitation="rainy")
+    facts = [fact("summer_heat", "hot"), fact("humidity", "humid"), fact("precipitation", "rainy")]
+    result = match_context(garden, facts)
+    assert result is not None
+    assert result.tier == "match"
+    assert explain(result) == "They described summers as hot and it as humid and rainy."
+
+
+def test_explain_mixes_matches_descriptions_and_unknowns() -> None:
+    garden = GardenContext(
+        zone="6b", summer_heat="hot", humidity="humid", season_length="short_season"
+    )
+    facts = [fact("zone", "6b"), fact("summer_heat", "hot"), fact("humidity", "dry_air")]
+    result = match_context(garden, facts)
+    assert result is not None
+    assert result.tier == "partial"
+    assert explain(result) == (
+        "Matches your zone 6b; they described summers as hot; season length not stated. "
+        "They described the air as dry (you chose humid); "
+        "self-descriptions aren't counted as a mismatch."
+    )
+
+
+def test_explain_several_described_differently_values_and_keys() -> None:
+    one_key = match_context(
+        GardenContext(summer_heat="hot"),
+        [fact("summer_heat", "mild"), fact("summer_heat", "cool")],
+    )
+    assert explain(one_key) == (
+        "They described summers as mild and cool (you chose hot summers); "
+        "self-descriptions aren't counted as a mismatch."
+    )
+    garden = GardenContext(summer_heat="hot", season_length="short_season")
+    two_keys = match_context(
+        garden, [fact("summer_heat", "mild"), fact("season_length", "long_season")]
+    )
+    assert explain(two_keys) == (
+        "They described summers as mild (you chose hot summers) and the season as long "
+        "(you chose short season); self-descriptions aren't counted as a mismatch."
+    )
+
+
+def test_explain_hard_difference_and_self_description_are_separate_sentences() -> None:
+    garden = GardenContext(method="container", summer_heat="hot")
+    facts = [fact("method", "in_ground"), fact("summer_heat", "mild")]
+    result = match_context(garden, facts)
+    assert result is not None
+    assert result.tier == "different"
+    assert explain(result) == (
+        "Different: in the ground (you: containers). "
+        "They described summers as mild (you chose hot summers); "
+        "self-descriptions aren't counted as a mismatch."
+    )
+
+
+def test_explain_heatwave_next_to_a_matched_description() -> None:
+    garden = GardenContext(summer_heat="hot", humidity="humid")
+    result = match_context(garden, [fact("summer_heat", "heatwave"), fact("humidity", "humid")])
+    assert result is not None
+    assert result.tier == "partial"
+    assert explain(result) == "They described it as humid; a heatwave reported (you: hot summers)."
 
 
 def test_compare_dimension_rejects_non_comparable_key() -> None:
@@ -492,7 +748,7 @@ def test_outcome_and_topic_words_never_influence_tier() -> None:
                 fact("humidity", "humid", written="muggy summers"),
             ],
             "match",
-            "Matches your zone 6b, containers and humid.",
+            "Matches your zone 6b and containers; they described it as humid.",
             id="all-three-match",
         ),
         pytest.param(
@@ -513,8 +769,9 @@ def test_outcome_and_topic_words_never_influence_tier() -> None:
                 fact("humidity", "dry_air", written="dry conditions"),
             ],
             "different",
-            "Different: in the ground (you: containers), dry air (you: humid). "
-            "Hardiness zone not stated.",
+            "Different: in the ground (you: containers). Hardiness zone not stated. "
+            "They described the air as dry (you chose humid); "
+            "self-descriptions aren't counted as a mismatch.",
             id="ground-and-dry",
         ),
     ],
@@ -526,11 +783,13 @@ def test_spec_section_5_example_table(facts: list[FactView], tier: str, explanat
     assert explain(result) == explanation
 
 
-def test_spec_example_different_row_lists_both_differences() -> None:
+def test_spec_example_different_row_names_both_disagreements() -> None:
+    """The method differs; dry air is a self-description, shown but never a mismatch."""
     facts = [fact("method", "in_ground"), fact("humidity", "dry_air")]
     result = match_context(SPEC_GARDEN, facts)
     assert result is not None
-    assert result.keys_with("different") == ("method", "humidity")
+    assert result.keys_with("different") == ("method",)
+    assert result.keys_with("described_differently") == ("humidity",)
     assert result.keys_with("not_stated") == ("zone",)
 
 
@@ -631,7 +890,10 @@ def test_explain_values_with_their_own_status_only() -> None:
     hot = match_context(GardenContext(summer_heat="hot"), MILD_AND_HEATWAVE)
     assert explain(hot) == "A heatwave reported (you: hot summers)."
     mild = match_context(GardenContext(summer_heat="mild"), HOT_AND_HEATWAVE)
-    assert explain(mild) == "Different: hot summers (you: mild summers)."
+    assert explain(mild) == (
+        "They described summers as hot (you chose mild summers); "
+        "self-descriptions aren't counted as a mismatch."
+    )
 
 
 # --------------------------------------------------------------------------- region_status
@@ -947,12 +1209,14 @@ _PHRASES = st.text(alphabet="ab ;.\n\t", min_size=1, max_size=12).filter(str.str
 
 
 @given(garden=gardens(min_selected=1), facts=FACT_LISTS)
-def test_property_explain_is_one_or_two_sentences(
+def test_property_explain_is_one_to_three_sentences(
     garden: GardenContext, facts: list[FactView]
 ) -> None:
+    """A "Different:" sentence, a matches/unknowns sentence, a self-descriptions sentence."""
     text = explain(match_context(garden, _neutral_words(facts)))
     assert text[0].isupper()
     assert text.endswith(".")
+    assert text.count(". ") <= 2
     assert "  " not in text
     assert ";." not in text
 
@@ -988,6 +1252,64 @@ def test_property_values_with_partitions_the_reported_values(
         assert sorted(flat) == sorted(dimension.reported_values)
         if dimension.status != "not_stated":
             assert groups[dimension.status]
+
+
+SELF_DESCRIBED_FACT_LISTS = st.lists(fact_views(keys=SELF_DESCRIBED_KEYS), max_size=10)
+
+
+@given(garden=gardens(), facts=SELF_DESCRIBED_FACT_LISTS)
+def test_property_self_described_facts_alone_never_give_different(
+    garden: GardenContext, facts: list[FactView]
+) -> None:
+    """(a) Uncalibrated self-descriptions can never put a report in the Different group."""
+    result = match_context(garden, facts)
+    assert result is None or result.tier != "different"
+    assert result is None or not result.keys_with("different")
+    assert "different" not in explain(match_context(garden, _neutral_words(facts))).casefold()
+
+
+@given(base=gardens(min_selected=1), key=st.sampled_from(SELF_DESCRIBED_KEYS), data=st.data())
+def test_property_self_described_disagreement_turns_a_full_match_partial(
+    base: GardenContext, key: ComparableKey, data: st.DataObject
+) -> None:
+    """(b) Every other condition matches and one self-description differs → partial."""
+    others = {k: v for k, v in base.selected().items() if k != key}
+    assume(others)
+    viewer = data.draw(st.sampled_from(VIEWER_VALUES[key]))
+    reported = data.draw(st.sampled_from([v for v in VIEWER_VALUES[key] if v != viewer]))
+    garden = GardenContext.model_validate({"region": base.region, **others, key: viewer})
+    matching = [fact(k, v) for k, v in others.items()]
+    full = match_context(garden, [*matching, fact(key, viewer)])
+    assert full is not None
+    assert full.tier == "match"
+    disagreeing = data.draw(st.permutations([*matching, fact(key, reported)]))
+    result = match_context(garden, disagreeing)
+    assert result is not None
+    assert result.tier == "partial"
+    assert result.keys_with("described_differently") == (key,)
+
+
+@given(key=st.sampled_from(COMPARABLE_KEYS), data=st.data())
+def test_property_described_differently_only_for_self_described_keys(
+    key: ComparableKey, data: st.DataObject
+) -> None:
+    viewer = data.draw(st.sampled_from(VIEWER_VALUES[key]))
+    facts = data.draw(st.lists(fact_views(keys=(key,)), max_size=6))
+    status = compare_dimension(key, viewer, facts).status
+    forbidden = "different" if key in SELF_DESCRIBED_KEYS else "described_differently"
+    assert status != forbidden
+
+
+@given(garden=gardens(min_selected=1), facts=FACT_LISTS)
+def test_property_explain_says_different_only_for_hard_differences(
+    garden: GardenContext, facts: list[FactView]
+) -> None:
+    result = match_context(garden, _neutral_words(facts))
+    assert result is not None
+    text = explain(result)
+    assert ("Different:" in text) == (result.tier == "different")
+    described_differently = bool(result.keys_with("described_differently"))
+    assert ("aren't counted as a mismatch" in text) == described_differently
 
 
 @given(target=mention_views("c#m0"), others=st.lists(mention_views("c#mX"), max_size=3))

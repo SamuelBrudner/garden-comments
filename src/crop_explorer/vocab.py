@@ -62,6 +62,37 @@ VIEWER_VALUES: Final = MappingProxyType(
 )
 """Values a viewer may select per comparable key (events like ``heatwave`` excluded)."""
 
+SELF_DESCRIBED_KEYS: tuple[ComparableKey, ...] = (
+    "summer_heat",
+    "humidity",
+    "precipitation",
+    "season_length",
+)
+"""Comparable keys whose reported values are the gardener's own, uncalibrated words.
+
+"Hot", "humid", "rainy" or "a short season" are relative to what the writer is used to: a
+Minnesotan's hot summer is not a Phoenician's. A reported value equal to the viewer's still
+matches, but an opposite value is ``described_differently`` and is never counted as a
+mismatch (never the ``different`` tier). Zone, method, shelter, sun, soil and irrigation are
+checkable facts and keep strict comparison; ``region`` is a location preference only.
+"""
+
+DESCRIBED_AS: Final = MappingProxyType(
+    {
+        "hot": ("summers", "hot"),
+        "mild": ("summers", "mild"),
+        "cool": ("summers", "cool"),
+        "humid": ("it", "humid"),
+        "dry_air": ("the air", "dry"),
+        "rainy": ("it", "rainy"),
+        "dry_season": ("it", "having a dry spell or dry season"),
+        "short_season": ("the season", "short"),
+        "long_season": ("the season", "long"),
+    }
+)
+"""``(subject, description)`` per selectable value of a self-described key, read as "they
+described <subject> as <description>" (e.g. "they described summers as mild")."""
+
 PROMINENT_KEYS: tuple[ComparableKey, ...] = ("zone", "method", "shelter")
 """Comparable keys always visible besides region (SPEC §2 "Which controls are prominent?").
 

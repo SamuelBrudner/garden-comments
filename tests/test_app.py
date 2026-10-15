@@ -447,7 +447,7 @@ class TestGrouping:
         heads = subheaders(at)
         assert "Matching reported conditions (3)" in heads
         assert "Partially matching conditions (4)" in heads
-        assert any(h.startswith("Conditions not stated (") for h in heads)
+        assert any(h.startswith("Conditions not stated or not comparable (") for h in heads)
         assert not has_group(at, "all")
         assert shown_ids(group(at, "match"), app_env) == set(FULL_MATCHES)
         assert shown_ids(group(at, "partial"), app_env) == {
@@ -499,7 +499,8 @@ class TestGrouping:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         summary = [t for t in texts_of(at) if t.startswith("70 reports ·")]
         assert summary == [
-            "70 reports · 3 matching · 4 partially matching · 55 not stated · 8 different"
+            "70 reports · 3 matching · 4 partially matching · 55 not stated or not comparable "
+            "· 8 different"
         ]
 
     def test_strict_checkbox_hides_groups_and_shows_count(
@@ -507,15 +508,20 @@ class TestGrouping:
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         assert (
-            "Ticking this would hide 63 reports whose conditions were not stated or differ."
-            in texts_of(at)
+            "Ticking this would hide 63 reports whose conditions were not stated, not comparable "
+            "or differ." in texts_of(at)
+        )
+        assert at.checkbox(key=ui.STRICT_KEY).help == (
+            "Hide reports whose conditions were not stated, not comparable or different from "
+            "yours."
         )
         at.checkbox(key=ui.STRICT_KEY).check().run()
         assert has_group(at, "match") and has_group(at, "partial")
         assert not has_group(at, "not_stated")
         assert not has_group(at, "different")
-        assert "63 reports hidden because their conditions were not stated or differ." in texts_of(
-            at
+        assert (
+            "63 reports hidden because their conditions were not stated, not comparable or differ."
+            in texts_of(at)
         )
 
     def test_chip_tooltips_state_what_they_count(
@@ -525,8 +531,40 @@ class TestGrouping:
         at = run_app(monkeypatch, app_env)
         assert at.button(key="chip_0").proto.help == "Set this condition (8 reports state it)"
         assert at.button(key="chip_1").proto.help == (
-            "6 reports mention hot summers or humid; 2 mention both"
+            "6 reports describe hot summers or humid conditions in their own words; "
+            "2 describe both"
         )
+        assert at.button(key="chip_2").proto.help == (
+            "Set this condition (4 reports describe it in their own words)"
+        )
+
+    def test_hot_and_humid_matches_quote_the_commenters_words(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        at.button(key="chip_1").click().run()
+        assert shown_ids(group(at, "match"), app_env) == {"syn-0001", "syn-0041"}
+        match = "\n".join(texts_of(group(at, "match")))
+        georgia = "In their own words: “brutally hot” (counted as hot summers) · Georgia"
+        assert ui.escape_markdown(georgia) in match
+        assert "Relevant" not in match
+        assert not has_group(at, "different")
+
+    def test_a_self_description_unlike_yours_is_not_comparable(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = select_garden(run_app(monkeypatch, app_env), humidity="dry_air")
+        assert "Conditions not stated or not comparable (" in "\n".join(subheaders(at))
+        assert not has_group(at, "different")
+        assert shown_ids(group(at, "match"), app_env) == {"syn-0019"}
+        not_stated = group(at, "not_stated")
+        assert {"syn-0001", "syn-0003", "syn-0006", "syn-0041", "syn-0052"} <= shown_ids(
+            not_stated, app_env
+        )
+        line = (
+            "In their own words: “muggy” (humid; you chose dry air) · not counted as a difference"
+        )
+        assert ui.escape_markdown(line) in "\n".join(texts_of(not_stated))
 
     def test_chip_conditions_inside_more_conditions_are_visible(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv

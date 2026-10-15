@@ -7,11 +7,22 @@ variety. The app shows the actual comments, grouped by **how well the conditions
 stated match the visitor's conditions**:
 
 1. **Matching reported conditions**: every selected condition that the commenter stated agrees.
-2. **Partially matching conditions**: some match, the rest were not stated.
-3. **Conditions not stated**: nothing comparable was said (kept visible: unknown is not a
-   mismatch).
-4. **Different reported conditions**: at least one stated condition differs (collapsed, never
-   hidden by default).
+2. **Partially matching conditions**: some match; the rest were not stated or only described
+   differently in the commenter's own words.
+3. **Conditions not stated or not comparable**: nothing comparable was said, or only words that
+   cannot be compared with yours (kept visible: unknown is not a mismatch).
+4. **Different reported conditions**: at least one stated, checkable condition (zone, growing
+   method, setting, sun, soil or watering) differs (collapsed, never hidden by default).
+
+Summer heat, humidity, rainfall and season length are the commenter's own words, and they are
+not calibrated across gardeners: a Minnesotan's "hot" is not a Phoenician's. So an equal value
+still matches, but a report that called its summers mild is never "different" from your hot
+summers. Its card quotes the words and where they were written, e.g. `In their own words:
+“mild summers” (mild summers; you chose hot summers) · not counted as a difference`, and the
+report sits in group 3 (group 2 if another selected condition matches; group 4 only if a
+checkable condition differs). SPEC §2 names that group "Conditions not stated"; the
+longer title is a deliberate small deviation, because the group also holds these
+self-descriptions and words the app cannot map ("Mentioned as written, not comparable").
 
 Every condition on a card links to the exact passage of the comment it came from, and the
 app always says plainly how few reports describe their growing conditions at all.
@@ -62,7 +73,8 @@ What the Browse screen offers: Region, Hardiness zone, Growing method and Settin
 visible; summer heat, humidity, rainfall, season length, sun, soil and watering sit under
 "More conditions" (its label lists any that are set). Quick chips ("Containers", "Hot &
 humid", ...) appear only when enough reports support them, and their tooltip says how many
-state any and how many state all of the chip's conditions. Under the search box, **Crop |
+state any and how many state all of the chip's conditions (for heat, humidity, rainfall or season
+length, how many "describe" them "in their own words"). Under the search box, **Crop |
 Topics | Year grown** are hard filters ("Showing only reports that say they grew in 2023", with
 an "Any year" reset). Each card carries a `community report` badge and, when they show a comparable condition the
 commenter stated, its condition lines a `reported conditions` badge (a stated region alone is

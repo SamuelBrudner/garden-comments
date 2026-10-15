@@ -154,8 +154,10 @@ rejections and 82 facts. The behaviours that did change are covered elsewhere:
   Greenhouse 5 (syn-0007, 0023, 0024, 0045, 0046).
   Short season 4 (syn-0021, 0023, 0038, 0040).
   Hot & humid: 6 state hot summers or humid (syn-0001, 0003, 0006, 0041, 0043, 0052); only 2
-  state both for one mention (syn-0001, 0041), so its tooltip reads “6 reports mention hot
-  summers or humid; 2 mention both”.
+  state both for one mention (syn-0001, 0041). Heat and humidity are the commenters' own
+  words, so its tooltip reads “6 reports describe hot summers or humid conditions in their own
+  words; 2 describe both” (and Short season's “Set this condition (4 reports describe it in
+  their own words)”).
 - **Regions:** 18 U.S. states (AZ, CO, CT, GA, ME, MI, MN, MT, NC, NJ, NY, OH, OK, OR, PA, TX,
   VT, WI). Connecticut appears in 4 comments (syn-0006, 0013, 0036, 0063). Alberta (`CA-AB`)
   once, Ontario (`CA-ON`) once, United Kingdom (`GB`) once. Every other comment is
@@ -166,7 +168,8 @@ rejections and 82 facts. The behaviours that did change are covered elsewhere:
 ## Expected tiers for the SPEC §5 example garden
 
 Garden: zone `6b`, method `container`, humidity `humid`, region Connecticut (`US-CT`). These
-follow from the `environment_match` contract in `docs/ARCHITECTURE.md`.
+follow from the `environment_match` contract in `docs/ARCHITECTURE.md`. Tier `not_stated` is
+the viewer's “Conditions not stated or not comparable” group.
 
 | Comment | Mention(s) | Tier | Region status | Why |
 |---|---|---|---|---|
@@ -178,8 +181,32 @@ follow from the `environment_match` contract in `docs/ARCHITECTURE.md`.
 | syn-0013 | Sungold, Juliet, Black Krim | partial | same | all three inherit the `whole_comment` CT + containers facts |
 | syn-0002 | Brandywine | not_stated | not_stated | flavor only |
 | syn-0007 | Jalapeño, Roma | not_stated | not_stated | only shelter is stated, which is not selected |
-| syn-0019 | Early Girl | different | elsewhere | in the ground (method) and dry air (humidity) |
+| syn-0019 | Early Girl | different | elsewhere | in the ground (method). Its “arid” air is the gardener's own description: shown as described differently, never counted as a difference |
 | syn-0036 | Sungold | different | same | raised beds vs containers. Same state is not a climate match |
 | syn-0057 | Sungold | different | elsewhere | zone `6a` vs `6b` (other subzone) |
 | syn-0063 | Juliet | different | same | zone `7a` and in the ground |
 | syn-0010 | Celebrity | different | not_stated | zone `7a`. Zone-only, so never on the map |
+
+## Self-described conditions unlike the viewer's
+
+Summer heat, humidity, rainfall and season length are the commenters' own, uncalibrated words
+(`vocab.SELF_DESCRIBED_KEYS`): a Minnesotan's “hot” is not a Phoenician's. An equal value
+still matches, but an opposite one is `described_differently`, never `different`, so with only
+these conditions selected no demo report is under “Different reported conditions”. The cards
+quote the words, e.g. `In their own words: “humid” (humid; you chose dry air) · not counted as
+a difference · Connecticut` for syn-0006 under a dry-air garden. Before this rule every report
+listed as described differently below was “different”. Verified by
+`tests/test_search.py::TestSyntheticFixtures`.
+
+| Garden | Matching | Described differently (tier `not_stated`) | Different |
+|---|---|---|---|
+| humidity `dry_air` | syn-0019 | syn-0001, 0003, 0006, 0041 (both mentions), 0052 | none |
+| summer heat `mild` or `cool` | none | syn-0001, 0041, 0043. syn-0017's heatwave is not comparable | none |
+| rainfall `dry_season` | syn-0051 | syn-0015, 0052 | none |
+| rainfall `rainy` | syn-0015, 0052 | syn-0051 | none |
+| season length `long_season` | none | syn-0021, 0023, 0038, 0040 | none |
+| Hot & humid chip | syn-0001, 0041 | syn-0019 (dry air; summer heat not stated) | none. Partial: syn-0003, 0006, 0043, 0052 and syn-0017 (a heatwave, imprecise against hot summers) |
+
+Next to a matching condition a description unlike the viewer's gives `partial`; a checkable
+difference (zone, method, setting, sun, soil, watering) still gives `different`, as for
+syn-0019 under the SPEC §5 garden above.

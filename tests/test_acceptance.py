@@ -285,6 +285,12 @@ def test_11_09_different_practice_is_shown_as_different_and_stays_accessible(
         "Different: in the ground (you: containers)"
     )
     assert dimension_statuses(by_id(shown, "syn-0019"))["method"] == "different"
+    # Its "arid" air is the gardener's own description: shown, never counted as a difference.
+    assert dimension_statuses(by_id(shown, "syn-0019"))["humidity"] == "described_differently"
+    assert by_id(shown, "syn-0019").explanation.endswith(
+        "They described the air as dry (you chose humid); self-descriptions aren't counted as "
+        "a mismatch."
+    )
     assert "syn-0019" not in ids(strict)
     hidden = shown.tier_counts["not_stated"] + shown.tier_counts["different"]
     assert strict.n_hidden_by_strict == hidden

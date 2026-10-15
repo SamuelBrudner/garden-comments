@@ -296,7 +296,10 @@ def _filters(ctx: _Context, options: FilterOptions) -> None:
     st.checkbox(
         "Only show stated matches",
         key=ui.STRICT_KEY,
-        help="Hide reports whose conditions were not stated or differ from yours.",
+        help=(
+            "Hide reports whose conditions were not stated, not comparable or different from "
+            "yours."
+        ),
     )
 
 

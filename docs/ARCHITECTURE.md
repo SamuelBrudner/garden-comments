@@ -7,9 +7,9 @@ rules so modules can be built and tested independently. Shared types live in:
 | Module | Contents |
 |---|---|
 | `schemas.py` | Extraction contract (`EnvironmentFact`, `VarietyMention`, `ParsedComment`), validated forms (`ValidatedFact`, `ValidatedMention`, `ValidatedComment`, `Rejection`), raw records (`ColumnMapping`, `CommentRecord`, `SourceRecord`, `ImportStats`), literals (`Topic`, `EnvKey`, `RightsStatus`, `ImportScope`, `SCOPE_TO_RIGHTS`), `to_utc_iso`, `utc_now_iso` |
-| `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
+| `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `SELF_DESCRIBED_KEYS`, `DESCRIBED_AS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
 | `regions.py` | `US_STATES`, `CA_PROVINCES`, `COUNTRIES`, `REGION_NAMES`, `is_us_state`, `us_postal`, `region_name` |
-| `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus`, `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` |
+| `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus` (incl. `described_differently`), `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` (titles: Search rule 5) |
 | `config.py` | `AppConfig` and sub-models, `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
 | `logging_setup.py` | `configure_logging(cfg)` |
 
@@ -619,16 +619,29 @@ def explain(result: MatchResult | None) -> str
   (recognised by `mention_id`). Deduplicate by `(key, normalized_value, value_as_written)`.
   Order: own facts first (fact order), then sibling facts (mention order, fact order).
   `this_mention` facts never leak to siblings.
+- **Self-described keys** (`vocab.SELF_DESCRIBED_KEYS` = `summer_heat`, `humidity`,
+  `precipitation`, `season_length`): "hot", "humid", "rainy" or "a short season" are the
+  gardener's own words, not calibrated across gardeners (a Minnesotan's "hot" is not a
+  Phoenician's). An equal value still matches, but an opposite value is
+  `described_differently`, which is **never** counted as a mismatch. Zone, method, shelter,
+  sun, soil and irrigation are checkable facts and keep strict comparison; region stays a
+  preference only. Deliberate deviation from SPEC §5 ("Conflicts" and the example table's
+  last row, "Different: method and humidity"): a self-described disagreement is shown in the
+  explanation but never puts a report under "Different reported conditions", so that row is
+  `different` because of the method alone.
 - `compare_dimension`: considers facts of that key with a non-null `normalized_value`.
   None → `not_stated`. Per reported value r vs viewer value v:
   - zone: `r == v` → match; same number and exactly one side lacks a subzone → `imprecise`;
     otherwise `different` (adjacent zones and other subzones are different).
   - summer_heat: `r == v` → match; `r == "heatwave"` and `v == "hot"` → `imprecise`;
-    `r == "heatwave"` otherwise → ignored (not comparable); else `different`.
+    `r == "heatwave"` otherwise → ignored (not comparable); else `described_differently`.
+  - humidity, precipitation, season_length: equal → match, else `described_differently`.
   - every other key: equal → match, else `different`.
   Aggregate over values: any match → `match`; else any imprecise → `imprecise`; else any
-  different → `different`; else `not_stated` (so a mild-summer report with a heatwave is
-  `imprecise` for a hot-summer viewer: the precedence is deliberate). `reported_values` =
+  different → `different`; else any described differently → `described_differently` (a key
+  gives one or the other, never both); else `not_stated` (so a mild-summer report with a
+  heatwave is `imprecise` for a hot-summer viewer: the precedence is deliberate; a heatwave
+  against mild/cool summers is still ignored, never a disagreement). `reported_values` =
   distinct normalized values (first-seen order); `written_values` = distinct `value_as_written`
   of that key's facts whose `normalized_value` is null (first-seen order; display only,
   untrusted text, never compared, so the status stays `not_stated` when only these exist);
@@ -637,13 +650,17 @@ def explain(result: MatchResult | None) -> str
   `VIEWER_VALUES[key]`, or a stored normalized value that fails `is_valid_normalized`.
 - `values_with(dimension, status)`: the `reported_values` (in order) whose **own** comparison
   with the viewer value gives `status`, so a card labels only the values that produced a
-  dimension's status (mild + heatwave vs hot: `imprecise` → `("heatwave",)`, `different` →
-  `("mild",)`; `not_stated` selects values that are not comparable, e.g. a heatwave vs mild).
+  dimension's status (mild + heatwave vs hot: `imprecise` → `("heatwave",)`,
+  `described_differently` → `("mild",)`, `different` → `()`; `not_stated` selects values
+  that are not comparable, e.g. a heatwave vs mild).
   `ValueError` for an unknown status.
 - `match_context`: `None` when `garden.selected()` is empty; otherwise one `DimensionMatch` per
   selected key (canonical `COMPARABLE_KEYS` order) and the tier.
 - `tier_of`: any `different` → `different`; all `match` → `match`; any `match`/`imprecise` →
-  `partial`; else `not_stated`. Empty input or an unknown status → `ValueError`.
+  `partial`; else `not_stated`. Empty input or an unknown status → `ValueError`. So
+  `described_differently` never yields `different`: alone it yields `not_stated`, next to a
+  match `partial` (and strict mode, "Only show stated matches", hides a report whose only
+  selected condition was described differently).
   Outcome words (failure, success, great, died) **never** influence tier or order.
 - `region_status`: `None` if no garden region; `same` if any fact with key `region` has
   `normalized_value == garden_region`; else `same_country` if the garden region is a country
@@ -652,16 +669,26 @@ def explain(result: MatchResult | None) -> str
   `elsewhere` if other normalized region facts exist; else `not_stated`. Unknown region codes →
   `ValueError`. Region is never part of the tier (states differing ≠ climates differing).
 - `explain`: short, honest sentences built only from dimension statuses, in canonical key
-  order: an optional `"Different: <reported> (you: <yours>), ..."` sentence, then one sentence
-  joining the matched, imprecise, not-comparable, display-only and not-stated clauses with
-  `"; "`. Each clause names only the values whose own status it describes (`values_with`).
-  Examples:
-  `"Matches your zone 6b, containers and humid."`,
+  order: an optional `"Different: <reported> (you: <yours>), ..."` sentence (hard keys only),
+  then one sentence joining the matched (`"Matches your ..."`, hard keys), matched
+  self-described (`"they described <subject> as <description>"`, phrased as what the gardener
+  said, from `vocab.DESCRIBED_AS` and grouped by subject), imprecise, not-comparable,
+  display-only and not-stated clauses with `"; "`, then an optional sentence for keys
+  described differently: `"They described summers as mild (you chose hot summers);
+  self-descriptions aren't counted as a mismatch."` (several items joined with "and"; never
+  the word "Different"). Each clause names only the values whose own status it describes
+  (`values_with`). Examples:
+  `"Matches your zone 6b and containers; they described it as humid."` (SPEC §5 first row),
+  `"They described summers as hot and it as humid and rainy."`,
   `"Matches your containers; hardiness zone and humidity not stated."`,
   `"Zone 6 reported (subzone unknown); growing method not stated."`,
   `"None of your selected conditions were stated."` (only when nothing selected was reported,
   not even a display-only phrase),
   `"Different: in the ground (you: containers). Humidity not stated."`,
+  `"Different: in the ground (you: containers). Hardiness zone not stated. They described the
+  air as dry (you chose humid); self-descriptions aren't counted as a mismatch."` (SPEC §5
+  last row),
+  `"A heatwave reported (you: hot summers)."` (unchanged: imprecise, not a description),
   `"summer heat not comparable (a heatwave reported)"` for a heatwave against mild/cool
   summers, and `'soil mentioned as "rocky hillside dirt" (not comparable)'` for a selected key
   whose only statements are display-only `written_values` (quoted, whitespace collapsed, joined
@@ -725,11 +752,19 @@ def filter_options(conn, scope, now) -> FilterOptions   # distinct, sorted, visi
    preference that is never compared, so a region alone, like a growing year alone or a
    display-only fact, does not count.
 5. Groups: no comparable selection → single group `all`. Otherwise groups `match`, `partial`,
-   `not_stated`, `different` (in that order; `different` has `collapsed_by_default=True`). Empty
+   `not_stated`, `different` (in that order; `different` has `collapsed_by_default=True`),
+   titled by `views.GROUP_TITLES`: "Matching reported conditions", "Partially matching
+   conditions", "Conditions not stated or not comparable", "Different reported conditions".
+   The third title is a deliberate small deviation from SPEC §2 ("Conditions not stated"):
+   besides reports that state nothing comparable, that group holds reports whose only selected
+   conditions were display-only phrases, a heatwave against mild or cool summers, or a
+   self-description unlike the viewer's (`described_differently`, see Environment matching),
+   none of which is "not stated". Empty
    groups are always omitted, including `all` (zero candidates → `groups == ()`). Within a group
    (including `all`) sort by `(region rank: same=0, same_country=1, else 2, source_id,
    source_order, comment_id)`; region never changes a tier.
-6. `only_stated_matches=True` hides the `not_stated` and `different` groups and
+6. `only_stated_matches=True` hides the `not_stated` and `different` groups (so also a report
+   whose only selected condition was described differently) and
    `n_hidden_by_strict` counts their comments; with no comparable condition selected there is
    nothing to match, so it hides nothing. `tier_counts` has all four tiers (zeros included) when
    a comparable condition is selected, else `{}`. `n_not_analysed` counts candidates with
@@ -911,13 +946,20 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
 - Quick chips from config, shown only when `chip_support[label].n_any >= min_reports_for_chip`
   (`ui.visible_chips`); a chip sets its conditions and is highlighted while they are all set.
   Its tooltip (`ui.chip_help`) states what is counted: one condition → "Set this condition
-  (8 reports state it)"; several → both counts, e.g. "6 reports mention hot summers or humid;
-  2 mention both".
+  (8 reports state it)"; several → both counts, e.g. "6 reports mention containers or
+  greenhouse / tunnel; 2 mention both". A chip with a self-described condition
+  (`vocab.SELF_DESCRIBED_KEYS`) counts reports that describe it in their own, uncalibrated
+  words and says so: "6 reports describe hot summers or humid conditions in their own words;
+  2 describe both", "Set this condition (4 reports describe it in their own words)" (bare
+  adjectives get a noun: "humid conditions", "rainy conditions").
 - Search box ("Search crops, varieties, or anything people mentioned",
   `max_chars=cfg.viewer.max_query_chars`; `ui.query_from_state(state, max_query_chars=...)`
   also cuts the text, as defence in depth), then the filter row **Crop | Topics | Year grown**
   (hard mention-level filters, unlike the garden conditions), then "Only show stated
-  matches"; a caption always says how many reports the checkbox hides (or would hide). With
+  matches"; a caption always says how many reports the checkbox hides (or would hide): "N
+  reports hidden because their conditions were not stated, not comparable or differ." /
+  "Ticking this would hide N reports whose conditions were not stated, not comparable or
+  differ." (the checkbox help says the same). With
   only a Region set it says Region only lists reports from your area first and a condition
   such as zone or growing method is needed (`ui.strict_note`). Filter values that vanish from
   the visible data mid-session are reset (`ui.stale_state_fixes`).
@@ -928,7 +970,9 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
 - Tabs: **Comments** | **Map**. The Comments tab starts with the active hard-filter notes, each
   with its reset button: "Showing only reports that say they grew in YEAR." + "Any year"
   (`ui.year_filter_note`), and the reported-state note + "Show all states". Then the
-  limitation message and the count summary, which are always visible. When no group has a
+  limitation message and the count summary (`ui.count_summary`, e.g. "70 reports · 3
+  matching · 4 partially matching · 55 not stated or not comparable · 8 different", its tier
+  words echoing the group titles), which are always visible. When no group has a
   report, `ui.empty_state(result)` gives "No reports to show. Try a different search, or
   remove a filter or condition." or, when strict mode hid everything, "All N reports are
   hidden by "Only show stated matches". Untick it to see them." (`None`, i.e. no second box,
@@ -945,7 +989,8 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   the comment text rendered as **plain text** through `ui.escape_markdown`; then one caption,
   `ui.condition_caption(result, garden)`: the escaped `ui.condition_lines` plus (for an analysed
   comment) the region line, led by a `reported conditions` badge when a condition line shows a
-  comparable condition the commenter gave (a normalized or written value). A region alone gets
+  comparable condition the commenter gave (a normalized or written value, including an
+  own-words line that is described differently or not comparable). A region alone gets
   no badge: it is never compared, the badge would sit before "Growing conditions not stated",
   and the heading's `community report` badge already labels the region line. Condition lines:
   - never extracted (`parse_status is None`) → only "Not yet analysed for growing conditions"
@@ -954,11 +999,31 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
     matches with both values), "Not stated: …", "Mentioned as written, not comparable: soil
     "rocky hillside dirt"" (a selected key whose only facts are display-only, phrases quoted
     with whitespace collapsed) and "Different: …"; each labels only the reported values whose
-    own comparison produced that status (`environment_match.values_with`), so mild summers +
-    a heatwave for a hot-summer viewer reads "Relevant: a heatwave (you: hot summers)";
+    own comparison produced that status (`environment_match.values_with`);
+  - then, for each selected **self-described** condition (`vocab.SELF_DESCRIBED_KEYS`: summer
+    heat, humidity, rainfall, season length) with a reported value, its own line in the
+    commenter's words instead of a place in "Relevant" or "Different" (a self-described key
+    with no reported value stays in "Not stated" or "Mentioned as written"). The words are
+    the `value_as_written` of the facts behind the values that produced the status
+    (deduplicated, whitespace collapsed, in typographic quotes, joined with " / "), then the
+    normalized reading, then that mention's region (names of its applicable `region` facts,
+    an unmapped one as "Cape Cod (not mapped)"; omitted when none is stated, since the card's
+    region line already says so), because "hot" means
+    something different in Connecticut and Texas. Lines that count (match, imprecise) come
+    first, in canonical key order:
+    - match: "In their own words: “brutal and muggy” (counted as humid) · Connecticut";
+    - imprecise (a heatwave for a hot-summer viewer, also when mild summers were reported
+      too): "In their own words: “that July heat wave” (a heatwave; you chose hot summers) ·
+      Texas";
+    - described differently: "In their own words: “mild summers” (mild summers; you chose hot
+      summers) · not counted as a difference" (never "Different");
+    - not comparable (a heatwave for a mild- or cool-summer viewer): "… (a heatwave; you
+      chose mild summers) · not comparable";
   - several relevant mentions: led by "Shown for X (1 of n mentions)" and followed by one
     "Y: <tier line>" per other mention whose tier differs from the best, e.g. "Roma:
-    Different: outdoors (you: greenhouse / tunnel)";
+    Different: outdoors (you: greenhouse / tunnel)". The tier line is the first present of:
+    match/partial → "Relevant", a counting own-words line; not stated → "Not stated",
+    "Mentioned as written", an own-words line that does not count; different → "Different";
   - without a selection: "Reported: …" (or "Reported for X: …" per mention), then "Mentioned
     as written, not comparable: …" for display-only comparable-key phrases, else "Growing
     conditions not stated".
@@ -1004,5 +1069,6 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   invalid options) and `tests/test_browser.py` (marker `browser`: `streamlit run` headless on a
   free loopback port, Playwright Chromium at 390x844 — no horizontal overflow, search box and
   always-visible selects shown, zone 6b regroups, Clear restores the first-load values and
-  placeholders, the Source link's href — then a 1280x900 smoke test; CI runs
+  placeholders, the Source link's href, the Hot & humid chip's "In their own words" lines
+  without overflow — then a 1280x900 smoke test; CI runs
   `uv run playwright install --with-deps chromium` first).
