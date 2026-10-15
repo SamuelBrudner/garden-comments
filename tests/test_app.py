@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import runpy
 import shutil
 import string
 import sys
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import streamlit as st
 import yaml
 from loguru import logger
 from streamlit import config as streamlit_config
@@ -912,6 +914,7 @@ class TestViewerStartup:
         assert not at.exception
         (error,) = at.error
         assert "only runs when the server listens on this computer alone" in error.value
+        assert [block.value for block in at.code] == [ui.PRIVATE_COMMAND]
         assert "PRIVATEONLY" not in all_text(at)
         assert not at.text_input
         assert ui.PRIVATE_BANNER not in [w.value for w in at.warning]
@@ -930,6 +933,16 @@ class TestViewerStartup:
         at = run_app(monkeypatch, app_env, address="0.0.0.0")
         assert not at.error
         assert subheaders(at)[-1] == "Reports (70)"
+
+    def test_importing_the_viewer_does_not_run_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``streamlit_app.py`` imports ``app``; only running it as ``__main__`` renders."""
+
+        def refuse(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("app.main ran on import")
+
+        monkeypatch.setattr(st, "set_page_config", refuse)
+        namespace = runpy.run_path(str(APP), run_name="app")
+        assert callable(namespace["main"])
 
     @pytest.mark.parametrize(
         "extra", [["--database", "other.sqlite"], ["--confg", "x.yaml"], ["--scope", "everyone"]]

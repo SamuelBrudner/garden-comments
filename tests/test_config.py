@@ -1,8 +1,8 @@
 """Tests for runtime configuration: ``config.py``, ``config.yaml`` and ``.streamlit/config.toml``.
 
 The configuration carries evidence labels for outside links (SPEC §7: reports, references and
-trials must never be confused) and the viewer's limits; the Streamlit settings decide which
-network interfaces the viewer listens on.
+trials must never be confused) and the viewer's limits; the Streamlit settings pin neither the
+address nor the port (Streamlit Community Cloud chooses both).
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from crop_explorer.config import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STREAMLIT_CONFIG = REPO_ROOT / ".streamlit" / "config.toml"
-LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 
 def raw_config() -> dict[str, Any]:
@@ -46,11 +45,28 @@ def outside_link(label: str, url: str = "https://example.org/map") -> dict[str, 
 # --------------------------------------------------------------------------- streamlit (F01)
 
 
-def test_streamlit_viewer_binds_to_this_machine_only() -> None:
-    """A private-scope viewer has no authentication; it must not listen on the network."""
-    settings = tomllib.loads(STREAMLIT_CONFIG.read_text(encoding="utf-8"))
+def streamlit_settings() -> dict[str, Any]:
+    return tomllib.loads(STREAMLIT_CONFIG.read_text(encoding="utf-8"))
 
-    assert settings["server"]["address"] in LOOPBACK
+
+def test_streamlit_config_pins_neither_address_nor_port() -> None:
+    """Streamlit Community Cloud health-checks the app on localhost:8501 and proxies to it.
+
+    The shipped settings must leave both to the host. The private view stays local because
+    ``app.py`` refuses private scope unless ``--server.address`` is a loopback address (tested
+    in ``tests/test_app.py``), not because of this file.
+    """
+    server = streamlit_settings().get("server", {})
+
+    assert "address" not in server
+    assert "port" not in server
+
+
+def test_streamlit_config_keeps_the_viewer_safety_settings() -> None:
+    settings = streamlit_settings()
+
+    assert settings["runner"]["magicEnabled"] is False
+    assert settings["browser"]["gatherUsageStats"] is False
 
 
 # --------------------------------------------------------------------------- outside links

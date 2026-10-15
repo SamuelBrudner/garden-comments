@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_CODE_LINES = 15
-SOURCES = sorted([*(ROOT / "src").rglob("*.py"), ROOT / "app.py"])
+SOURCES = sorted([*(ROOT / "src").rglob("*.py"), ROOT / "app.py", ROOT / "streamlit_app.py"])
 
 
 def _has_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:

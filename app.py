@@ -1,8 +1,11 @@
 """Browse screen of "What Gardeners Are Saying" (SPEC §2), a thin Streamlit layer.
 
 Run with ``uv run streamlit run app.py [--server.address localhost] [-- --scope private --db PATH
---config PATH]``. A private view only runs while the server listens on this computer alone
-(``--server.address localhost``, the shipped ``.streamlit/config.toml`` default).
+--config PATH]``. A private view only runs while the server listens on this computer alone, so
+its command must include ``--server.address localhost`` (``.streamlit/config.toml`` sets no
+address, and without one the private view refuses to run). The hosted public demo
+(``streamlit_app.py``) imports this module and calls :func:`main` with its own options; the
+page only renders by itself when Streamlit runs this file as ``__main__``.
 
 All behaviour lives in the library (:mod:`crop_explorer.search`, :mod:`crop_explorer.geography`,
 :mod:`crop_explorer.db`) and in the pure helpers of :mod:`crop_explorer.ui`; this file only lays
@@ -15,7 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from functools import partial
@@ -487,10 +490,10 @@ def _browse(ctx: _Context) -> None:
 # --------------------------------------------------------------------------- startup guards
 
 
-def _app_args() -> ui.AppArgs:
+def _app_args(argv: Sequence[str]) -> ui.AppArgs:
     """Parse the viewer options, or show why they are invalid and stop."""
     try:
-        return ui.parse_app_args(sys.argv[1:])
+        return ui.parse_app_args(argv)
     except ValueError as exc:
         st.error(ui.escape_markdown(str(exc)))
         st.stop()
@@ -501,6 +504,7 @@ def _require_local_server(scope: ViewerScope) -> None:
     address = st.get_option("server.address")
     if scope == "private" and not ui.is_loopback_address(address):
         st.error(ui.escape_markdown(ui.private_bind_error(address)))
+        st.code(ui.PRIVATE_COMMAND, language="bash")
         st.stop()
 
 
@@ -530,10 +534,17 @@ def _configure_logging_once(settings_json: str) -> None:
     configure_logging(LoggingConfig.model_validate_json(settings_json))
 
 
-def main() -> None:
-    """Render the Browse screen for the scope and database given on the command line."""
+def main(argv: Sequence[str] | None = None) -> None:
+    """Render the Browse screen for the given viewer options.
+
+    Parameters
+    ----------
+    argv
+        Viewer options (``--scope``, ``--db``, ``--config``); ``None`` reads the command line
+        (Streamlit passes only the arguments after ``--`` in ``sys.argv[1:]``).
+    """
     st.set_page_config(page_title=_TITLE, page_icon="🌱", layout="centered")
-    args = _app_args()
+    args = _app_args(sys.argv[1:] if argv is None else argv)
     cfg = load_config(args.config)
     _configure_logging_once(cfg.logging.model_dump_json())
     st.title(_TITLE, anchor=False)
@@ -546,4 +557,5 @@ def main() -> None:
         _browse(_Context(conn, cfg, scope, utc_now_iso()))
 
 
-main()
+if __name__ == "__main__":
+    main()

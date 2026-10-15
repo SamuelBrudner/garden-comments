@@ -24,7 +24,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from crop_explorer import db
+from crop_explorer import db, demo
 
 if TYPE_CHECKING:
     from conftest import CliEnv, CliRun
@@ -264,6 +264,23 @@ def test_demo_rerun_is_idempotent(cli_env: CliEnv) -> None:
     }
     assert second["extraction"] == first["extraction"]
     assert counts(summary(cli_env, "private")) == DEMO_SUMMARY
+
+
+def test_demo_fails_loudly_when_a_fixture_extraction_is_rejected(
+    cli_env: CliEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = json.loads(DEMO_EXTRACTIONS.read_text(encoding="utf-8").splitlines()[0])
+    bad = tmp_path / "extractions.jsonl"
+    extra = json.dumps({**first, "comment_id": "no-such-comment"})
+    bad.write_text(DEMO_EXTRACTIONS.read_text(encoding="utf-8") + extra + "\n", encoding="utf-8")
+    monkeypatch.setattr(demo, "DEMO_EXTRACTIONS", bad)
+
+    run = cli_env.run("demo")
+    assert (run.code, run.out) == (2, "")
+    *warnings, line = run.err_lines  # the loader also warns about the rejection
+    assert all("WARNING" in warning for warning in warnings)
+    assert line.startswith("error: 1 rejection")
+    assert "no-such-comment: unknown_comment_id" in line
 
 
 # --------------------------------------------------------------------------- summary

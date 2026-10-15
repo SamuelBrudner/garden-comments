@@ -323,12 +323,15 @@ def is_loopback_address(address: str | None) -> bool:
 
 
 def private_bind_error(address: str | None) -> str:
-    """Explain why a private-scope viewer refuses to run on a non-loopback address."""
+    """Explain why a private-scope viewer refuses to run on a non-loopback address.
+
+    The restart command itself is :data:`PRIVATE_COMMAND`, shown verbatim as code by the viewer
+    (Markdown would turn its ``--`` into a dash).
+    """
     where = "every network interface" if not address else f"the address {address}"
     return (
         "The private view shows unverified imported comments, so it only runs when the server "
-        f"listens on this computer alone, but it is listening on {where}. Restart it with: "
-        f"{PRIVATE_COMMAND}"
+        f"listens on this computer alone, but it is listening on {where}. Restart it with:"
     )
 
 

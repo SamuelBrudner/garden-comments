@@ -15,12 +15,13 @@ rules so modules can be built and tested independently. Shared types live in:
 
 ## Engineering rules (all modules)
 
-- Python ≥ 3.12, full type hints, `mypy --strict` clean (`uv run mypy`, files `src` and `app.py`).
+- Python ≥ 3.12, full type hints, `mypy --strict` clean (`uv run mypy`, files `src`, `app.py`
+  and `streamlit_app.py`).
 - `uv run ruff check .` and `uv run ruff format --check .` clean (`SPEC.md` is excluded from the
   formatter because it is kept verbatim). Ruff limits every function to ≤ 15 statements
   (`PLR0915`), ≤ 8 branches, ≤ 6 arguments and complexity ≤ 8.
-- **Function size: at most 15 code lines.** `tests/test_code_standards.py` parses `src/` and
-  `app.py` and fails for any function (including methods and nested functions) whose body has
+- **Function size: at most 15 code lines.** `tests/test_code_standards.py` parses `src/`,
+  `app.py` and `streamlit_app.py` and fails for any function (including methods and nested functions) whose body has
   more than 15 non-blank, non-comment lines, not counting the signature, decorators and
   docstring. Long SQL and literal tables live in module-level constants.
 - **Docstrings: numpy convention.** Ruff's pydocstyle rules (`D`, `convention = "numpy"`)
@@ -57,6 +58,8 @@ model step (offline, docs/EXTRACTION_PROMPT.md) --> ParsedComment JSONL
                                                                      |
 viewer (app.py) --search.search(conn, scope, query, now)--> SearchResult (groups, counts)
                --geography.region_counts(...)--> map counts
+
+hosted demo (streamlit_app.py) --demo.prepare_hosted_demo (temp dir)--> app.main(--scope public)
 ```
 
 No model call happens at request time.
@@ -842,13 +845,55 @@ def choropleth(counts: RegionCounts) -> plotly.graph_objects.Figure
   sometimes be derived by subtraction from the bucket totals. Real small-cell protection would
   have to cover the cards too (a design change, not a threshold).
 
+## Demo database (`demo.py`) and the hosted demo (`streamlit_app.py`)
+
+```python
+DEMO_SOURCE_ID = "synthetic-demo"; DEMO_KIND = "synthetic_fixture"; FIXTURES_DIR
+DEMO_COMMENTS; DEMO_EXTRACTIONS; HOSTED_DATABASE_NAME = "demo.sqlite"; HOSTED_CONFIG_NAME = "config.yaml"
+class DemoBuild(BaseModel): stats: ImportStats; report: ExtractionReport     # frozen
+class HostedDemo(BaseModel): config: Path; database: Path                    # frozen
+def build_demo_database(path: Path, cfg: AppConfig, now: str) -> DemoBuild
+def prepare_hosted_demo(directory: Path, cfg: AppConfig, now: str) -> HostedDemo
+```
+
+- `build_demo_database` is the one way the demo database is built (the CLI `demo` command and
+  the hosted demo): it imports `fixtures/synthetic_comments.jsonl` as source `synthetic-demo`
+  (kind `synthetic_fixture`, rights `synthetic`, no expiry, `imported_at = now`) into `path`
+  (created with its parent directories by `db.connect`) and loads
+  `fixtures/synthetic_extractions.jsonl` with `cfg.extraction`. Re-running it is idempotent
+  (69 `unchanged`, an identical report). The fixtures must load cleanly: any rejection raises
+  `ValueError` naming the count and the first rejections by comment id (or line) and reason,
+  never comment text. The fixtures are found relative to the source tree (checkout or editable
+  install).
+- `prepare_hosted_demo` requires an empty `directory` (created if missing; anything already
+  there raises `ValueError`, so an existing database is never reused), builds
+  `directory/demo.sqlite` and writes `directory/config.yaml`: `cfg` with `database.path` = that
+  database, `viewer.scope = public` and `logging.json_path = null` (stderr only), as YAML that
+  `load_config` reads back unchanged.
+- `streamlit_app.py` (repository root) is the Streamlit Community Cloud entrypoint. Cloud runs
+  it from the repository root, cannot pass script arguments, health-checks `localhost:8501` and
+  may install the dependencies without installing this project, so the entrypoint (1) puts
+  `<repo>/src` (and the repository root, for `app`) on `sys.path` explicitly, always importing
+  the package from the checkout; (2) in an `st.cache_resource` function, once per server
+  process, calls `prepare_hosted_demo(tempfile.mkdtemp(prefix="crop-explorer-demo-"),
+  load_config(DEFAULT_CONFIG_PATH), utc_now_iso())` (only the paths are cached; query results
+  never are); (3) on every run calls `app.main(["--scope", "public", "--db", database,
+  "--config", config])`. It ignores `sys.argv`, never opens `data/` or any database other than
+  the one it built, and runs only as `__main__`. Tests: `tests/test_demo.py`,
+  `tests/test_streamlit_app.py` (AppTest with an isolated cwd and temp directory: "Reports
+  (69)" and the demo banner; the database is built once, under the temp directory; a private
+  database at the configured path, a private-scope config and private command-line options are
+  all ignored).
+- `.streamlit/config.toml` sets no `[server]` address or port (Cloud chooses both); the private
+  view stays local through the viewer's loopback guard (see Viewer).
+
 ## CLI (`__main__.py`) — `uv run python -m crop_explorer ...`
 
 ```python
 def main(argv: Sequence[str] | None = None) -> int
 def build_parser() -> argparse.ArgumentParser
 EXIT_OK = 0; EXIT_ERROR = 2; DEFAULT_KIND = "comments_export"
-DEMO_SOURCE_ID = "synthetic-demo"; DEMO_KIND = "synthetic_fixture"; DEMO_COMMENTS; DEMO_EXTRACTIONS
+DEMO_SOURCE_ID; DEMO_KIND; DEMO_COMMENTS; DEMO_EXTRACTIONS   # re-exported from demo.py
 ```
 
 argparse; global `--config PATH` (default repo `config.yaml`) and `--db PATH` override, accepted
@@ -895,16 +940,21 @@ demo                                             # ingest fixtures as synthetic 
   writes `{comment_id, text, text_hash}` lines (`text_hash` = sha256 of the UTF-8 text, as
   stored) as `ensure_ascii=False` JSON with U+0085/U+2028/U+2029 escaped (one record per
   physical line for any splitter), and skips soft-deleted comments and expired sources.
-- `demo` ingests `fixtures/synthetic_comments.jsonl` as source `synthetic-demo` (kind
-  `synthetic_fixture`, rights `synthetic`, no expiry) and loads
-  `fixtures/synthetic_extractions.jsonl`; re-running it is idempotent. The fixtures are found
-  relative to the source tree (checkout or editable install).
+- `demo` runs `demo.build_demo_database(cfg.database.path, cfg, now)`: it ingests
+  `fixtures/synthetic_comments.jsonl` as source `synthetic-demo` (kind `synthetic_fixture`,
+  rights `synthetic`, no expiry) and loads `fixtures/synthetic_extractions.jsonl`; re-running
+  it is idempotent. Any extraction rejection is an error (`ValueError`, exit 2). The fixtures
+  are found relative to the source tree (checkout or editable install).
 - `imported_at`, `loaded_at` and `now` come from `schemas.utc_now_iso()` at the CLI edge.
 
 ## Viewer (`app.py`, thin) + `ui.py` (pure helpers)
 
 `uv run streamlit run app.py [--server.address localhost] [-- --scope private --db PATH
---config PATH]`. One Browse screen
+--config PATH]`; a private view needs `--server.address localhost` (it is refused otherwise).
+`app.main(argv: Sequence[str] | None = None)` renders the page (`None` reads `sys.argv[1:]`,
+the arguments Streamlit passes after `--`); the module only calls it under
+`if __name__ == "__main__":` (Streamlit runs the script as `__main__`), so the hosted demo can
+import it and pass its own options. One Browse screen
 (`layout="centered"`, phone-friendly; Streamlit stacks columns on narrow screens). Every
 function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
 (`tests/test_code_standards.py`).
@@ -917,8 +967,10 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   when `st.get_option("server.address")` is a loopback address (`ui.is_loopback_address`:
   `localhost`, `127.0.0.0/8`, `::1`; unset/empty = every interface = refused), because the
   viewer has no authentication; the error (`ui.private_bind_error`) gives the command
-  `uv run streamlit run app.py --server.address localhost -- --scope private`. The shipped
-  `.streamlit/config.toml` binds `localhost`. If the database file does not exist, the app
+  `uv run streamlit run app.py --server.address localhost -- --scope private`.
+  `.streamlit/config.toml` sets no address (Streamlit Community Cloud must choose it), so the
+  private command must include `--server.address localhost`; without it the private view is
+  refused. If the database file does not exist, the app
   shows how to build it (`uv run python -m crop_explorer demo`); if `db.connect` raises
   `sqlite3.DatabaseError` (not a database, or an unsupported schema version) it shows the
   reason and the same command. It never creates an empty database.

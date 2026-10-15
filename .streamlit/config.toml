@@ -1,10 +1,11 @@
 # Streamlit settings for the viewer (app.py). Never put secrets in this file.
 
-[server]
-# Listen on this machine only. The viewer has no authentication, and a private-scope viewer
-# shows unverified imported comments, so it must never be reachable from the network. Override
-# deliberately (e.g. --server.address 0.0.0.0) only to host a public-scope demo.
-address = "localhost"
+# No [server] address or port on purpose: Streamlit Community Cloud health-checks the hosted
+# demo (streamlit_app.py) on localhost:8501 and proxies visitors to it, so this file must pin
+# neither. The private view still never reaches the network: app.py refuses private scope
+# unless the server address is a loopback address, so its command must include
+# --server.address localhost (uv run streamlit run app.py --server.address localhost -- --scope
+# private).
 
 [browser]
 gatherUsageStats = false

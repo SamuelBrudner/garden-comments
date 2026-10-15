@@ -59,9 +59,12 @@ uv run streamlit run app.py --server.address localhost -- --scope private
 ```
 
 The viewer has no accounts, so a private view refuses to run (an error, no comments) unless
-the server listens on this computer alone. The shipped `.streamlit/config.toml` already binds
-`localhost`; `--server.address localhost` makes the command safe even with another Streamlit
-configuration. Only a **public**-scope demo may ever be served on a network address.
+the server listens on this computer alone: the private command must include
+`--server.address localhost`, and without it the viewer refuses to show anything.
+`.streamlit/config.toml` deliberately sets no server address or port (Streamlit Community Cloud
+must choose both, see below), so without that flag Streamlit listens on every network
+interface, which only a **public**-scope view may ever do. Add `--server.address localhost` to
+the public command too if you want to keep it on this computer.
 
 Viewer options go after `--`: `--scope {public,private}`, `--db PATH` and `--config PATH`. An
 unknown or mistyped option (for example `--database`) stops the viewer with an error instead of
@@ -85,6 +88,36 @@ for growing conditions", and a condition stated in words the app cannot compare 
 `viewer.page_size` cards at a time with a "Show N more" button. "Optional outside context"
 (official references, published trials and outside gardeners' ratings, each badged) sits just
 above the Comments and Map tabs.
+
+## Host the public demo on Streamlit Community Cloud
+
+[`streamlit_app.py`](streamlit_app.py) is the entrypoint for a free, public
+[Streamlit Community Cloud](https://streamlit.io/cloud) app. It only ever shows the bundled
+synthetic comments: once per server process (on the first visit after the app starts) it
+rebuilds the demo database from `fixtures/` in a fresh temporary directory and runs the normal viewer in **public** scope
+against it. It never opens `data/` or any other database, and it ignores command-line
+arguments and the scope in `config.yaml`, so a private import can never be served from it.
+
+1. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub.
+2. **Create app**, then **Yup, I have an app**.
+3. Repository `SamuelBrudner/garden-comments`; branch `feat/mvp-v0.5` (or `main` after
+   merging); main file path `streamlit_app.py`.
+4. **Advanced settings**: Python version **3.12**.
+5. **Deploy**.
+
+Cloud runs the app from the repository root, reads the root `.streamlit/config.toml` (which
+sets no server address or port, because Cloud health-checks the app on `localhost:8501` and
+proxies visitors to it) and installs the dependencies from the root `uv.lock`, the first
+dependency file it finds. No secrets are needed. The map's state outlines load from Plotly's
+CDN (`cdn.plot.ly`) in each visitor's browser.
+
+If the build log shows the package or a dependency failing to install, the documented escape
+hatch is a `requirements.txt` listing the runtime dependencies of `pyproject.toml`. Cloud only
+uses it if it finds it before `uv.lock`: it searches the entrypoint's directory first, then the
+repository root, and in each one `uv.lock` outranks `requirements.txt`. With `streamlit_app.py`
+at the root next to `uv.lock`, that means moving the entrypoint into its own folder (with the
+`requirements.txt` beside it). The entrypoint imports the package from `src/` itself, so it
+works whether or not Cloud installs this project.
 
 ## Working with real comments (CLI round trip)
 
@@ -254,7 +287,7 @@ uv run pytest -m "not browser"                             # everything except t
 uv run pytest --cov=crop_explorer --cov-report=term-missing
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy                                                # strict, over src/ and app.py
+uv run mypy                                                # strict, over src/, app.py and streamlit_app.py
 uv run pre-commit run --all-files                          # ruff, format and mypy, as in CI
 ```
 
@@ -262,7 +295,8 @@ Tests were written first and use synthetic comments only. They include Hypothesi
 tests for the pure logic (normalisation, matching, grouping, visibility, escaping), every SPEC
 §11 acceptance case (`tests/test_acceptance.py`, including end-to-end validator cases pushed
 through `load-extractions`), rights-isolation checks across search, chips, filters, counts and
-the map, and Streamlit `AppTest` runs of the viewer. SPEC §11 #17 (phone width, resets, source
+the map, and Streamlit `AppTest` runs of the viewer and of the hosted demo entrypoint
+(`tests/test_streamlit_app.py`: public scope, its own database, never a user's). SPEC §11 #17 (phone width, resets, source
 references) is covered by `tests/test_app.py` (Clear, the "Source ↗" link of a cleared comment,
 the synthetic and no-link notes) and by `tests/test_browser.py`: it starts `streamlit run`
 headless on a free loopback port and drives Chromium at 390x844 (no sideways scrolling, search
@@ -270,8 +304,8 @@ box and the always-visible selects on screen, a zone choice regroups the reports
 the first-load labels, the source link's address), then a desktop smoke test. That test is
 marked `browser`, takes about 15 seconds and needs Playwright's Chromium (`uv run playwright
 install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
-`tests/test_code_standards.py` fails for any function in `src/` or `app.py` with more than 15
-code lines. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in
+`tests/test_code_standards.py` fails for any function in `src/`, `app.py` or `streamlit_app.py`
+with more than 15 code lines. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in
 step with the code: its marker list, rejection codes, region codes and aliases, documented
 phrasings, look-alikes and crop synonyms must match what the loader reads, and its worked
 example must load with zero rejections. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
@@ -283,6 +317,8 @@ runs the tests with coverage.
 ├── SPEC.md                       # product spec (v0.5)
 ├── config.yaml                   # runtime configuration
 ├── app.py                        # Streamlit Browse screen (thin; logic lives in the package)
+├── streamlit_app.py              # hosted public demo entrypoint (Streamlit Community Cloud)
+├── .streamlit/config.toml        # Streamlit settings (no server address or port)
 ├── docs/
 │   ├── ARCHITECTURE.md           # module contracts and exact behavioural rules
 │   └── EXTRACTION_PROMPT.md      # operator guide + instructions for the offline model step
@@ -292,6 +328,7 @@ runs the tests with coverage.
 │   └── SCENARIOS.md              # what each synthetic comment exercises
 ├── src/crop_explorer/
 │   ├── __main__.py               # CLI
+│   ├── demo.py                   # synthetic demo database (CLI `demo` and the hosted demo)
 │   ├── schemas.py                # extraction contract, raw records, canonical UTC time
 │   ├── vocab.py, regions.py      # controlled vocabulary and region codes
 │   ├── views.py                  # read-side types (garden, views, match and search results)
@@ -339,4 +376,5 @@ runs the tests with coverage.
 - The viewer is a local, single-user tool with no accounts. A private-scope viewer refuses to
   run on a non-loopback address; never work around that. Text copied from cards contains
   invisible U+2060 characters (part of rendering untrusted text literally).
-- `demo` reads the fixtures from the source tree, so it needs a checkout or an editable install.
+- `demo` and the hosted demo read the fixtures from the source tree, so they need a checkout or
+  an editable install.

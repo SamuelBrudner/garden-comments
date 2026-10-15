@@ -15,7 +15,8 @@ Commands (docs/ARCHITECTURE.md, "CLI"):
 ``summary [--scope {public,private}]``
     Count what a viewer in that scope can see.
 ``demo``
-    Ingest the synthetic fixtures (rights ``synthetic``) and load their extractions.
+    Ingest the synthetic fixtures (rights ``synthetic``) and load their extractions
+    (:func:`crop_explorer.demo.build_demo_database`; any rejection is an error).
 
 ``--config`` and ``--db`` may be given before or after the command. On success exactly one line
 of JSON (ids and counts only) goes to stdout and the exit status is 0. On invalid input
@@ -48,6 +49,13 @@ import yaml
 
 from crop_explorer import db
 from crop_explorer.config import DEFAULT_CONFIG_PATH, AppConfig, load_config
+from crop_explorer.demo import (
+    DEMO_COMMENTS,
+    DEMO_EXTRACTIONS,
+    DEMO_KIND,
+    DEMO_SOURCE_ID,
+    build_demo_database,
+)
 from crop_explorer.extraction import ExtractionReport, load_extractions
 from crop_explorer.ingest import build_source, import_file
 from crop_explorer.logging_setup import configure_logging
@@ -77,11 +85,6 @@ EXIT_ERROR: Final = 2
 """Exit status for invalid input (the same status argparse uses for usage errors)."""
 
 DEFAULT_KIND: Final = "comments_export"
-DEMO_SOURCE_ID: Final = "synthetic-demo"
-DEMO_KIND: Final = "synthetic_fixture"
-_FIXTURES_DIR: Final = Path(__file__).resolve().parents[2] / "fixtures"
-DEMO_COMMENTS: Final = _FIXTURES_DIR / "synthetic_comments.jsonl"
-DEMO_EXTRACTIONS: Final = _FIXTURES_DIR / "synthetic_extractions.jsonl"
 
 _HANDLED_ERRORS: Final = (ValueError, KeyError, OSError, yaml.YAMLError, sqlite3.Error)
 _OWNER_ONLY: Final = 0o600
@@ -358,20 +361,8 @@ def _summary(cfg: AppConfig, args: argparse.Namespace) -> Payload:
 
 def _demo(cfg: AppConfig, args: argparse.Namespace) -> Payload:
     del args
-    now = utc_now_iso()
-    source = build_source(
-        DEMO_COMMENTS,
-        source_id=DEMO_SOURCE_ID,
-        kind=DEMO_KIND,
-        rights_status="synthetic",
-        source_url=None,
-        expires_at=None,
-        imported_at=now,
-    )
-    with _open_db(cfg) as conn:
-        stats = import_file(conn, DEMO_COMMENTS, ColumnMapping(), source)
-        report = load_extractions(conn, DEMO_EXTRACTIONS, cfg.extraction, now)
-    return {"import": stats.model_dump(), "extraction": _report_payload(report)}
+    built = build_demo_database(cfg.database.path, cfg, utc_now_iso())
+    return {"import": built.stats.model_dump(), "extraction": _report_payload(built.report)}
 
 
 @dataclass(frozen=True)

@@ -72,7 +72,7 @@ max-complexity = 8
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "app.py"]
+files = ["src", "app.py", "streamlit_app.py"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
