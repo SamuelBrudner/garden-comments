@@ -15,6 +15,7 @@ width is covered by ``tests/test_browser.py``.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 import runpy
@@ -1055,8 +1056,8 @@ GLANCE_SECRETS = ("Aardvark", "aardvark", GLANCE_CROP, "PRIVATEGLANCE", "Hawaii"
 QUALITY_WORDS = ("best", "top-rated", "recommend", "score", "%")
 DEMO_TILES = (
     "Reports 70 comments in this view "
-    "Varieties mentioned 44 distinct varieties named "
-    "State growing conditions 33 of 70 "
+    "Varieties mentioned 44 across 8 crops "
+    "Describe conditions 33 of 70 zone, method, heat… "
     "Places named 21 18 U.S. states · 3 outside the U.S."
 )
 """The public test database: 69 synthetic fixtures plus one unextracted Markdown comment."""
@@ -1170,7 +1171,7 @@ def displayed_strings(figure: dict[str, Any]) -> list[str]:
 
 def header_text(at: AppTest) -> str:
     """Every word the "At a glance" header shows: tiles, tab labels, captions and charts."""
-    captions = [str(c.value) for tab in glance_tabs(at) for c in tab.caption]
+    captions = [str(c.value) for tab in glance_tabs(at) for c in [*tab.caption, *tab.markdown]]
     figures = [s for figure in glance_figures(at) for s in displayed_strings(figure)]
     return " ".join(
         ["At a glance", tile_text(tiles_markup(at)), *ui.GLANCE_TABS, *captions, *figures]
@@ -1206,6 +1207,7 @@ class TestAtAGlance:
         assert 'aria-valuenow="33"' in markup
         assert 'aria-valuemax="70"' in markup
         assert "Only 33 of 70 reports mention comparable growing conditions" in " ".join(infos(at))
+        assert "State growing" not in markup  # never read as a U.S. state
 
     def test_each_tab_has_a_caption_a_chart_and_a_table(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1215,6 +1217,8 @@ class TestAtAGlance:
         for tab, types in zip(glance_tabs(at), expected, strict=True):
             (caption,) = tab.caption
             assert caption.value
+            kinds = [getattr(node, "type", "") for node in walk(tab)][1:3]
+            assert kinds == ["plotly_chart", "caption"], kinds  # the chart first, then its caption
             (chart,) = tab.get("plotly_chart")
             figure = json.loads(chart.proto.spec)
             assert {trace["type"] for trace in figure["data"]} == types
@@ -1228,16 +1232,18 @@ class TestAtAGlance:
     ) -> None:
         at = run_app(monkeypatch, app_env)
         varieties, topics, setups = glance_tabs(at)
-        assert varieties.caption[0].value.startswith(
-            "Comments that mention each variety, top 10 of 44 across all 70 reports. This counts "
-            "conversation, not quality: a failed crop counts the same as a great one."
-        )
+        caption = varieties.caption[0].value
+        assert caption.startswith("Comments that mention each variety: top 10 of 44.")
+        assert "This counts conversation, not quality" in caption
+        assert "Click a bar to show its comments below." in caption
+        assert "ties are listed" not in caption  # the demo's cut falls between 2 and 1
         assert "the 8 most-discussed varieties" in topics.caption[0].value
+        assert "not whether it went well" in topics.caption[0].value
         assert setups.caption[0].value.startswith(
             "Only reports that state a growing method or setting are counted: 20 of 70. Most "
             "don't say."
         )
-        (bars,) = glance_figures(at)[0]["data"]
+        (bars,) = [t for t in glance_figures(at)[0]["data"] if t.get("hoverinfo") == "skip"]
         assert bars["x"][:3] == [10, 5, 5]
         ticks = glance_figures(at)[0]["layout"]["yaxis"]["ticktext"]
         assert ticks[:3] == ["Sungold · tomato", "Cherokee Purple · tomato", "Juliet · tomato"]
@@ -1251,15 +1257,16 @@ class TestAtAGlance:
         modes = [list(tab.get("plotly_chart")[0].proto.selection_mode) for tab in glance_tabs(at)]
         assert [bool(mode) for mode in modes] == [True, True, False]
 
-    def test_charts_remount_when_the_search_changes(
+    def test_charts_remount_when_a_click_sets_the_variety_filter(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
         before = ui.glance_key("varieties", {})
         assert before in at.session_state
-        at.text_input(key=ui.TEXT_KEY).input("Juliet").run()
+        at.session_state[ui.VARIETY_FILTER_KEY] = "juliet"
+        at.run()
         assert before not in at.session_state
-        assert ui.glance_key("varieties", {ui.TEXT_KEY: "Juliet"}) in at.session_state
+        assert ui.glance_key("varieties", {ui.VARIETY_FILTER_KEY: "juliet"}) in at.session_state
 
     def test_no_quality_words_anywhere_in_the_header(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1371,3 +1378,148 @@ class TestAtAGlance:
         captions = [tab.caption[0].value for tab in glance_tabs(at)]
         assert captions == [ui.NO_VARIETIES, ui.NO_TOPICS, ui.NO_SETUPS]
         assert glance_figures(at) == []
+
+
+def bar_counts(at: AppTest) -> list[tuple[str, int]]:
+    """``(variety_key, count)`` of every bar, read from the figure the viewer drew."""
+    figure = glance_figures(at)[0]
+    (layer,) = [t for t in figure["data"] if t.get("hoverinfo") != "skip"]
+    keys = [html.unescape(row[0]) for row in layer["customdata"]]
+    (painted,) = [t for t in figure["data"] if t.get("hoverinfo") == "skip"]
+    return list(zip(keys, painted["x"], strict=True))
+
+
+def show_variety(at: AppTest, key: str, topics: Sequence[str] = ()) -> AppTest:
+    """Apply what a chart click applies (``ui.*_click_updates``), then run."""
+    updates = (
+        ui.cell_click_updates({"selection": {"points": [{"customdata": [key, *topics]}]}}, {key})
+        if topics
+        else ui.variety_click_updates({"selection": {"points": [{"customdata": [key]}]}}, {key})
+    )
+    assert updates
+    for name, value in updates.items():
+        at.session_state[name] = value
+    return at.run()
+
+
+class TestGlanceClickThrough:
+    """A click shows exactly the comments the mark counted, says so, and is easy to undo."""
+
+    def test_every_bar_shows_exactly_the_reports_it_counts(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        bars = bar_counts(at)
+        assert len(bars) == 10
+        for key, count in bars:
+            show_variety(at, key)
+            assert not at.exception
+            assert f"Reports ({count})" in subheaders(at), key
+
+    def test_a_text_search_would_find_more_than_the_bar(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        """Why a click filters by variety key: "Sungold" as text also finds syn-0020."""
+        at = run_app(monkeypatch, app_env)
+        assert ("sungold", 10) in bar_counts(at)
+        at.text_input(key=ui.TEXT_KEY).input("Sungold").run()
+        assert "Reports (11)" in subheaders(at)
+        show_variety(at, "sungold")
+        assert at.session_state[ui.TEXT_KEY] == ""
+        assert "Reports (10)" in subheaders(at)
+        assert INJECTION_ID not in shown_ids(at, app_env)
+
+    def test_a_cell_shows_exactly_the_reports_it_counts(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        grid = glance_figures(at)[1]
+        (cells,) = [t for t in grid["data"] if t["type"] == "scatter"]
+        (heat,) = [t for t in grid["data"] if t["type"] == "heatmap"]
+        counts = [n for row in heat["z"] for n in row]
+        picked = [(c, n) for c, n in zip(cells["customdata"], counts, strict=True) if n][:4]
+        for (key, topic), count in picked:
+            show_variety(at, html.unescape(key), [topic])
+            assert f"Reports ({count})" in subheaders(at), (key, topic)
+            assert at.session_state[ui.TOPICS_KEY] == [topic]
+
+    def test_feedback_above_the_charts_names_what_is_shown_and_links_down(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        assert not [m for tab in glance_tabs(at) for m in tab.markdown]  # nothing clicked yet
+        show_variety(at, "sungold", ["flavor"])
+        expected = ui.glance_feedback("Sungold · tomato", ["flavor"])
+        varieties, topics, setups = glance_tabs(at)
+        assert [m.value for m in varieties.markdown] == [expected]
+        assert [m.value for m in topics.markdown] == [expected]
+        assert not setups.markdown
+        for tab in (varieties, topics):  # the feedback right above the chart
+            kinds = [getattr(node, "type", "") for node in walk(tab)][1:3]
+            assert kinds == ["markdown", "plotly_chart"], kinds
+        assert "about Flavor below" in expected
+        assert at.multiselect(key=ui.TOPICS_KEY).value == ["flavor"]
+        assert "Flavor" in at.multiselect(key=ui.TOPICS_KEY).options  # one label for a topic
+
+    def test_the_link_target_sits_just_above_the_results(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        nodes = list(walk(at.main))
+        values = [v if isinstance(v := getattr(n, "value", None), str) else None for n in nodes]
+        anchor = values.index(ui.RESULTS_ANCHOR_HTML)
+        comments = next(
+            i for i, n in enumerate(nodes) if type(n).__name__ == "Tab" and n.label == "Comments"
+        )
+        strict = next(i for i, n in enumerate(nodes) if getattr(n, "key", "") == ui.STRICT_KEY)
+        assert strict < anchor < comments
+
+    def test_the_filter_note_names_the_variety_and_resets_it(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        show_variety(at, "earlygirl")
+        assert ui.variety_filter_note("Early Girl · tomato") in infos(at)
+        assert "Reports (2)" in subheaders(at)
+        at.button(key="clear_variety_filter").click().run()
+        assert at.session_state[ui.VARIETY_FILTER_KEY] is None
+        assert "Reports (70)" in subheaders(at)
+        assert not [m for tab in glance_tabs(at) for m in tab.markdown]
+
+    def test_clear_resets_the_variety_filter(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        show_variety(at, "juliet", ["flavor"])
+        at.button(key="clear_all").click().run()
+        assert at.session_state[ui.VARIETY_FILTER_KEY] is None
+        assert at.session_state[ui.TOPICS_KEY] == []
+        assert "Reports (70)" in subheaders(at)
+
+    def test_a_click_keeps_the_garden(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        select_garden(at, zone="6b").run()
+        show_variety(at, "sungold")
+        assert at.session_state[ui.CONDITION_KEYS["zone"]] == "6b"
+        assert not has_group(at, "all")  # still grouped by the garden
+
+    def test_a_stale_variety_filter_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        at.session_state[ui.VARIETY_FILTER_KEY] = "nosuchvariety"
+        at.run()
+        assert not at.exception
+        assert at.session_state[ui.VARIETY_FILTER_KEY] is None
+        assert "Reports (70)" in subheaders(at)
+
+    def test_a_private_variety_cannot_be_shown_in_the_public_view(
+        self, monkeypatch: pytest.MonkeyPatch, glance_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, glance_env)
+        at.session_state[ui.VARIETY_FILTER_KEY] = "aardvarkgold"
+        at.run()
+        assert at.session_state[ui.VARIETY_FILTER_KEY] is None
+        assert not [s for s in GLANCE_SECRETS if s != "Hawaii" and s in all_text(at)]

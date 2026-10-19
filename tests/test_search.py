@@ -1253,7 +1253,9 @@ class TestMentionFilters:
         assert [f.fact_id for f in relevant[0].facts] == ["region=US-CT", "method=container"]
 
     def test_variety_and_topic_filters_must_hold_on_the_same_mention(self) -> None:
-        assert build_result([two_crops()], ask(variety="sungold", topics=("disease",))).groups == ()
+        assert (
+            build_result([two_crops()], ask(variety="sungold", topics=("disease",))).groups == ()
+        )
         result = build_result([two_crops()], ask(variety="sungold", topics=("flavor",)))
         assert [mm.mention.mention_id for mm in card(result, "mixed").mention_matches] == [
             "mixed#m0"
@@ -1273,7 +1275,9 @@ class TestMentionFilters:
             view.model_copy(
                 update={
                     "mentions": tuple(
-                        m.model_copy(update={"variety_key": variety_key(m.variety_as_written or "")})
+                        m.model_copy(
+                            update={"variety_key": variety_key(m.variety_as_written or "")}
+                        )
                         for m in view.mentions
                     )
                 }

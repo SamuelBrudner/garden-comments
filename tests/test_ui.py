@@ -1905,56 +1905,58 @@ class TestGlanceTiles:
 
 class TestGlanceCaptions:
     def test_variety_caption_is_one_short_line(self) -> None:
-        assert ui.varieties_caption(10, glance_headline()) == (
-            "Comments that mention each variety: top 10 of 44, across all 69 reports."
-        )
+        caption = ui.varieties_caption(10, 44)
+        assert caption == "Comments that mention each variety: top 10 of 44."
+        assert len(caption) <= 52  # one line at phone width
 
     def test_variety_caption_when_every_variety_is_shown(self) -> None:
-        one = glance_headline(n_varieties=1, n_reports=1, n_with_conditions=0)
-        assert ui.varieties_caption(1, one) == (
-            "Comments that mention each variety (1 in all), in the only report."
-        )
-        assert ui.varieties_caption(44, glance_headline()).endswith(
-            "(44 in all), across all 69 reports."
-        )
+        assert ui.varieties_caption(1, 1) == "Comments that mention each variety (all 1)."
+        assert ui.varieties_caption(44, 44) == "Comments that mention each variety (all 44)."
 
-    def test_variety_notes_say_it_counts_conversation_not_quality(self) -> None:
-        notes = ui.varieties_notes_html(0, 2)
-        assert (
-            "This counts conversation, not quality: a failed crop counts the same as a great one."
-            in notes
+    def test_variety_caption_says_what_it_counts_and_that_it_is_not_quality(self) -> None:
+        caption = ui.varieties_caption_html(10, 44, 0, 2)
+        assert caption.startswith(
+            "Comments that mention each variety: top 10 of 44. This counts conversation, not "
+            "quality: a failed crop counts the same as a great one. "
         )
-        assert "tie" not in notes
+        assert "ties are listed" not in caption
 
-    def test_variety_notes_say_how_many_equal_varieties_were_cut(self) -> None:
+    def test_variety_caption_says_how_many_equal_varieties_were_cut(self) -> None:
         assert "2 more varieties also have 2 comments; ties are listed alphabetically." in (
-            ui.varieties_notes_html(2, 2)
+            ui.varieties_caption_html(10, 46, 2, 2)
         )
         assert "1 more variety also has 1 comment; ties are listed alphabetically." in (
-            ui.varieties_notes_html(1, 1)
+            ui.varieties_caption_html(10, 46, 1, 1)
         )
 
-    def test_notes_carry_a_mouse_and_a_touch_hint(self) -> None:
-        notes = ui.varieties_notes_html(0, 2)
-        assert '<span class="glance-mouse">Click a bar to show its comments below.</span>' in notes
-        assert (
+    def test_captions_end_with_a_mouse_and_a_touch_hint(self) -> None:
+        caption = ui.varieties_caption_html(10, 44, 0, 2)
+        assert caption.endswith(
+            '<span class="glance-mouse">Click a bar to show its comments below.</span>'
             '<span class="glance-touch">Tap a bar once to see its count, then tap it again to '
             "show its comments below.</span>"
-        ) in notes
-        cells = ui.topics_notes_html(0, 3)
+        )
+        cells = ui.topics_caption_html(8, 0, 3)
         assert "Click a cell to show those comments below." in cells
         assert "Tap a cell once to see its count, then tap it again" in cells
 
-    def test_topic_caption_and_notes(self) -> None:
+    def test_topic_caption(self) -> None:
         assert ui.topics_caption(8) == (
             "Comments about each topic, for the 8 most-discussed varieties in the bar chart's "
             "order."
         )
         assert ui.topics_caption(1) == "Comments about each topic, for the most-discussed variety."
-        notes = ui.topics_notes_html(0, 3)
-        assert "not whether it went well" in notes
-        assert "tie" not in notes
-        assert "1 more variety also has 3 comments" in ui.topics_notes_html(1, 3)
+        caption = ui.topics_caption_html(8, 0, 3)
+        assert caption.startswith(ui.topics_caption(8))
+        assert "not whether it went well" in caption
+        assert "ties are listed" not in caption
+        assert "1 more variety also has 3 comments" in ui.topics_caption_html(8, 1, 3)
+
+    def test_captions_are_built_from_numbers_and_fixed_text_only(self) -> None:
+        for caption in (ui.varieties_caption_html(10, 44, 3, 2), ui.topics_caption_html(8, 1, 2)):
+            text = re.sub(r"<span class=\"glance-(mouse|touch)\">|</span>", "", caption)
+            assert "<" not in text
+            assert ">" not in text
 
     def test_setup_caption_is_honest_about_how_few_say(self) -> None:
         assert ui.setups_caption(20, 69) == (
@@ -1971,10 +1973,10 @@ class TestGlanceCaptions:
     def test_no_quality_words(self, n_shown: int) -> None:
         text = " ".join(
             [
-                ui.varieties_caption(n_shown, glance_headline()),
-                ui.varieties_notes_html(3, 2),
+                ui.varieties_caption(n_shown, 44),
+                ui.varieties_caption_html(n_shown, 44, 3, 2),
                 ui.topics_caption(n_shown),
-                ui.topics_notes_html(3, 2),
+                ui.topics_caption_html(n_shown, 3, 2),
                 ui.setups_caption(5, 69),
                 ui.glance_feedback("Sungold · tomato", ["flavor"]),
                 ui.variety_filter_note("Sungold · tomato"),
@@ -2076,7 +2078,8 @@ class TestGlanceFeedback:
         )
 
     def test_the_results_anchor_is_trusted_fixed_markup(self) -> None:
-        assert ui.RESULTS_ANCHOR_HTML == f'<div id="{ui.RESULTS_ANCHOR}"></div>'
+        expected = f'<div id="{ui.RESULTS_ANCHOR}"></div>'
+        assert expected == ui.RESULTS_ANCHOR_HTML
 
 
 class TestGlanceTables:

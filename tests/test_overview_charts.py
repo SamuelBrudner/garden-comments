@@ -428,7 +428,7 @@ class TestSetupsBar:
 
     def test_values_and_hover(self) -> None:
         figure = setups_bar(SETUPS, LIGHT)
-        method, shelter = bars(figure)
+        method, _ = bars(figure)
         assert list(method.text) == ["8", "3"]
         method_rows, shelter_rows = targets(figure)
         assert list(shelter_rows.hovertext) == ["Greenhouse / tunnel: 5 comments"]

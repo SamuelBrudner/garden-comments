@@ -91,22 +91,34 @@ above the Comments and Map tabs.
 
 **At a glance.** Above "My growing conditions", a header shows what the community shared,
 counted over the visible reports only (the public view never counts private imports). Four stat
-tiles (four across, two by two on a phone): **Reports**, **Varieties mentioned**, **State
-growing conditions** ("33 of 69", with a meter; same definition as "Only N of M reports mention
-comparable growing conditions") and **Places named** (U.S. states and places outside the U.S.).
-Three tabs: **Most-discussed varieties** (comments naming each of the top
-`overview.top_varieties` varieties, one bar colour, the count at each bar's tip), **What people
-talk about** (a grid of comments per variety and topic for the first
+tiles (four across, two by two on a phone): **Reports**, **Varieties mentioned** ("across 8
+crops"), **Describe conditions** ("33 of 69", with a meter; any comparable condition such as
+zone, method or heat, the same definition as "Only N of M reports mention comparable growing
+conditions") and **Places named** (U.S. states and places outside the U.S.). Three short tabs,
+each chart directly under its tab with its caption below: **Varieties** (comments naming each of
+the top `overview.top_varieties` varieties, one bar colour, the count at each bar's tip),
+**Topics** (a grid of comments per variety and topic for the first
 `overview.heatmap_varieties` of those varieties, on a one-hue blue scale with a "Comments"
-legend) and **How people grow** (comments stating each growing method and setting). Every
-number is a count of distinct comments: it measures conversation, never quality, and the
-captions say so ("a failed crop counts the same as a great one"; "most don't say"). Each chart
-has a hover readout and a "Show as table" view. Selecting a variety's bar searches for that
-variety (and clears Topics); selecting a grid cell searches for the variety and sets Topics to
-that topic. The charts use their own light and dark colour tokens, chosen from Streamlit's
-theme (`.streamlit/config.toml` sets an accent per mode so the viewer follows the visitor's
-system setting); variety names from comments are escaped before Plotly sees them, and long
-names are shortened with "…" on the axis (the hover and the table keep the full name).
+legend; the catch-all "General" is always the last column) and **How people grow** (comments
+stating each growing method and setting). Every number is a count of distinct comments: it
+measures conversation, never quality, and the captions say so ("a failed crop counts the same
+as a great one"; "most don't say"). When the cut at the top 10 splits varieties with equal
+counts, the caption says how many more have that count and that ties are listed
+alphabetically. Each chart has one hover readout per bar or cell and a "Show as table" view.
+
+Clicking a variety's bar (anywhere on its row) shows **exactly the reports that bar counts**: it
+sets a variety filter (every spelling of that variety, so "Sun Gold" and "Sungold" both count)
+and clears the search text and the Crop, Topics, Year and state filters, while your garden
+conditions stay as they are. Clicking a grid cell does the same and sets Topics to that topic.
+A line right above the chart then names what is shown, with a "Go to the reports ↓" link, and
+the results start with "Showing only reports that mention Sungold · tomato (all spellings)."
+and an "Any variety" button (Clear resets it too). On a touch screen Plotly selects a bar on
+the second tap (the first tap shows its count), so phones get the hint "Tap a bar once to see
+its count, then tap it again", and mouse users "Click a bar". The charts use their own light
+and dark colour tokens, chosen from Streamlit's theme (`.streamlit/config.toml` sets an accent
+per mode so the viewer follows the visitor's system setting), and the page's own typeface;
+variety names from comments are escaped before Plotly sees them, and long names are shortened
+with "…" on the axis (the hover and the table keep the full name).
 
 ## Host the public demo on Streamlit Community Cloud
 
@@ -321,10 +333,12 @@ references) is covered by `tests/test_app.py` (Clear, the "Source ↗" link of a
 the synthetic and no-link notes) and by `tests/test_browser.py`: it starts `streamlit run`
 headless on a free loopback port and drives Chromium at 390x844 (no sideways scrolling, search
 box and the always-visible selects on screen, a zone choice regroups the reports, Clear restores
-the first-load labels, the source link's address, the "At a glance" tiles two by two with the
-first chart on screen), then desktop checks (tiles four across; selecting a variety bar and a
-topic cell sets the search and Topics). That test is
-marked `browser`, takes about 35 seconds and needs Playwright's Chromium (`uv run playwright
+the first-load labels, the source link's address, the "At a glance" tiles two by two with all
+three tab labels on screen and the first bars above the fold), then desktop checks (tiles four
+across; one hover box per row; clicking a variety bar or a topic cell shows exactly the reports
+it counts, names them above the chart and links down to them) and a touch-screen check (the
+touch hint shows; two taps on a bar show its reports). That test is
+marked `browser`, takes about 40 seconds and needs Playwright's Chromium (`uv run playwright
 install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
 `tests/test_code_standards.py` fails for any function in `src/`, `app.py` or `streamlit_app.py`
 with more than 15 code lines. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in

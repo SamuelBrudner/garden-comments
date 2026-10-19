@@ -36,7 +36,7 @@ from crop_explorer.config import DEFAULT_CONFIG_PATH, ContextLabel, OutsideLink,
 from crop_explorer.environment_match import match_context, values_with
 from crop_explorer.geography import RegionCounts, count_label
 from crop_explorer.overview import Headline
-from crop_explorer.overview_charts import FONT_FAMILY, SETUP_TITLES, TOPIC_TITLES, ChartTheme
+from crop_explorer.overview_charts import SETUP_TITLES, TOPIC_TITLES, ChartTheme, variety_name
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
 from crop_explorer.schemas import TOPICS, Basis, EnvKey, RightsStatus
 from crop_explorer.search import FilterOptions
@@ -87,11 +87,14 @@ __all__ = [
     "PRIVATE_BANNER",
     "REGION_FILTER_KEY",
     "REGION_KEY",
+    "RESULTS_ANCHOR",
+    "RESULTS_ANCHOR_HTML",
     "STRICT_KEY",
     "SYNTHETIC_NOTE",
     "TABLE_LABEL",
     "TEXT_KEY",
     "TOPICS_KEY",
+    "VARIETY_FILTER_KEY",
     "WORD_JOINER",
     "WRITTEN_LABEL",
     "YEAR_KEY",
@@ -117,6 +120,7 @@ __all__ = [
     "evidence_rows",
     "flatten",
     "garden_from_state",
+    "glance_feedback",
     "glance_key",
     "group_heading",
     "is_loopback_address",
@@ -156,9 +160,14 @@ __all__ = [
     "summary_line",
     "topic_label",
     "topic_table",
+    "topic_title",
     "topics_caption",
+    "topics_caption_html",
     "varieties_caption",
+    "varieties_caption_html",
     "variety_click_updates",
+    "variety_filter_note",
+    "variety_names",
     "variety_table",
     "visible_chips",
     "year_filter_note",
@@ -251,6 +260,8 @@ TOPICS_KEY: Final = "query_topics"
 YEAR_KEY: Final = "query_year"
 STRICT_KEY: Final = "query_strict"
 REGION_FILTER_KEY: Final = "query_region_filter"
+VARIETY_FILTER_KEY: Final = "query_variety"
+"""Session key of the variety filter (a ``variety_key``), set by clicking "At a glance"."""
 PAGE_QUERY_KEY: Final = "page_query"
 """Session key holding the query the per-group page counts belong to."""
 _GROUP_KEYS: Final[tuple[GroupKey, ...]] = get_args(GroupKey)
@@ -459,6 +470,14 @@ def topic_label(topic: str) -> str:
     return topic.replace("_", " ")
 
 
+def topic_title(topic: str) -> str:
+    """Return a topic's title, the same on the topic grid and the Topics filter.
+
+    ``weather_tolerance`` -> ``"Weather tolerance"``.
+    """
+    return TOPIC_TITLES[topic]
+
+
 # --------------------------------------------------------------------------- session state
 
 
@@ -473,6 +492,7 @@ def reset_values() -> dict[str, Any]:
         YEAR_KEY: None,
         STRICT_KEY: False,
         REGION_FILTER_KEY: None,
+        VARIETY_FILTER_KEY: None,
     }
 
 
@@ -484,9 +504,9 @@ def reset_state_keys() -> tuple[str, ...]:
 def stale_state_fixes(state: Mapping[str, Any], options: FilterOptions) -> dict[str, Any]:
     """Return session-state updates that drop filter values no longer offered as options.
 
-    A crop, topic or year chosen earlier in a session can disappear from the visible data (for
-    example after a re-extraction or a source deletion). Its widget would then hold a value
-    that is not among its options, so the value is reset rather than kept or guessed.
+    A crop, topic, year or variety chosen earlier in a session can disappear from the visible
+    data (for example after a re-extraction or a source deletion). Its control would then hold
+    a value that is not among its options, so the value is reset rather than kept or guessed.
 
     Parameters
     ----------
@@ -506,6 +526,8 @@ def stale_state_fixes(state: Mapping[str, Any], options: FilterOptions) -> dict[
         fixes[CROP_KEY] = None
     if year is not None and year not in options.years:
         fixes[YEAR_KEY] = None
+    if state.get(VARIETY_FILTER_KEY) not in (None, *options.varieties):
+        fixes[VARIETY_FILTER_KEY] = None
     topics = list(state.get(TOPICS_KEY) or ())
     kept = [topic for topic in topics if topic in options.topics]
     if kept != topics:
@@ -567,6 +589,7 @@ def query_from_state(state: Mapping[str, Any], *, max_query_chars: int) -> Searc
             "topics": tuple(state.get(TOPICS_KEY) or ()),
             "year": state.get(YEAR_KEY),
             "region_filter": state.get(REGION_FILTER_KEY),
+            "variety": state.get(VARIETY_FILTER_KEY),
             "garden": garden_from_state(state),
             "only_stated_matches": state.get(STRICT_KEY, False),
         }
@@ -1379,43 +1402,80 @@ def label_badge(label: ContextLabel) -> str:
 
 # --------------------------------------------------------------------------- at a glance
 
-GLANCE_TABS: Final = ("Most-discussed varieties", "What people talk about", "How people grow")
+GLANCE_TABS: Final = ("Varieties", "Topics", "How people grow")
+"""Short tab labels, so all three fit across a phone (the captions say the rest)."""
 NO_VARIETIES: Final = "No variety has been identified in these reports yet."
 NO_SETUPS: Final = "No report states a growing method or setting yet."
 NO_TOPICS: Final = "No topics have been identified for these varieties yet."
 TABLE_LABEL: Final = "Show as table"
+RESULTS_ANCHOR: Final = "glance-results"
+"""Element id just above the results, the target of the "Go to the reports" link."""
+RESULTS_ANCHOR_HTML: Final = f'<div id="{RESULTS_ANCHOR}"></div>'
+"""Trusted, fixed markup placing :data:`RESULTS_ANCHOR` on the page."""
 _CONVERSATION_NOT_QUALITY: Final = (
     "This counts conversation, not quality: a failed crop counts the same as a great one."
 )
+_TOPIC_NOT_OUTCOME: Final = (
+    "A comment can touch several topics, and a topic says what was discussed, not whether it "
+    "went well."
+)
+_HINTS: Final = MappingProxyType(
+    {
+        "bar": (
+            "Click a bar to show its comments below.",
+            "Tap a bar once to see its count, then tap it again to show its comments below.",
+        ),
+        "cell": (
+            "Click a cell to show those comments below.",
+            "Tap a cell once to see its count, then tap it again to show those comments below.",
+        ),
+    }
+)
+"""(mouse, touch) hints. On a touch screen Plotly selects a point only on the second tap: the
+first tap shows its hover label (``selectOnClick`` reads the hover data before the tap
+creates it), so touch devices are told to tap twice."""
+_HINT: Final = '<span class="glance-mouse">{}</span><span class="glance-touch">{}</span>'
 _TILE_STYLE: Final = (
     "<style>"
     ".glance-kpis{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;"
-    "margin:0 0 8px;font-family:{font}}}"
-    "@media (max-width:640px){{.glance-kpis{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}"
+    "margin:0;font-family:inherit}}"
+    "@media (max-width:640px){{.glance-kpis{{grid-template-columns:repeat(2,minmax(0,1fr));"
+    "gap:8px}}.glance-tile{{padding:8px 12px}}.glance-value{{font-size:1.5rem;margin-top:0}}}}"
     ".glance-tile{{border:1px solid {border};border-radius:10px;padding:12px 14px;min-width:0;"
     "overflow-wrap:anywhere}}"
     ".glance-label{{color:{secondary};font-size:0.875rem;line-height:1.3}}"
     ".glance-value{{color:{primary};font-size:1.75rem;font-weight:600;line-height:1.2;"
     "margin-top:6px;font-variant-numeric:proportional-nums}}"
     ".glance-of{{font-size:1rem;font-weight:500;color:{secondary}}}"
-    ".glance-note{{color:{muted};font-size:0.75rem;line-height:1.35;margin-top:4px}}"
+    ".glance-note{{color:{secondary};font-size:0.8rem;line-height:1.35;margin-top:4px}}"
     ".glance-meter{{display:flex;height:6px;border-radius:3px;background:{track};"
-    "overflow:hidden;margin-top:10px}}"
+    "overflow:hidden;margin-top:8px}}"
     ".glance-meter span:first-child{{background:{fill};border-radius:3px}}"
+    ".glance-touch{{display:none}}"
+    "@media (hover:none){{.glance-touch{{display:inline}}.glance-mouse{{display:none}}}}"
     "</style>"
 )
-"""Tile styles, filled with one theme's tokens: 4 across, 2 x 2 at phone width."""
+"""Tile and hint styles, filled with one theme's tokens: tiles 4 across, 2 x 2 (and a little
+tighter) at phone width, in the page's own font; notes in the secondary ink (AA contrast on
+both themes); the touch hint only where the pointer cannot hover."""
 _TILE: Final = (
     '<div class="glance-tile"><div class="glance-label">{label}</div>'
     '<div class="glance-value">{value}</div>{extra}</div>'
 )
 _METER: Final = (
-    '<div class="glance-meter" role="meter" aria-label="Reports that state growing conditions" '
-    'aria-valuemin="0" aria-valuemax="{total}" aria-valuenow="{part}">'
+    '<div class="glance-meter" role="meter" aria-label="Reports that describe growing '
+    'conditions" aria-valuemin="0" aria-valuemax="{total}" aria-valuenow="{part}">'
     '<span style="flex:{part} 1 0px"></span><span style="flex:{rest} 1 0px"></span></div>'
 )
 _COMPACT_FROM: Final = 10_000
-_VARIETIES_NOTE: Final = "distinct varieties named"
+_CONDITIONS_NOTE: Final = "zone, method, heat…"
+"""What "Describe conditions" counts: any comparable growing condition, not a U.S. state."""
+_NAVIGATION_RESETS: Final = MappingProxyType(
+    {TEXT_KEY: "", CROP_KEY: None, YEAR_KEY: None, REGION_FILTER_KEY: None}
+)
+"""Filters a chart click clears, so the reports shown are exactly those the mark counted. The
+viewer's garden and "Only show stated matches" are kept: they group reports, they are not a
+search."""
 
 
 def _figure(n: int) -> str:
@@ -1430,16 +1490,14 @@ def _tile(label: str, value: str, extra: str = "") -> str:
 
 
 def _note(text: str) -> str:
-    return f'<div class="glance-note">{text}</div>'
+    return f'<div class="glance-note">{text}</div>' if text else ""
 
 
 def _tile_style(theme: ChartTheme) -> str:
     return _TILE_STYLE.format(
-        font=FONT_FAMILY,
         border=theme.border,
         primary=theme.text_primary,
         secondary=theme.text_secondary,
-        muted=theme.text_muted,
         track=theme.meter_track,
         fill=theme.series,
     )
@@ -1449,7 +1507,7 @@ def _conditions_tile(part: int, total: int) -> str:
     """Return the "33 of 69" tile, with a meter of the same proportion."""
     value = f'{_figure(part)}<span class="glance-of"> of {_figure(total)}</span>'
     meter = _METER.format(total=total, part=part, rest=total - part)
-    return _tile("State growing conditions", value, meter)
+    return _tile("Describe conditions", value, meter + _note(_CONDITIONS_NOTE))
 
 
 def kpi_tiles_html(headline: Headline, theme: ChartTheme) -> str:
@@ -1465,44 +1523,97 @@ def kpi_tiles_html(headline: Headline, theme: ChartTheme) -> str:
     Returns
     -------
     str
-        A style block and a CSS grid of four tiles, four across (two by two at phone width):
-        "Reports", "Varieties mentioned", "State growing conditions" ("33 of 69" with a meter
-        whose track is a lighter step of the fill's ramp) and "Places named" (U.S. states and
-        places outside the U.S.). Values use proportional figures.
+        A style block (tiles, and the mouse/touch hints of :func:`varieties_caption_html`) and a
+        CSS grid of four tiles, four across (two by two at phone width): "Reports",
+        "Varieties mentioned" ("across 8 crops"), "Describe conditions" ("33 of 69" with a
+        meter whose track is a lighter step of the fill's ramp) and "Places named" (U.S.
+        states and places outside the U.S.). Values use proportional figures.
     """
     places = f"{_plural(headline.n_us_states, 'U.S. state')} · {headline.n_other_regions} "
+    crops = f"across {_plural(headline.n_crops, 'crop')}" if headline.n_crops else ""
     tiles = (
         _tile("Reports", _figure(headline.n_reports), _note("comments in this view")),
-        _tile("Varieties mentioned", _figure(headline.n_varieties), _note(_VARIETIES_NOTE)),
+        _tile("Varieties mentioned", _figure(headline.n_varieties), _note(crops)),
         _conditions_tile(headline.n_with_conditions, headline.n_reports),
         _tile("Places named", _figure(headline.n_places), _note(f"{places}outside the U.S.")),
     )
     return f'{_tile_style(theme)}<div class="glance-kpis">{"".join(tiles)}</div>'
 
 
-def varieties_caption(n_shown: int, headline: Headline) -> str:
-    """Say what the variety bars count, and that conversation is not quality."""
-    n_reports = headline.n_reports
-    where = "in the only report" if n_reports == 1 else f"across all {n_reports} reports"
-    if n_shown < headline.n_varieties:
-        lead = (
-            f"Comments that mention each variety, top {n_shown} of {headline.n_varieties} {where}."
-        )
-    else:
-        lead = f"Comments that mention each variety ({headline.n_varieties} in all) {where}."
-    return f"{lead} {_CONVERSATION_NOT_QUALITY} Select a bar to read those comments."
+def varieties_caption(n_shown: int, n_varieties: int) -> str:
+    """Say in one short sentence what the variety bars count."""
+    if n_shown < n_varieties:
+        return f"Comments that mention each variety: top {n_shown} of {n_varieties}."
+    return f"Comments that mention each variety (all {n_varieties})."
+
+
+def _ties(n_tied_off: int, n_comments: int) -> str:
+    """Say how many equal varieties a cut left out (empty when none were)."""
+    if not n_tied_off:
+        return ""
+    more = (
+        "1 more variety also has" if n_tied_off == 1 else f"{n_tied_off} more varieties also have"
+    )
+    return f" {more} {_plural(n_comments, 'comment')}; ties are listed alphabetically."
+
+
+def _caption_html(lead: str, sentence: str, ties: str, mark: str) -> str:
+    """Return a chart's caption: what it counts, the notes, then the mouse or touch hint.
+
+    Trusted HTML built from fixed text and numbers only, never comment text; CSS shows one
+    of the two hints (:func:`kpi_tiles_html` holds the rule).
+    """
+    mouse, touch = _HINTS[mark]
+    return f"{lead} {sentence}{ties} {_HINT.format(mouse, touch)}"
+
+
+def varieties_caption_html(
+    n_shown: int, n_varieties: int, n_tied_off: int, last_count: int
+) -> str:
+    """Return the caption under the variety bars (trusted HTML: fixed text and numbers only).
+
+    Parameters
+    ----------
+    n_shown : int
+        Bars drawn.
+    n_varieties : int
+        Varieties named in all (``Headline.n_varieties``).
+    n_tied_off : int
+        Varieties left out though they have as many comments as the last bar
+        (``Overview.bars_tied_off``).
+    last_count : int
+        The last bar's number of comments.
+
+    Returns
+    -------
+    str
+        "Comments that mention each variety: top 10 of 44.", that this counts conversation,
+        not quality, how many equal varieties the cut left out (if any) and the click or tap
+        hint.
+    """
+    lead = varieties_caption(n_shown, n_varieties)
+    ties = _ties(n_tied_off, last_count)
+    return _caption_html(lead, _CONVERSATION_NOT_QUALITY, ties, "bar")
 
 
 def topics_caption(n_rows: int) -> str:
-    """Say what the topic grid counts: what was discussed, never whether it went well."""
-    rows = (
-        "the most-discussed variety" if n_rows == 1 else f"the {n_rows} most-discussed varieties"
-    )
+    """Say in one short sentence what the topic grid counts."""
+    if n_rows == 1:
+        return "Comments about each topic, for the most-discussed variety."
     return (
-        f"Comments about each topic for {rows}, in the bar chart's order. A comment can touch "
-        "several topics, and a topic says what was discussed, not whether it went well. Select a "
-        "cell to read those comments."
+        f"Comments about each topic, for the {n_rows} most-discussed varieties in the bar "
+        "chart's order."
     )
+
+
+def topics_caption_html(n_rows: int, n_tied_off: int, last_count: int) -> str:
+    """Return the caption under the topic grid (trusted HTML: fixed text and numbers only).
+
+    As :func:`varieties_caption_html`: what the grid counts, that a topic is not an outcome,
+    the tie note for its last row and the click or tap hint.
+    """
+    ties = _ties(n_tied_off, last_count)
+    return _caption_html(topics_caption(n_rows), _TOPIC_NOT_OUTCOME, ties, "cell")
 
 
 def setups_caption(n_with_setup: int, n_reports: int) -> str:
@@ -1515,47 +1626,108 @@ def setups_caption(n_with_setup: int, n_reports: int) -> str:
 
 
 def _clicked(selection: Mapping[str, Any], size: int) -> list[str] | None:
-    """Return the first selected point's ``customdata`` if it is ``size`` strings."""
+    """Return the first selected point's ``customdata`` (unescaped) if it is ``size`` strings."""
     points = (selection.get("selection") or {}).get("points") or ()
     for point in points:
         data = point.get("customdata")
         if isinstance(data, list) and len(data) == size and all(isinstance(x, str) for x in data):
-            return data
+            return [html.unescape(item) for item in data]
     return None
 
 
-def variety_click_updates(selection: Mapping[str, Any], max_chars: int) -> dict[str, Any]:
+def _show_variety(key: str, topics: list[str]) -> dict[str, Any]:
+    return {VARIETY_FILTER_KEY: key, TOPICS_KEY: topics, **_NAVIGATION_RESETS}
+
+
+def variety_click_updates(selection: Mapping[str, Any], known: Collection[str]) -> dict[str, Any]:
     """Return the session updates for a click on a variety bar (empty when nothing usable).
 
-    The search text becomes the variety's label (unescaped from the figure's ``customdata``,
-    cut to ``max_chars``) and the Topics filter is cleared, so the comments shown are the ones
-    the bar counts; every other control is left as it is.
+    Parameters
+    ----------
+    selection : Mapping[str, Any]
+        The chart's selection state; its ``customdata`` is ``[variety_key]`` (escaped).
+    known : Collection[str]
+        The visible variety keys: any other key (stale or forged) changes nothing.
+
+    Returns
+    -------
+    dict[str, Any]
+        The variety filter set to the key, the Topics filter cleared and the narrowing filters
+        of :data:`_NAVIGATION_RESETS` cleared, so the reports shown are exactly the comments
+        the bar counts; the garden and strict mode are left alone.
     """
     data = _clicked(selection, 1)
-    if data is None:
+    if data is None or data[0] not in known:
         return {}
-    return {TEXT_KEY: html.unescape(data[0])[:max_chars], TOPICS_KEY: []}
+    return _show_variety(data[0], [])
 
 
-def cell_click_updates(selection: Mapping[str, Any], max_chars: int) -> dict[str, Any]:
+def cell_click_updates(selection: Mapping[str, Any], known: Collection[str]) -> dict[str, Any]:
     """Return the session updates for a click on a topic cell (empty when nothing usable).
 
-    The search text becomes the variety's label and the Topics filter that one topic.
+    As :func:`variety_click_updates`, with the Topics filter set to the cell's topic; the
+    ``customdata`` is ``[variety_key, topic]``.
     """
     data = _clicked(selection, 2)
-    if data is None or data[1] not in TOPICS:
+    if data is None or data[0] not in known or data[1] not in TOPICS:
         return {}
-    return {TEXT_KEY: html.unescape(data[0])[:max_chars], TOPICS_KEY: [data[1]]}
+    return _show_variety(data[0], [data[1]])
 
 
 def glance_key(chart: str, state: Mapping[str, Any]) -> str:
-    """Return an "At a glance" chart's widget key, which changes with the search and topics.
+    """Return an "At a glance" chart's widget key, which changes with what a click sets.
 
-    Like :func:`map_key`: after a click sets the search, the chart remounts without a stale
-    click selection, so the next click always registers.
+    Like :func:`map_key`: after a click sets the variety filter (and topics), the chart
+    remounts without a stale click selection, so the next click always registers.
     """
-    fingerprint = json.dumps([state.get(TEXT_KEY) or "", sorted(state.get(TOPICS_KEY) or ())])
+    fingerprint = json.dumps(
+        [
+            state.get(VARIETY_FILTER_KEY) or "",
+            state.get(TEXT_KEY) or "",
+            sorted(state.get(TOPICS_KEY) or ()),
+        ]
+    )
     return f"glance_{chart}_{hashlib.sha256(fingerprint.encode()).hexdigest()[:12]}"
+
+
+def variety_names(frame: pd.DataFrame) -> dict[str, str]:
+    """Return ``variety_key -> "Sungold · tomato"`` (raw, untrusted: escape before display)."""
+    pairs = zip(frame["variety_key"], frame["label"], frame["crop"], strict=True)
+    return {
+        str(key): variety_name(str(label), crop if isinstance(crop, str) else None)
+        for key, label, crop in pairs
+    }
+
+
+def _about_topics(topics: Sequence[str]) -> str:
+    return f" about {' or '.join(topic_title(topic) for topic in topics)}" if topics else ""
+
+
+def glance_feedback(name: str, topics: Sequence[str]) -> str:
+    """Return the Markdown line shown above a clicked chart while the variety filter is on.
+
+    Parameters
+    ----------
+    name : str
+        The variety's display name (untrusted: escaped here).
+    topics : Sequence[str]
+        The Topics filter.
+
+    Returns
+    -------
+    str
+        e.g. ``"Showing the reports that mention Sungold · tomato about Flavor below.
+        [Go to the reports ↓](#glance-results)"``.
+    """
+    shown = f"{escape_markdown(name)}{_about_topics(topics)}"
+    return (
+        f"Showing the reports that mention {shown} below. [Go to the reports ↓](#{RESULTS_ANCHOR})"
+    )
+
+
+def variety_filter_note(name: str) -> str:
+    """Describe an active variety filter (Markdown; the untrusted name is escaped)."""
+    return f"Showing only reports that mention {escape_markdown(name)} (all spellings)."
 
 
 def variety_table(frame: pd.DataFrame) -> pd.DataFrame:

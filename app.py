@@ -101,8 +101,9 @@ _DB_ERROR: Final = (
 )
 
 
-_ClickReader = Callable[[Mapping[str, Any], int], dict[str, Any]]
-"""Reads a chart's click selection into session-state updates (``ui.*_click_updates``)."""
+_ClickReader = Callable[[Mapping[str, Any], Collection[str]], dict[str, Any]]
+"""Reads a chart's click selection into session-state updates (``ui.*_click_updates``), given
+the visible variety keys."""
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,18 @@ class _Context:
     cfg: AppConfig
     scope: ViewerScope
     now: str
+
+
+@dataclass(frozen=True)
+class _Glance:
+    """What every "At a glance" panel draws from in one run."""
+
+    data: Overview
+    theme: ChartTheme
+    known: frozenset[str]
+    """The visible variety keys: a click naming any other key changes nothing."""
+    feedback: str | None
+    """The line shown above a clickable chart while the variety filter is on."""
 
 
 # --------------------------------------------------------------------------- callbacks
@@ -142,9 +155,9 @@ def _on_map_select(widget_key: str) -> None:
         st.session_state[ui.REGION_FILTER_KEY] = code
 
 
-def _on_glance_select(widget_key: str, read: _ClickReader, max_chars: int) -> None:
-    """Turn a click on an "At a glance" chart into a search (nothing for an empty selection)."""
-    _apply(read(st.session_state[widget_key], max_chars))
+def _on_glance_select(widget_key: str, read: _ClickReader, known: frozenset[str]) -> None:
+    """Turn a click on an "At a glance" chart into the variety filter (nothing when empty)."""
+    _apply(read(st.session_state[widget_key], known))
 
 
 def _apply(updates: dict[str, Any]) -> None:
@@ -178,13 +191,13 @@ def _banner(scope: ViewerScope, views: Collection[CommentView]) -> None:
 
 
 def _glance_chart(
-    figure: go.Figure, chart: str, read: _ClickReader | None, max_chars: int
+    figure: go.Figure, chart: str, read: _ClickReader | None, known: frozenset[str]
 ) -> None:
     key = ui.glance_key(chart, _state())
     st.plotly_chart(
         figure,
         key=key,
-        on_select="ignore" if read is None else partial(_on_glance_select, key, read, max_chars),
+        on_select="ignore" if read is None else partial(_on_glance_select, key, read, known),
         selection_mode="points",
         config=dict(overview_charts.CHART_CONFIG),
         theme=None,
@@ -199,53 +212,96 @@ def _table(frame: pd.DataFrame) -> None:
         st.dataframe(frame, hide_index=True, width="stretch")
 
 
-def _varieties_panel(data: Overview, theme: ChartTheme, max_chars: int) -> None:
+def _feedback_line(glance: _Glance) -> None:
+    """Above a clickable chart, while the variety filter is on: what the click is showing.
+
+    Right above the chart, so it is on screen whenever the chart is (a line under a tall chart
+    can fall below the fold). Markdown with the variety name escaped.
+    """
+    if glance.feedback is not None:
+        st.markdown(glance.feedback)
+
+
+def _caption(caption_html: str) -> None:
+    """Under a chart: what it counts, the honesty notes and the mouse or touch hint.
+
+    The chart comes first, right under its tab, so on a phone the bars start above the fold.
+    ``caption_html`` is trusted HTML of fixed text and numbers only (``ui.*_caption_html``).
+    """
+    st.caption(caption_html, unsafe_allow_html=True)
+
+
+def _last_count(varieties: pd.DataFrame, n_rows: int) -> int:
+    return int(varieties["n_comments"].iloc[n_rows - 1])
+
+
+def _varieties_panel(glance: _Glance) -> None:
+    data = glance.data
     if data.varieties.empty:
         st.caption(ui.NO_VARIETIES)
         return
-    st.caption(ui.varieties_caption(len(data.varieties), data.headline))
-    figure = overview_charts.varieties_bar(data.varieties, theme)
-    _glance_chart(figure, "varieties", ui.variety_click_updates, max_chars)
+    _feedback_line(glance)
+    figure = overview_charts.varieties_bar(data.varieties, glance.theme)
+    _glance_chart(figure, "varieties", ui.variety_click_updates, glance.known)
+    n_bars = len(data.varieties)
+    ties = (data.bars_tied_off, _last_count(data.varieties, n_bars))
+    _caption(ui.varieties_caption_html(n_bars, data.headline.n_varieties, *ties))
     _table(ui.variety_table(data.varieties))
 
 
-def _topics_panel(data: Overview, theme: ChartTheme, max_chars: int) -> None:
+def _topics_panel(glance: _Glance) -> None:
+    data = glance.data
     if data.topics.empty:
         st.caption(ui.NO_TOPICS)
         return
-    st.caption(ui.topics_caption(data.topics["variety_key"].nunique()))
-    figure = overview_charts.topics_heatmap(data.topics, theme)
-    _glance_chart(figure, "topics", ui.cell_click_updates, max_chars)
+    _feedback_line(glance)
+    figure = overview_charts.topics_heatmap(data.topics, glance.theme)
+    _glance_chart(figure, "topics", ui.cell_click_updates, glance.known)
+    n_rows = data.topics["variety_key"].nunique()
+    ties = (data.rows_tied_off, _last_count(data.varieties, n_rows))
+    _caption(ui.topics_caption_html(n_rows, *ties))
     _table(ui.topic_table(data.topics))
 
 
-def _setups_panel(data: Overview, theme: ChartTheme, max_chars: int) -> None:
+def _setups_panel(glance: _Glance) -> None:
+    data = glance.data
     if data.setups.empty:
         st.caption(ui.NO_SETUPS)
         return
+    figure = overview_charts.setups_bar(data.setups, glance.theme)
+    _glance_chart(figure, "setups", None, glance.known)
     st.caption(ui.setups_caption(data.n_with_setup, data.headline.n_reports))
-    _glance_chart(overview_charts.setups_bar(data.setups, theme), "setups", None, max_chars)
     _table(ui.setup_table(data.setups))
 
 
 _GLANCE_PANELS: Final = (_varieties_panel, _topics_panel, _setups_panel)
 
 
-def _glance(ctx: _Context, views: Sequence[CommentView]) -> None:
+def _feedback(names: Mapping[str, str]) -> str | None:
+    """Return the line naming what a chart click is showing (``None`` without the filter)."""
+    state = _state()
+    key = state.get(ui.VARIETY_FILTER_KEY)
+    if key is None or key not in names:
+        return None
+    return ui.glance_feedback(names[key], state.get(ui.TOPICS_KEY) or ())
+
+
+def _glance(data: Overview, names: Mapping[str, str]) -> None:
     """Render "At a glance": stat tiles, then one tab per chart, from the visible views only.
 
-    The views are the run's scope-gated views, so a public view never counts private rows.
-    Colors follow Streamlit's theme type (light tokens until the browser reports one).
+    ``data`` is computed from the run's scope-gated views, so a public view never counts
+    private rows. Colors follow Streamlit's theme type (light tokens until the browser
+    reports one).
     """
-    data = overview.summarize(views, ctx.cfg.overview)
     theme = overview_charts.theme_for(st.context.theme.type)
     st.subheader(_GLANCE_TITLE, anchor=False)
     st.markdown(ui.kpi_tiles_html(data.headline, theme), unsafe_allow_html=True)
     if not data.headline.n_reports:
         return
+    glance = _Glance(data, theme, frozenset(names), _feedback(names))
     for tab, panel in zip(st.tabs(list(ui.GLANCE_TABS)), _GLANCE_PANELS, strict=True):
         with tab:
-            panel(data, theme, ctx.cfg.viewer.max_query_chars)
+            panel(glance)
 
 
 # --------------------------------------------------------------------------- conditions
@@ -359,7 +415,7 @@ def _topics_select(options: FilterOptions) -> None:
     st.multiselect(
         "Topics",
         options.topics,
-        format_func=ui.topic_label,
+        format_func=ui.topic_title,
         key=ui.TOPICS_KEY,
         placeholder="Any topic",
     )
@@ -455,23 +511,28 @@ def _group(group: ResultGroup, garden: GardenContext, page_size: int) -> None:
     _group_cards(group, garden, page_size)
 
 
-def _filter_notes(query: SearchQuery) -> None:
+def _filter_note(note: str, label: str, button_key: str, state_key: str) -> None:
+    st.info(note)
+    st.button(label, key=button_key, on_click=_reset, args=(state_key,))
+
+
+def _filter_notes(query: SearchQuery, names: Mapping[str, str]) -> None:
     """Announce the hard filters set outside the result list, each with its reset button."""
+    if query.variety is not None:
+        note = ui.variety_filter_note(names.get(query.variety, query.variety))
+        _filter_note(note, "Any variety", "clear_variety_filter", ui.VARIETY_FILTER_KEY)
     if query.year is not None:
-        st.info(ui.year_filter_note(query.year))
-        st.button("Any year", key="clear_year_filter", on_click=_reset, args=(ui.YEAR_KEY,))
+        note = ui.year_filter_note(query.year)
+        _filter_note(note, "Any year", "clear_year_filter", ui.YEAR_KEY)
     if query.region_filter is not None:
-        st.info(ui.region_filter_note(query.region_filter))
-        st.button(
-            "Show all states",
-            key="clear_region_filter",
-            on_click=_reset,
-            args=(ui.REGION_FILTER_KEY,),
-        )
+        note = ui.region_filter_note(query.region_filter)
+        _filter_note(note, "Show all states", "clear_region_filter", ui.REGION_FILTER_KEY)
 
 
-def _comments(ctx: _Context, result: SearchResult, query: SearchQuery) -> None:
-    _filter_notes(query)
+def _comments(
+    ctx: _Context, result: SearchResult, query: SearchQuery, names: Mapping[str, str]
+) -> None:
+    _filter_notes(query, names)
     if result.limitation_message is not None:
         st.info(result.limitation_message)
     st.caption(ui.count_summary(result))
@@ -547,13 +608,15 @@ def _outside_context(cfg: AppConfig) -> None:
 # --------------------------------------------------------------------------- page
 
 
-def _controls(ctx: _Context, views: Sequence[CommentView]) -> SearchQuery:
+def _controls(
+    ctx: _Context, views: Sequence[CommentView], data: Overview, names: Mapping[str, str]
+) -> SearchQuery:
     """Render the header panels and every input; return the query they describe."""
     _about(ctx, views)
     _banner(ctx.scope, views)
-    _glance(ctx, views)
     options = search.filter_options(ctx.conn, ctx.scope, ctx.now)
     _apply(ui.stale_state_fixes(_state(), options))
+    _glance(data, names)
     _conditions_panel()
     _chips(ctx)
     _filters(ctx, options)
@@ -562,24 +625,31 @@ def _controls(ctx: _Context, views: Sequence[CommentView]) -> SearchQuery:
     return query
 
 
-def _results(ctx: _Context, query: SearchQuery) -> None:
-    """Strict-mode note, outside context next to the tabs (SPEC §2 mockup), then the tabs."""
+def _results(ctx: _Context, query: SearchQuery, names: Mapping[str, str]) -> None:
+    """Strict-mode note, outside context next to the tabs (SPEC §2 mockup), then the tabs.
+
+    The tabs sit under the anchor the "At a glance" feedback line links to.
+    """
     result = search.search(ctx.conn, ctx.scope, query, ctx.now)
     note = ui.strict_note(result, query)
     if note is not None:
         st.caption(note)
     _outside_context(ctx.cfg)
+    st.markdown(ui.RESULTS_ANCHOR_HTML, unsafe_allow_html=True)
     comments_tab, map_tab = st.tabs(["Comments", "Map"])
     with comments_tab:
-        _comments(ctx, result, query)
+        _comments(ctx, result, query, names)
     with map_tab:
         _map(ctx, query, result)
 
 
 def _browse(ctx: _Context) -> None:
+    """Load the visible views once; the overview and the variety names come from them."""
     views = db.load_comment_views(ctx.conn, ctx.scope, ctx.now, None)
-    query = _controls(ctx, views)
-    _results(ctx, query)
+    data = overview.summarize(views, ctx.cfg.overview)
+    names = ui.variety_names(data.all_varieties)
+    query = _controls(ctx, views, data, names)
+    _results(ctx, query, names)
 
 
 # --------------------------------------------------------------------------- startup guards

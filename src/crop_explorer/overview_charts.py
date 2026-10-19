@@ -520,7 +520,7 @@ def _row_targets(names: Sequence[str], counts: Sequence[int], largest: int) -> g
 
 
 def _reach(largest: int) -> float:
-    """The end of the value axis: the largest count plus room for its tip label."""
+    """Return the end of the value axis: the largest count plus room for its tip label."""
     return largest * _VALUE_HEADROOM
 
 
