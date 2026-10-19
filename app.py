@@ -1,4 +1,4 @@
-"""Browse screen of "What Gardeners Are Saying" (SPEC §2), a thin Streamlit layer.
+"""Browse screen of "Garden variety" (SPEC §2), a thin Streamlit layer.
 
 Run with ``uv run streamlit run app.py [--server.address localhost] [-- --scope private --db PATH
 --config PATH]``. A private view only runs while the server listens on this computer alone, so
@@ -68,7 +68,7 @@ from crop_explorer.views import (
 )
 from crop_explorer.vocab import ComparableKey
 
-_TITLE: Final = "What Gardeners Are Saying"
+_TITLE: Final = "Garden variety"
 _SUBTITLE: Final = "Find real experiences from gardens like yours."
 _ZONE_HELP: Final = (
     "USDA hardiness zones describe average winter low temperatures only. They say nothing "

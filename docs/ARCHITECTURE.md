@@ -1296,7 +1296,7 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   shows how to build it (`uv run python -m crop_explorer demo`); if `db.connect` raises
   `sqlite3.DatabaseError` (not a database, or an unsupported schema version) it shows the
   reason and the same command. It never creates an empty database.
-- Header "What Gardeners Are Saying", subtitle "Find real experiences from gardens like yours.",
+- Header "Garden variety", subtitle "Find real experiences from gardens like yours.",
   "About / Sources" expander (visible sources with rights labels and summary counts). A banner
   states the scope: public → "Demo data: synthetic comments, not real gardener reports" when
   only synthetic sources are visible (a mixed notice when synthetic and cleared are both
