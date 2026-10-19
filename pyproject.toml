@@ -25,6 +25,13 @@ dev = [
     "ruff>=0.7",
     "types-pyyaml>=6.0",
 ]
+# Offline build of the climate-reference overlays (scripts/build_overlays.py) only. Not a
+# runtime dependency: the app never imports these. Run the build with
+# `uv run --group overlays python scripts/build_overlays.py`.
+overlays = [
+    "pyshp>=2.3",
+    "shapely>=2.1",
+]
 
 [build-system]
 requires = ["hatchling>=1.25"]
