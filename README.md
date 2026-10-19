@@ -347,6 +347,26 @@ phrasings, look-alikes and crop synonyms must match what the loader reads, and i
 example must load with zero rejections. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
 runs the tests with coverage.
 
+## Regional climate overlays (offline data)
+
+`src/crop_explorer/data/overlays/` holds small, attributed **regional climate references**
+for the map's optional overlays: simplified 2023 USDA Plant Hardiness Zone half-zone polygons
+(contiguous U.S., Alaska and Hawaii), each state's half-zone range, and statewide 1991-2020
+NOAA averages (July high, January low, annual precipitation). They are context for the region
+a viewer picks, never evidence about a variety or a commenter, and never attached to reports.
+The zone layer is altered from the PRISM/OSU GIS data, so wherever it is shown it carries the
+disclaimer that it is not the official USDA map, and no USDA-ARS or OSU logo is used. Sources,
+terms (verbatim), retrieval dates, checksums and tolerances: `NOTICE.md` and `sources.yaml` in
+that folder.
+
+The app makes no network call for them. To rebuild (network; geometry tools come from the
+optional `overlays` dependency group and are never imported by the app):
+
+```bash
+uv run --group overlays python -I scripts/build_overlays.py --download-dir ~/.cache/crop_explorer/overlay-downloads
+uv run pytest tests/test_overlays.py -q
+```
+
 ## Project layout
 
 ```text
@@ -358,6 +378,8 @@ runs the tests with coverage.
 ├── docs/
 │   ├── ARCHITECTURE.md           # module contracts and exact behavioural rules
 │   └── EXTRACTION_PROMPT.md      # operator guide + instructions for the offline model step
+├── scripts/
+│   └── build_overlays.py         # offline build of src/crop_explorer/data/overlays/
 ├── fixtures/
 │   ├── synthetic_comments.jsonl  # 69 fictional comments (public-safe demo data)
 │   ├── synthetic_extractions.jsonl
@@ -377,6 +399,8 @@ runs the tests with coverage.
 │   ├── geography.py              # conservative state counts and the choropleth
 │   ├── overview.py               # "At a glance" counts (distinct comments, never quality)
 │   ├── overview_charts.py        # its Plotly figures, light/dark tokens, escaping
+│   ├── overlays.py               # loaders for the packaged regional climate references
+│   ├── data/overlays/            # zone GeoJSON, state zone ranges, NOAA averages, NOTICE.md
 │   ├── db.py                     # SQLite + FTS5 persistence and scope-gated reads
 │   ├── visibility.py             # rights/expiry gate shared by every viewer read
 │   └── ui.py                     # pure viewer helpers (escaping, card text, state)

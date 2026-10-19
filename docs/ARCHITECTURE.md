@@ -852,6 +852,83 @@ def choropleth(counts: RegionCounts) -> plotly.graph_objects.Figure
   sometimes be derived by subtraction from the bucket totals. Real small-cell protection would
   have to cover the cards too (a design change, not a threshold).
 
+## Regional climate overlays (`overlays.py`) — packaged data, pure loaders
+
+```python
+OVERLAY_DIR = <package>/data/overlays
+ZONES_FILE = "phzm_2023_simplified.geojson"; STATE_ZONES_FILE = "state_zone_ranges.csv"
+NORMALS_FILE = "noaa_state_normals_1991_2020.csv"; NOTICE_FILE = "NOTICE.md"; SOURCES_FILE = "sources.yaml"
+OVERLAY_LABEL = "regional climate reference"
+ZONE_DISCLAIMER, ZONE_SOURCE, ZONE_PERIOD, ZONE_COVERAGE, NORMALS_SOURCE, NORMALS_PERIOD
+NORMALS_FIRST_YEAR = 1991; NORMALS_LAST_YEAR = 2020; NORMALS_N_YEARS = 30
+NORMAL_ELEMENTS = {"july_avg_high_f": ..., "jan_avg_low_f": ..., "annual_precip_in": ...}
+MIN_STATE_ZONE_SHARE = 0.001; ZONE_GEOJSON_MAX_BYTES = 1_500_000
+HALF_ZONES = ("1a", "1b", ..., "13b")          # coldest to warmest
+ZONE_TABLE_COLUMNS = ("zone", "zone_number", "temp_range_f", "rank")
+STATE_ZONE_COLUMNS = ("region_code", "zone", "area_share", "is_coldest", "is_warmest")
+NORMALS_COLUMNS = ("region_code", "element", "value", "n_years")
+class OverlayDataError(ValueError)
+@dataclass(frozen=True) class ZoneLayer: geojson: Mapping[str, Any]; table: pd.DataFrame
+@dataclass(frozen=True) class Overlays: zones: ZoneLayer; state_zones: pd.DataFrame; normals: pd.DataFrame
+def zone_rank(zone: str) -> int                 # "1a" -> 0 ... "13b" -> 25
+def zone_temp_range_f(zone: str) -> str         # "6a" -> "-10 to -5"
+def load_overlays(directory: Path = OVERLAY_DIR) -> Overlays
+def load_zone_layer(path) -> ZoneLayer
+def load_state_zone_ranges(path) -> pd.DataFrame
+def load_state_normals(path) -> pd.DataFrame
+```
+
+- **What the files are.** Offline-built, attributed **regional climate references** (SPEC §7):
+  the 2023 USDA Plant Hardiness Zone half-zone polygons (PRISM Climate Group, Oregon State
+  University; contiguous U.S., Alaska and Hawaii, simplified), each state's half-zone shares
+  and coldest/warmest half-zone, and statewide 1991-2020 averages of three NOAA nClimDiv series
+  (July average high, January average low, annual precipitation) for the 50 states (DC has
+  no statewide series). `NOTICE.md` and `sources.yaml` beside them record URLs, retrieval
+  dates, SHA-256 checksums, terms (verbatim), the disclaimer and every alteration.
+- **Use rules.** Overlays are context, never answers: every panel is labelled
+  `OVERLAY_LABEL` with its source and period; any display of the zone layer or of a state
+  zone range shows `ZONE_DISCLAIMER` prominently and **no USDA-ARS or OSU logo** (the PHZM
+  terms allow altered data only on those conditions). A viewer-selected region may pick a
+  reference; nothing here is attached to a comment, used in matching, or assigned to a report
+  by geography, and no coordinates are derived for reports. NOAA values are statistical
+  averages over a whole state, not observed weather and not NOAA's station-based Normals.
+- **Loaders fail loud** (`OverlayDataError`): exact CSV columns, no blank/NaN/non-finite cell,
+  U.S. state codes only (`regions.US_STATES`), half-zones only (`vocab.ZONE_PATTERN` and
+  `HALF_ZONES`), rows unique and sorted; state shares in `[MIN_STATE_ZONE_SHARE, 1]`,
+  summing to at most 1, every state and DC present, flags marking exactly each state's
+  coldest and warmest row; normals with `n_years == 30` and all three elements per state;
+  GeoJSON a `FeatureCollection` carrying `ZONE_DISCLAIMER`, one feature per half-zone coldest
+  to warmest, properties exactly `zone`/`zone_number`/`temp_range_f` consistent with the zone,
+  Polygon/MultiPolygon lon/lat rings closed, **exteriors clockwise and holes
+  counter-clockwise**. Plotly's geo traces (d3-geo) do not rewind GeoJSON: RFC 7946's
+  counter-clockwise exteriors fill the whole globe instead of the zone.
+- Runtime imports are stdlib `csv`/`json` and pandas only. The geometry tools (pyshp,
+  shapely) live in the optional `overlays` dependency group, used only by
+  `scripts/build_overlays.py`; tests check that no runtime module imports them.
+- **Offline build** (`uv run --group overlays python -I scripts/build_overlays.py
+  --download-dir DIR`): downloads (cached with a retrieval-date stamp), repairs, simplifies and
+  writes the five files, then validates them with `load_overlays` and the size budget. The app
+  makes no network call for overlays. Plotly's `albers usa` draws Alaska and Hawaii in insets
+  but not Puerto Rico, so Puerto Rico is left out. Generalization per region: every polygon
+  part or hole below the minimum area (raster specks, small lakes) is merged into the
+  neighbouring half-zone it shares the longest boundary with, so no gaps are left (isolated
+  islets below the minimum area are dropped); GEOS coverage simplification then simplifies
+  neighbouring zones together so they keep identical shared edges; coordinates are rounded
+  to 3 decimals (~110 m), and the few polygons rounding would invalidate are snap-rounded:
+
+  | Region | Min part/hole area | Coverage-simplify tolerance |
+  |---|---|---|
+  | Contiguous U.S. | 75 km² | 0.07° |
+  | Alaska (drawn at ~0.35 scale) | 400 km² | 0.15° |
+  | Hawaii | 10 km² | 0.01° |
+
+  State shares use the **unsimplified** polygons, intersected with the Census 2023 1:500k state
+  boundaries on a spherical equal-area projection (Alaska and Hawaii: their own zone files).
+- Rendering notes for the map: Plotly's own 110m base map draws the U.S.-Canada border west
+  of Minnesota as a great-circle arc north of the 49th parallel, while the zone layer follows
+  the parallel, so a thin lens of base-map land shows above the zone fill there (Plotly's
+  base map, not the data). Plotly clips the westernmost Aleutians out of its Alaska inset.
+
 ## Overview (`overview.py`) and its charts (`overview_charts.py`) — pure, no I/O
 
 The data behind the viewer's "At a glance" header. Every count is a number of **distinct
