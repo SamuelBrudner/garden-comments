@@ -1,4 +1,4 @@
-# What Gardeners Are Saying (crop_explorer)
+# Garden variety (crop_explorer)
 
 A small, local, growing-environment-first explorer of gardeners' firsthand comments about crop
 varieties. A visitor describes a few conditions of their own garden (region, hardiness zone,

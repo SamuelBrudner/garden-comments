@@ -323,7 +323,7 @@ class TestBrowseScreen:
     ) -> None:
         at = run_app(monkeypatch, app_env)
         assert not at.exception
-        assert [t.value for t in at.title] == ["What Gardeners Are Saying"]
+        assert [t.value for t in at.title] == ["Garden variety"]
         assert "Find real experiences from gardens like yours." in texts_of(at)
         assert ui.DEMO_BANNER in [info.value for info in at.info]
         assert subheaders(at)[-1] == "Reports (70)"
