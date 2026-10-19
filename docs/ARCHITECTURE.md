@@ -10,7 +10,7 @@ rules so modules can be built and tested independently. Shared types live in:
 | `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `SELF_DESCRIBED_KEYS`, `DESCRIBED_AS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
 | `regions.py` | `US_STATES`, `CA_PROVINCES`, `COUNTRIES`, `REGION_NAMES`, `is_us_state`, `us_postal`, `region_name` |
 | `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus` (incl. `described_differently`), `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` (titles: Search rule 5) |
-| `config.py` | `AppConfig` and sub-models (incl. `OverviewConfig(top_varieties, heatmap_varieties)`, `heatmap_varieties <= top_varieties`), `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
+| `config.py` | `AppConfig` and sub-models (incl. `OverviewConfig(top_varieties, heatmap_varieties)`, `heatmap_varieties <= top_varieties`; `OutsideLink.overlay` (`"zones"`, `"normals"` or `None`), only on a `regional climate reference`), `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
 | `logging_setup.py` | `configure_logging(cfg)` |
 
 ## Engineering rules (all modules)
@@ -59,11 +59,15 @@ model step (offline, docs/EXTRACTION_PROMPT.md) --> ParsedComment JSONL
 viewer (app.py) --search.search(conn, scope, query, now)--> SearchResult (groups, counts)
                --geography.region_counts(...)--> map counts
                --overview.summarize(views, cfg.overview)--> Overview --overview_charts.*--> figures
+               --overlays.load_overlays() (packaged files, cached per process)--> Overlays
+                  --overlay_charts.overlay_figure(key, refs, map counts, theme)--> overlay map
+                  --overlay_charts.regional_reference(viewer region, refs)--> reference box
 
 hosted demo (streamlit_app.py) --demo.prepare_hosted_demo (temp dir)--> app.main(--scope public)
 ```
 
-No model call happens at request time.
+No model call happens at request time, and no climate data are fetched at request time: the
+overlays are packaged files, and the maps' base map is served by the app itself.
 
 ## Storage (`db.py`)
 
@@ -843,8 +847,11 @@ def choropleth(counts: RegionCounts) -> plotly.graph_objects.Figure
   codes, single-hue sequential blue scale, hover text from `count_label` (the raw `z` is never
   shown), no lat/lon, no comment text, a static borderless layout (`dragmode=False`, zero
   margins, transparent background). Never plots points. Plotly draws the state outlines from
-  topojson it fetches from `cdn.plot.ly`, so an offline browser shows the counts and selector
-  but an empty map.
+  its U.S. base map (`usa_110m.json`); the viewer serves that file itself from
+  `static/topojson/` (Streamlit `server.enableStaticServing`) and sets every map's
+  `topojsonURL` config to `ui.BASE_MAP_URL` (`"app/static/topojson/"`), never `cdn.plot.ly`.
+  Plotly draws nothing on a geo subplot until the base map has loaded (not even GeoJSON
+  traces), so without static serving the maps stay empty while the counts and selector work.
 - Privacy limit: small-cell suppression only **coarsens the map display** (shading, hover text
   and the state selector's labels). It does not protect the reports: every visible card shows
   its comment text and region line, and filtering by a suppressed state lists its reports and
@@ -926,8 +933,92 @@ def load_state_normals(path) -> pd.DataFrame
   boundaries on a spherical equal-area projection (Alaska and Hawaii: their own zone files).
 - Rendering notes for the map: Plotly's own 110m base map draws the U.S.-Canada border west
   of Minnesota as a great-circle arc north of the 49th parallel, while the zone layer follows
-  the parallel, so a thin lens of base-map land shows above the zone fill there (Plotly's
-  base map, not the data). Plotly clips the westernmost Aleutians out of its Alaska inset.
+  the parallel, so the overlay maps turn the base map's land, lakes, coastlines and borders off
+  (`overlay_charts`), and the state outlines come from a state layer drawn over the zones.
+  Plotly clips the westernmost Aleutians out of its Alaska inset.
+
+## Overlay charts (`overlay_charts.py`) — the map's optional overlays, pure
+
+```python
+OverlayKey = Literal["none", "zones", "july_avg_high_f", "jan_avg_low_f", "annual_precip_in"]
+NormalElement = Literal["july_avg_high_f", "jan_avg_low_f", "annual_precip_in"]
+OVERLAY_KEYS; OVERLAY_LABELS  # "None", "USDA hardiness zones (2023)", "Average July high (NOAA 1991-2020)", ...
+MAP_HEIGHT = 340
+SEQUENTIAL_ORANGE (13 steps); NORMALS_ANCHORS_LIGHT / _DARK (5 each)
+ZONE_ANCHORS_LIGHT / _DARK (7 each); ZONE_RAMP_LIGHT / _DARK (26 = one per half-zone)
+@dataclass(frozen=True) class OverlayView: title; source; period; note; disclaimer | None; caption (property)
+@dataclass(frozen=True) class RegionalReference: summary; sources; disclaimer | None; notes (property)
+def emphasis_zones(zone: str | None) -> tuple[str, ...]      # "6" -> ("6a", "6b")
+def overlay_view(key: OverlayKey, zone: str | None = None) -> OverlayView
+def overlay_figure(key, refs: Overlays, counts: RegionCounts, theme: ChartTheme, zone=None) -> go.Figure
+def zone_figure(refs, counts, theme, *, emphasis: Sequence[str] = ()) -> go.Figure
+def normals_figure(normals: pd.DataFrame, element: NormalElement, counts, theme) -> go.Figure
+def overlay_tables(key, refs) -> tuple[tuple[str, pd.DataFrame], ...]
+def zone_range_table(state_zones) -> pd.DataFrame   # State | Zones | Largest area | Share of the state's area
+def zone_key_table(zones: ZoneLayer) -> pd.DataFrame # Zone | Average coldest winter night (°F)
+def normals_table(normals, element) -> pd.DataFrame  # State | <element> (one decimal)
+def regional_reference(code: str | None, refs: Overlays) -> RegionalReference | None
+```
+
+- **Context, not answers** (SPEC §6-§7). An overlay is off by default (`"none"` is the
+  report-count map, `geography.choropleth`, unchanged; `overlay_figure`, `overlay_view` and
+  `overlay_tables` raise `ValueError` for it). With an overlay on it is the **only fill**: one
+  fill trace with one scale legend; the state outlines stay; the shown reports become **count
+  labels**, one per state in `RegionCounts.table` (states with reports only), as a text-only
+  `Scattergeo` with `locationmode="USA-states"` and postal `locations` (Plotly places each at
+  the state's centre from its own shapes: **no lat/lon is passed or derived**), surface-coloured
+  halo, `hoverinfo="skip"`. A suppressed cell's label is `"<k"`, never its count. Nothing here
+  reads a comment; zones and climate values are never attached to reports.
+- `zone_figure`: (1) the half-zone `Choropleth`, `geojson` = the loaded layer **as is**
+  (Plotly does not rewind rings), `featureidkey="properties.zone"`, `z` = `zone_rank`, a
+  **stepped** colour scale with one band per half-zone (`zmin=-0.5`, `zmax=25.5`), each zone
+  outlined in its own colour (closes anti-aliasing seams), `hoverinfo="skip"`, a horizontal
+  legend "USDA hardiness zone (2023): colder ← → warmer" with one tick per whole zone;
+  (2) a transparent `USA-states` `Choropleth` over it (all 50 states and DC) drawing the
+  outlines in the surface colour and carrying each state's hover ("Connecticut / USDA zones
+  6a-7b (2023, simplified) / 4 reports naming this state") and **the click target** (its
+  points carry the postal `location`, so `ui.selected_state` and the state filter work as on
+  the count map); (3) the count labels. **Emphasis** (the viewer's zone, `emphasis_zones`):
+  every other half-zone is blended 72 % toward the surface **in the colour scale itself**, so
+  the legend mirrors the map (Plotly applies choropleth opacity per trace, not per location;
+  an ink outline round the fragmented band read as a tangle), and the legend tick of the zone
+  becomes bold "6b" at its half-zone (a whole zone "6": both halves kept, tick "**6**").
+- `normals_figure`: one `USA-states` `Choropleth` (the 50 states; DC has no series) on the
+  orange ramp, `zmin`/`zmax` = data range, horizontal legend "July average high (°F)" /
+  "January average low (°F)" / "Annual precipitation (inches)", outlines in the surface colour,
+  hover "Connecticut / July average high: 82.9°F / statewide 1991-2020 average (NOAA) / 4
+  reports naming this state", then the count labels. Unknown element: `ValueError`.
+- Layout (both): `geo.scope="usa"`, `albers usa`, base-map land/lakes/coastlines/borders/frame
+  off, transparent, `dragmode=False`, height `MAP_HEIGHT`, theme hover label and fonts
+  (`overview_charts.FONT_FAMILY`). Every hover/label string goes through
+  `overview_charts.plotly_text` line by line (joined with `<br>`); the only markup is `<br>` and
+  the bold emphasis tick.
+- **Colours** (dataviz method; validated with `validate_palette.js --ordinal`, light and dark,
+  all PASS). NOAA layers: one hue, `SEQUENTIAL_ORANGE` (OKLCH hue 40.6, the lightness of
+  `SEQUENTIAL_BLUE` step for step, step 350 = categorical slot 2 `#eb6834`), because blue
+  already means "reports"; light anchors = steps 250-650 (lowest clears 2:1 on the light
+  surface), dark anchors = steps 600-200 (low end recedes). Zones: the **semantic-heat**
+  exception (multi-hue, always with a scale legend): cold blue → violet → warm red, lightness
+  monotone (light mode cold = light, L 0.755 → 0.355; dark mode cold recedes, L 0.435 →
+  0.855), seven anchors with ΔL ≥ 0.06 (the validator's "single hue" check reports 35° because
+  it measures max-min hue with wrap-around; the true arc is about 150°, which is the point of
+  semantic heat), 26 steps interpolated in OKLCH. Neighbouring half-zones are close by design;
+  hover, the emphasis and the table twin carry exact values. A test re-computes OKLab
+  lightness to keep the ramps monotone.
+- `OverlayView.caption`: "Regional climate reference · <source> · <period>." + what the layer
+  does not say (zones: winter lows only, never assigned to reports; NOAA: a whole-state
+  statistical average, not the weather of any season or garden, not NOAA's station-based
+  Climate Normals, never attached to reports) + the counts note ("aggregates, not garden
+  locations"). `disclaimer` = `ZONE_DISCLAIMER` for the zone layer only.
+- `regional_reference` (the viewer's chosen Region, never a commenter's): `None` without a
+  region; a U.S. state → "Connecticut — USDA zones 6a-7b (2023, simplified; largest area 6b);
+  July average high 83°F, January average low 18°F, annual precipitation 49 in (NOAA 1991-2020
+  statewide averages)" (whole numbers, never "-0"; "largest area" = the half-zone with the
+  largest share, the colder on a tie), `disclaimer` = `ZONE_DISCLAIMER` (a zone range is
+  derived from the zone data), `sources` = the NOAA source (when averages exist) and "never
+  used to sort or match reports"; DC → "NOAA statewide averages are not available for District
+  of Columbia."; elsewhere → "No regional climate reference for Ontario: these references cover
+  U.S. states." with no sources or disclaimer.
 
 ## Overview (`overview.py`) and its charts (`overview_charts.py`) — pure, no I/O
 
@@ -1231,6 +1322,13 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   summers, humid)") and it opens whenever one is set, so a chip never leaves a condition active
   out of sight. Clear resets every condition and filter (session state only; nothing persisted
   server-side).
+- **Regional climate reference box** (`app._regional_reference`, keyed `regional-reference`),
+  right under the conditions (before the chips and search) and only once a Region is chosen:
+  `overlay_charts.regional_reference(region, refs)` as a bordered box with the
+  `regional climate reference` badge and the summary, then one caption with
+  `ZONE_DISCLAIMER` and the sources. It describes the **viewer's** region only (SPEC §6: a
+  viewer region may select an outside reference): it is never passed to search or matching
+  and never rendered on a card (AppTests check both). Clear removes it with the Region.
 - Every select whose first option is `None` starts unselected (`index=None`) and has
   `placeholder=` its `None` label ("Not set", "Any crop", "Any year", `ui.ALL_STATES`), so
   first load, Clear, "Show all states" and "Any year" all look the same (never "Choose an
@@ -1259,7 +1357,12 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
 - "Optional outside context" expander directly before the tabs (SPEC §2 mockup), listing
   config links each tagged with its label badge (`regional climate reference`, `published
   external trial`, `community report` for outside gardeners' ratings such as Cornell's; never
-  on an official host, see `config.is_official_host`).
+  on an official host, see `config.is_official_host`). A link with `overlay` (config
+  `OutsideLink.overlay`: `zones` on the USDA zone map, `normals` on NOAA Climate Normals; only a
+  `regional climate reference` may have one) gets `ui.outside_overlay_note(link)`, "Also
+  available as a map overlay: Map tab, Overlay, …" (the NOAA note says the overlay is
+  statewide Climate at a Glance averages, not the station-based product). Trials and outside
+  gardeners' ratings stay links only (no rehosting).
 - Result tabs: **Comments** | **Map** (after the three "At a glance" tabs). The Comments tab
   starts with the active hard-filter notes, each
   with its reset button: the variety note + "Any variety" (`ui.variety_filter_note`),
@@ -1340,8 +1443,30 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   without a stale click selection whenever the filter changes. "Region not reported: N",
   "Outside the U.S.: N" and (when non-zero) "In the U.S., state not reported: N" are shown
   separately. Suppression coarsens this display only (see Geography).
+  **Overlay** (`st.radio`, horizontal, key `ui.OVERLAY_KEY`, options
+  `overlay_charts.OVERLAY_KEYS` labelled by `OVERLAY_LABELS`, default `"none"`; read with
+  `ui.overlay_choice(state)`; a view option, so Clear keeps it) sits under the intro caption.
+  With an overlay on, the badges gain `regional climate reference`; then the overlay's bold
+  title (`OverlayView.title`, "Where zone 6b is (2023 USDA zones)" when the viewer chose 6b),
+  the zone layer's `ZONE_DISCLAIMER` in an `st.info` box **above the map** (prominent, as the
+  PHZM terms require; no logo anywhere), the figure (`overlay_charts.overlay_figure` with the
+  run's counts and `theme_for(st.context.theme.type)`, `st.plotly_chart(theme=None,
+  width="stretch")`, the same `on_select` state filter, key `ui.map_key(region_filter,
+  overlay)`), the caption (`OverlayView.caption`: label, source, period, what it does not say,
+  counts are aggregates), a "Show as table" expander (`overlay_charts.overlay_tables`), then
+  the state selector and notes as before. Both map configs set `topojsonURL` to
+  `ui.BASE_MAP_URL` (the app's own `static/topojson/usa_110m.json`, see Geography). The
+  references come from `app._references()`, `st.cache_resource` around
+  `overlays.load_overlays()` (static reference files, loaded once per process; query results
+  are still never cached); an `OverlayDataError` is shown with `st.error` where the overlay or
+  regional box would be, and the count map is drawn instead. Measured at 390x844 (demo data,
+  median of 3): switching to the zone overlay draws in 0.95 s (2.4 s at 4x CPU throttling),
+  a NOAA overlay 0.67 s (2.2 s), the count map 0.51 s (1.3 s); building the zone figure
+  costs the server about 0.3 s per run (Plotly copies and serializes the 0.9 MB GeoJSON), and
+  Streamlit's message cache resends an unchanged figure by reference.
 - Logging is configured once per server process (`st.cache_resource` around
-  `configure_logging` only); a database connection is opened per script run. Visible views are
+  `configure_logging`), as are the packaged climate references (`_references`); nothing else
+  is cached, and a database connection is opened per script run. Visible views are
   loaded by `_browse`, `search.filter_options` and `search.chip_support` separately (each
   takes a connection); paging removes the per-card rendering cost that dominated.
 - `ui.escape_markdown` backslash-escapes every ASCII punctuation character, inserts an invisible
@@ -1358,7 +1483,7 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   `paging_fixes`/`cards_to_show`/`show_more_label`/`page_key`, `source_link`,
   `provenance_note`, `source_rows`, `summary_line`, `outside_link_markdown`, `label_badge`,
   `min_cell_count`, `map_key`, `map_notes`, `map_colorbar`, `state_choices`,
-  `selected_state`, `parse_app_args`, `is_loopback_address`, `private_bind_error`, and for
+  `selected_state`, `overlay_choice`, `outside_overlay_note`, `BASE_MAP_URL`, `parse_app_args`, `is_loopback_address`, `private_bind_error`, and for
   the header `kpi_tiles_html`, `varieties_caption`/`varieties_caption_html`,
   `topics_caption`/`topics_caption_html`, `setups_caption`, `variety_click_updates`,
   `cell_click_updates`, `glance_key`, `variety_names`, `glance_feedback`,
@@ -1381,5 +1506,17 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   Juliet row (5 reports, the search box untouched, the feedback line on screen, the "Go to the
   reports ↓" link scrolling to the results, "Any variety" undoing it) and on the top-left topic
   cell (its count, Topics showing the grid's label), and in a touch context the touch hint and
-  two taps on a bar showing its 5 reports; CI runs `uv run playwright install --with-deps
-  chromium` first).
+  two taps on a bar showing its 5 reports; at 390x844 the zone overlay drawing its 25
+  half-zones, 51 state outlines and the count labels with no network (the base map from the
+  app), the disclaimer in view and no sideways scroll; and the base map served at
+  `app/static/topojson/usa_110m.json`; CI runs `uv run playwright install --with-deps
+  chromium` first). Overlays: `tests/test_overlay_charts.py` (trace structure per overlay, one
+  fill and one legend, count labels only for states with reports and without lat/lon,
+  suppressed counts, GeoJSON passed as loaded, emphasis on map and legend, light/dark tokens,
+  ramp lightness, escaping, tables, the regional box wording) and the AppTest classes
+  `TestClimateOverlays` (off by default and unchanged; badge, title, disclaimer, caption and
+  table per overlay; the base map URL in every map config; count labels equal the public
+  counts and differ in private scope only by the private row; the state filter with an
+  overlay; the zone emphasis following the chosen zone; results unchanged by overlays),
+  `TestBrokenReferences`, `TestRegionalReference` (only for a chosen region, under the
+  conditions, never on a card, results equal a plain search) and `TestOutsideContextOverlays`.

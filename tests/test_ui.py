@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from crop_explorer import ui
 from crop_explorer.config import DEFAULT_CONFIG_PATH, OutsideLink, QuickChip
 from crop_explorer.geography import RegionCounts, region_counts
+from crop_explorer.overlay_charts import OVERLAY_KEYS
 from crop_explorer.overview import Headline
 from crop_explorer.overview_charts import DARK, LIGHT, ChartTheme, plotly_text
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
@@ -1661,6 +1662,54 @@ class TestMapHelpers:
         assert ui.map_key(None) == ui.map_key(None)
         assert all(key.startswith("map_selection_") for key in keys)
 
+    def test_map_key_changes_with_the_overlay(self) -> None:
+        assert ui.map_key(None, "none") == ui.map_key(None) == "map_selection_all"
+        keys = {ui.map_key("US-CT", overlay) for overlay in OVERLAY_KEYS}
+        assert len(keys) == len(OVERLAY_KEYS)
+        assert ui.map_key("US-CT", "zones") != ui.map_key(None, "zones")
+
+    def test_overlay_choice_defaults_to_none(self) -> None:
+        assert ui.overlay_choice({}) == "none"
+        assert ui.overlay_choice({ui.OVERLAY_KEY: "zones"}) == "zones"
+        assert ui.overlay_choice({ui.OVERLAY_KEY: "jan_avg_low_f"}) == "jan_avg_low_f"
+        assert ui.overlay_choice({ui.OVERLAY_KEY: "rainfall"}) == "none"
+        assert ui.overlay_choice({ui.OVERLAY_KEY: None}) == "none"
+
+    def test_the_overlay_is_not_reset_by_clear(self) -> None:
+        assert ui.OVERLAY_KEY not in ui.reset_state_keys()
+
+    def test_highlight_zone_is_the_map_choice_else_the_viewers_zone(self) -> None:
+        zone_key = ui.CONDITION_KEYS["zone"]
+        assert ui.highlight_zone({}) is None
+        assert ui.highlight_zone({zone_key: "6b"}) == "6b"
+        assert ui.highlight_zone({zone_key: "6"}) == "6"
+        assert ui.highlight_zone({ui.HIGHLIGHT_ZONE_KEY: "5a", zone_key: "6b"}) == "5a"
+        assert ui.highlight_zone({ui.HIGHLIGHT_ZONE_KEY: None, zone_key: "6b"}) == "6b"
+        assert ui.highlight_zone({ui.HIGHLIGHT_ZONE_KEY: "14z"}) is None  # unknown: ignored
+        assert ui.highlight_zone({ui.HIGHLIGHT_ZONE_KEY: "14z", zone_key: "6b"}) == "6b"
+
+    def test_highlight_options_and_labels(self) -> None:
+        assert ui.highlight_options() == ui.condition_options("zone")
+        assert ui.highlight_label(None, None) == "None"
+        assert ui.highlight_label(None, "6b") == "Your zone (6b)"
+        assert ui.highlight_label("5a", "6b") == "Zone 5a"
+        assert ui.highlight_label("7", None) == "Zone 7"
+
+    def test_the_highlight_is_a_view_option_never_a_condition(self) -> None:
+        """It only changes the zone map: Clear keeps it and it never reaches the query."""
+        assert ui.HIGHLIGHT_ZONE_KEY not in ui.reset_state_keys()
+        assert ui.HIGHLIGHT_ZONE_KEY not in ui.CONDITION_KEYS.values()
+        query = ui.query_from_state({ui.HIGHLIGHT_ZONE_KEY: "5a"}, max_query_chars=200)
+        assert query.garden.zone is None
+        assert query == ui.query_from_state({}, max_query_chars=200)
+
+    def test_an_overlay_state_click_selects_the_state(self) -> None:
+        """Overlay maps put the state's postal code in ``location``, like the count map."""
+        selection = {"selection": {"points": [{"curve_number": 1, "location": "CT"}]}}
+        assert ui.selected_state(selection) == "US-CT"
+        zone_point = {"selection": {"points": [{"curve_number": 0, "location": "6b"}]}}
+        assert ui.selected_state(zone_point) is None
+
     def test_min_cell_count_applies_only_in_public_scope(self) -> None:
         assert ui.min_cell_count("public", 5) == 5
         assert ui.min_cell_count("private", 5) == 1
@@ -1728,6 +1777,31 @@ class TestOutsideLinks:
             note="",
         )
         assert ui.outside_link_markdown(link) == "[USDA \\[zone\\] map](<https://example.gov/map>)"
+
+    def test_overlay_notes_point_to_the_map(self) -> None:
+        def link(overlay: str | None, label: str = "regional climate reference") -> OutsideLink:
+            return OutsideLink.model_validate(
+                {
+                    "title": "x",
+                    "url": "https://example.gov/",
+                    "label": label,
+                    "note": "",
+                    "overlay": overlay,
+                }
+            )
+
+        zones, normals = (
+            ui.outside_overlay_note(link("zones")),
+            ui.outside_overlay_note(link("normals")),
+        )
+        assert zones is not None and normals is not None
+        assert zones.startswith("Also available as a map overlay")
+        assert "\u201cUSDA hardiness zones (2023)\u201d" in zones
+        assert "not the official map" in zones
+        assert normals.startswith("Also available as a map overlay")
+        assert "not this station-based product" in normals
+        assert ui.outside_overlay_note(link(None)) is None
+        assert ui.outside_overlay_note(link(None, "published external trial")) is None
 
     def test_unsafe_url_fails_loudly(self) -> None:
         link = OutsideLink(

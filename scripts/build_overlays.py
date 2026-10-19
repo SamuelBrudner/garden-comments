@@ -31,6 +31,10 @@ to ``--out-dir`` (default ``src/crop_explorer/data/overlays``):
     Sources, exact URLs, retrieval dates, checksums, terms (verbatim), the required
     disclaimer and every alteration, human- and machine-readable.
 
+With the default ``--out-dir`` (or an explicit ``--served-dir``) the zone layer is also copied,
+byte for byte, to ``static/overlays/phzm_2023_simplified.json``: the viewer's browsers fetch it
+from there by URL (:data:`crop_explorer.overlays.SERVED_ZONES_NAME`).
+
 The script fails loud on any unexpected input and validates its outputs with the app's own
 loader (:func:`crop_explorer.overlays.load_overlays`) before finishing.
 """
@@ -42,6 +46,7 @@ import csv
 import hashlib
 import io
 import json
+import shutil
 import statistics
 import sys
 import urllib.request
@@ -65,6 +70,9 @@ from crop_explorer import overlays
 from crop_explorer.regions import US_STATES
 
 DEFAULT_OUT_DIR: Final = overlays.OVERLAY_DIR
+DEFAULT_SERVED_DIR: Final = Path(__file__).resolve().parents[1] / "static" / "overlays"
+"""Where the viewer serves the zone layer to browsers (only written for the default
+``--out-dir``, so a scratch build never replaces the served copy)."""
 DEFAULT_DOWNLOAD_DIR: Final = Path.home() / ".cache" / "crop_explorer" / "overlay-downloads"
 
 PHZM_PAGE: Final = "https://prism.oregonstate.edu/phzm/"
@@ -1043,8 +1051,24 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--download-dir", type=Path, default=DEFAULT_DOWNLOAD_DIR)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--served-dir", type=Path, default=None, help="browser copy folder")
     parser.add_argument("--refresh", action="store_true", help="download every file again")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.served_dir is None and args.out_dir.resolve() == DEFAULT_OUT_DIR.resolve():
+        args.served_dir = DEFAULT_SERVED_DIR
+    return args
+
+
+def copy_served(out_dir: Path, served_dir: Path | None) -> None:
+    """Copy the zone layer to the folder the viewer serves to browsers, then check the copy."""
+    if served_dir is None:
+        logger.info("No --served-dir: the browser copy of the zone layer was not updated")
+        return
+    served_dir.mkdir(parents=True, exist_ok=True)
+    served = served_dir / overlays.SERVED_ZONES_NAME
+    shutil.copyfile(out_dir / overlays.ZONES_FILE, served)
+    overlays.check_served_copy(served, out_dir / overlays.ZONES_FILE)
+    logger.info("Browser copy: {}", served)
 
 
 def download_sources(download_dir: Path, *, refresh: bool) -> dict[str, Fetched]:
@@ -1107,6 +1131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     notice = notice_text(result)
     (args.out_dir / overlays.NOTICE_FILE).write_text(notice, encoding="utf-8")
     report(args.out_dir)
+    copy_served(args.out_dir, args.served_dir)
     return 0
 
 

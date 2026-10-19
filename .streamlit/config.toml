@@ -7,6 +7,12 @@
 # --server.address localhost (uv run streamlit run app.py --server.address localhost -- --scope
 # private).
 
+[server]
+# Serve ./static: Plotly's own U.S. base map (static/topojson/, see its NOTICE.md), so the maps
+# never depend on cdn.plot.ly (Plotly draws nothing on a map until it has loaded). Still no
+# address or port (see above).
+enableStaticServing = true
+
 [browser]
 gatherUsageStats = false
 

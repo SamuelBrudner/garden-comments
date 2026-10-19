@@ -92,10 +92,14 @@ quick_chips:
   - label: Greenhouse
     conditions: {shelter: greenhouse}
 
+# Opt-in outbound links, each badged with its evidence label. `overlay` (zones | normals) marks
+# a regional climate reference whose kind of data is also offered as a map overlay (Map tab);
+# trials and outside gardeners' ratings stay links only.
 outside_context:
   - title: USDA Plant Hardiness Zone Map
     url: https://planthardiness.ars.usda.gov/
     label: regional climate reference
+    overlay: zones
     note: >-
       Zones reflect the average annual extreme minimum winter temperature only. They do not
       describe summer heat, humidity, season length, soil or sunlight.
@@ -106,6 +110,7 @@ outside_context:
   - title: NOAA U.S. Climate Normals (1991-2020)
     url: https://www.ncei.noaa.gov/products/land-based-station/us-climate-normals
     label: regional climate reference
+    overlay: normals
     note: >-
       30-year statistical averages for a place, not the weather any gardener experienced in
       a particular season.

@@ -545,3 +545,28 @@ def test_geometry_tools_are_an_optional_group_only() -> None:
     }
     default_groups = project.get("tool", {}).get("uv", {}).get("default-groups", ["dev"])
     assert "overlays" not in default_groups
+
+
+# --------------------------------------------------------------------------- browser-served copy
+
+
+SERVED = ROOT / "static" / "overlays" / overlays.SERVED_ZONES_NAME
+
+
+def test_the_browser_served_zone_layer_is_the_packaged_file() -> None:
+    """Browsers fetch the zone layer from the app's static folder by URL (cached there), so the
+    figure never carries 0.9 MB of GeoJSON; it must be byte-identical to the packaged file."""
+    assert SERVED.read_bytes() == (DATA / overlays.ZONES_FILE).read_bytes()
+    overlays.check_served_copy(SERVED)
+    notice = (SERVED.parent / "NOTICE.md").read_text(encoding="utf-8")
+    assert overlays.ZONE_DISCLAIMER in notice
+    assert "src/crop_explorer/data/overlays/NOTICE.md" in notice
+
+
+def test_a_missing_or_different_served_copy_fails_loud(tmp_path: Path) -> None:
+    with pytest.raises(OverlayDataError, match="missing"):
+        overlays.check_served_copy(tmp_path / overlays.SERVED_ZONES_NAME)
+    stale = tmp_path / overlays.SERVED_ZONES_NAME
+    stale.write_bytes((DATA / overlays.ZONES_FILE).read_bytes() + b"\n")
+    with pytest.raises(OverlayDataError, match="differs from the packaged"):
+        overlays.check_served_copy(stale)

@@ -135,11 +135,18 @@ def is_official_host(url: str) -> bool:
     )
 
 
+OverlayData = Literal["zones", "normals"]
+"""Packaged reference data a link's resource is also shown from, as a map overlay: the 2023
+USDA hardiness zones, or the NOAA statewide 1991-2020 averages."""
+
+
 class OutsideLink(BaseModel):
     """An opt-in outbound context resource, labelled by evidence type (:data:`OutsideLabel`).
 
     An official (government) resource is a reference or a trial, never gardener testimony, so
-    a ``"community report"`` label on a government host is rejected at load time.
+    a ``"community report"`` label on a government host is rejected at load time. ``overlay``
+    names the map overlay built from the same kind of data, if any; only a ``"regional climate
+    reference"`` can have one (variety trials and gardener ratings stay links).
     """
 
     model_config = _STRICT
@@ -147,6 +154,7 @@ class OutsideLink(BaseModel):
     url: str = Field(pattern=r"^https://")
     label: OutsideLabel
     note: str
+    overlay: OverlayData | None = None
 
     @model_validator(mode="after")
     def _official_is_not_community(self) -> Self:
@@ -155,6 +163,15 @@ class OutsideLink(BaseModel):
                 f"Outside link {self.title!r} is an official resource; label it "
                 "'regional climate reference' or 'published external trial', "
                 "not 'community report'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _overlay_is_a_climate_reference(self) -> Self:
+        if self.overlay is not None and self.label != "regional climate reference":
+            raise ValueError(
+                f"Outside link {self.title!r} names a map overlay; only a 'regional climate "
+                "reference' can have one"
             )
         return self
 

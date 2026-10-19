@@ -35,6 +35,7 @@ import pandas as pd
 from crop_explorer.config import DEFAULT_CONFIG_PATH, ContextLabel, OutsideLink, QuickChip
 from crop_explorer.environment_match import match_context, values_with
 from crop_explorer.geography import RegionCounts, count_label
+from crop_explorer.overlay_charts import OVERLAY_KEYS, OVERLAY_LABELS, OverlayKey
 from crop_explorer.overview import Headline
 from crop_explorer.overview_charts import SETUP_TITLES, TOPIC_TITLES, ChartTheme, variety_name
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
@@ -71,6 +72,7 @@ from crop_explorer.vocab import (
 __all__ = [
     "ALL_STATES",
     "ALWAYS_VISIBLE_KEYS",
+    "BASE_MAP_URL",
     "CONDITION_KEYS",
     "CROP_KEY",
     "DEMO_BANNER",
@@ -83,6 +85,7 @@ __all__ = [
     "NO_SETUPS",
     "NO_TOPICS",
     "NO_VARIETIES",
+    "OVERLAY_KEY",
     "PAGE_QUERY_KEY",
     "PRIVATE_BANNER",
     "REGION_FILTER_KEY",
@@ -134,6 +137,8 @@ __all__ = [
     "more_conditions_label",
     "option_label",
     "outside_link_markdown",
+    "outside_overlay_note",
+    "overlay_choice",
     "page_key",
     "paging_fixes",
     "parse_app_args",
@@ -264,6 +269,9 @@ VARIETY_FILTER_KEY: Final = "query_variety"
 """Session key of the variety filter (a ``variety_key``), set by clicking "At a glance"."""
 PAGE_QUERY_KEY: Final = "page_query"
 """Session key holding the query the per-group page counts belong to."""
+OVERLAY_KEY: Final = "map_overlay"
+"""Session key of the map's overlay choice (an ``OverlayKey``; ``"none"`` by default). It is a
+view option, not a condition or filter, so Clear leaves it as it is."""
 _GROUP_KEYS: Final[tuple[GroupKey, ...]] = get_args(GroupKey)
 
 ALWAYS_VISIBLE_KEYS: Final[tuple[ComparableKey, ...]] = PROMINENT_KEYS
@@ -1395,6 +1403,29 @@ def outside_link_markdown(link: OutsideLink) -> str:
     return f"[{escape_markdown(link.title)}](<{link.url}>)"
 
 
+_OVERLAY_NOTES: Final = MappingProxyType(
+    {
+        "zones": (
+            "Also available as a map overlay: Map tab, Overlay, "
+            f"\u201c{OVERLAY_LABELS['zones']}\u201d (simplified data, not the official map)."
+        ),
+        "normals": (
+            "Also available as a map overlay: Map tab, Overlay, the three NOAA 1991-2020 "
+            "choices (statewide averages from NOAA's Climate at a Glance, not this "
+            "station-based product)."
+        ),
+    }
+)
+
+
+def outside_overlay_note(link: OutsideLink) -> str | None:
+    """Return where an outside resource's kind of data is also shown as a map overlay, if it is.
+
+    ``None`` for a link without ``overlay`` (trials, outside gardeners' ratings, NASA POWER).
+    """
+    return None if link.overlay is None else _OVERLAY_NOTES[link.overlay]
+
+
 def label_badge(label: ContextLabel) -> str:
     """Return a Streamlit Markdown badge for an evidence-type label (SPEC §7 data boundary)."""
     return f":{_BADGE_COLORS[label]}-badge[{label}]"
@@ -1760,15 +1791,21 @@ def setup_table(frame: pd.DataFrame) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- map
 
+BASE_MAP_URL: Final = "app/static/topojson/"
+"""Where Plotly loads its U.S. base map (``usa_110m.json``, the state shapes every map needs):
+this app's own static folder (``static/topojson/``, served with ``server.enableStaticServing``),
+never ``cdn.plot.ly``. Relative, so it also works under a base URL path."""
 
-def map_key(region_filter: str | None) -> str:
-    """Return the map widget's key, which changes whenever the state filter changes.
+
+def map_key(region_filter: str | None, overlay: OverlayKey = "none") -> str:
+    """Return the map widget's key, which changes whenever the state filter or overlay changes.
 
     The Plotly chart keeps its own click selection. Re-keying it on every filter change (a map
-    click, the state selectbox, "Show all states" or Clear) remounts it without a stale
-    selection, so clicking a state always selects it on the first click.
+    click, the state selectbox, "Show all states" or Clear) or overlay change remounts it without
+    a stale selection, so clicking a state always selects it on the first click.
     """
-    return f"map_selection_{region_filter or 'all'}"
+    key = f"map_selection_{region_filter or 'all'}"
+    return key if overlay == "none" else f"{key}_{overlay}"
 
 
 def min_cell_count(scope: ViewerScope, public_min_cell_count: int) -> int:
@@ -1834,6 +1871,12 @@ def _cell_label(row: Mapping[Hashable, Any], counts: RegionCounts) -> str:
         suppressed=bool(row["suppressed"]),
         min_cell_count=counts.min_cell_count,
     )
+
+
+def overlay_choice(state: Mapping[str, Any]) -> OverlayKey:
+    """Return the map's overlay choice from session state (``"none"`` when unset or unknown)."""
+    value = state.get(OVERLAY_KEY)
+    return next((key for key in OVERLAY_KEYS if key == value), "none")
 
 
 def selected_state(selection: Mapping[str, Any]) -> str | None:

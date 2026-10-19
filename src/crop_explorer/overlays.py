@@ -14,6 +14,8 @@ geography, and no climate value is ever attached to a comment (SPEC §6).
   :data:`MIN_STATE_ZONE_SHARE` of each state's area, with its coldest and warmest.
 - :func:`load_state_normals`: statewide 1991-2020 averages of three NOAA nClimDiv series.
   Statistical averages over a whole state, not observed weather in any season or garden.
+- :func:`check_served_copy`: the viewer's browser-served copy of the zone layer must be
+  byte-identical to the packaged file.
 
 Only stdlib ``json``/``csv`` and pandas are used: the geometry tooling that builds the files
 is not a runtime dependency. Every loader fails loud with :class:`OverlayDataError`.
@@ -43,6 +45,9 @@ STATE_ZONES_FILE: Final = "state_zone_ranges.csv"
 NORMALS_FILE: Final = "noaa_state_normals_1991_2020.csv"
 NOTICE_FILE: Final = "NOTICE.md"
 SOURCES_FILE: Final = "sources.yaml"
+SERVED_ZONES_NAME: Final = "phzm_2023_simplified.json"
+"""Name of the zone layer's byte-identical copy that the viewer serves to browsers from its
+``static/overlays/`` folder (the zone figure names its URL instead of embedding 0.9 MB)."""
 
 OVERLAY_LABEL: Final = "regional climate reference"
 """The evidence label every overlay panel carries (SPEC §7)."""
@@ -171,6 +176,27 @@ def load_overlays(directory: Path = OVERLAY_DIR) -> Overlays:
         state_zones=load_state_zone_ranges(directory / STATE_ZONES_FILE),
         normals=load_state_normals(directory / NORMALS_FILE),
     )
+
+
+def check_served_copy(path: Path, packaged: Path = OVERLAY_DIR / ZONES_FILE) -> None:
+    """Require the browser-served copy of the zone layer to equal the packaged file, byte for byte.
+
+    Browsers draw the zone layer from that copy (by URL), while every check here runs on the
+    packaged file, so a stale or missing copy would show unchecked data or an empty map.
+
+    Raises
+    ------
+    OverlayDataError
+        If either file cannot be read, or the copy differs from the packaged file.
+    """
+    try:
+        served, expected = path.read_bytes(), packaged.read_bytes()
+    except OSError as error:
+        raise OverlayDataError(f"The browser copy of the zone layer is missing: {error}") from error
+    if served != expected:
+        raise OverlayDataError(
+            f"{path.name} differs from the packaged {packaged.name}: copy it again"
+        )
 
 
 def load_zone_layer(path: Path = OVERLAY_DIR / ZONES_FILE) -> ZoneLayer:
