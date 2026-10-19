@@ -6,7 +6,10 @@ permalink. Headless Chromium then checks, at 390x844, that the page never scroll
 the search box and the always-visible condition selects are on screen, that choosing a zone
 regroups the reports, that Clear restores the first-load labels (never "Choose an option"),
 that a source reference opens the comment's permalink, and that the Hot & humid chip's "In their
-own words" condition lines fit; then a 1280x900 smoke test. Marked ``browser`` (deselect with
+own words" condition lines fit, and that the "At a glance" stat tiles sit two by two with the
+first chart on screen; then a 1280x900 smoke test (tiles four across) and a click-through test:
+clicking a variety bar searches for it, clicking a topic cell also sets the Topics filter.
+Marked ``browser`` (deselect with
 ``-m "not browser"``); CI installs Chromium with ``uv run playwright install --with-deps
 chromium``.
 """
@@ -52,6 +55,7 @@ CLEARED_COMMENT = {
     "created_at": "2024-07-01T00:00:00Z",
 }
 N_PUBLIC = 70  # 69 synthetic fixtures + 1 cleared comment
+GLANCE_TABS = ("Most-discussed varieties", "What people talk about", "How people grow")
 
 
 # --------------------------------------------------------------------------- server
@@ -288,4 +292,71 @@ def test_desktop_smoke(browser: Browser, viewer_url: str) -> None:
     expect(combobox(map_panel, "Filter by reported state")).to_be_visible()
     expect(map_panel.get_by_text("community report", exact=True)).to_be_visible()
     expect(map_panel.get_by_text("reported conditions", exact=True)).to_be_visible()
+    assert_no_exception(page)
+
+
+# --------------------------------------------------------------------------- at a glance
+
+
+def tile_boxes(page: Page) -> list[dict[str, float]]:
+    tiles = page.locator(".glance-tile")
+    expect(tiles).to_have_count(4)
+    boxes = [tiles.nth(i).bounding_box() for i in range(4)]
+    assert all(box is not None for box in boxes)
+    return [box for box in boxes if box is not None]
+
+
+def plot_area(page: Page, tab: str) -> dict[str, float]:
+    """The plotting area (where clicks land) of the chart in an "At a glance" tab."""
+    box = (
+        page.get_by_role("tabpanel", name=tab).locator(".js-plotly-plot .nsewdrag").first
+    ).bounding_box()
+    assert box is not None
+    return box
+
+
+def test_phone_width_glance_tiles_are_two_by_two_and_the_first_chart_shows(
+    browser: Browser, viewer_url: str
+) -> None:
+    page = open_viewer(browser, viewer_url, 390, 844)
+    boxes = tile_boxes(page)
+    assert len({round(box["y"]) for box in boxes}) == 2, boxes
+    assert len({round(box["x"]) for box in boxes}) == 2, boxes
+    assert all(box["x"] >= 0 and box["x"] + box["width"] <= 390 for box in boxes), boxes
+    assert_no_horizontal_overflow(page)
+    chart = page.get_by_role("tabpanel", name=GLANCE_TABS[0]).locator(".js-plotly-plot")
+    expect(chart).to_be_visible()
+    expect(page.get_by_role("tab", name=GLANCE_TABS[0], exact=True)).to_be_in_viewport()
+    chart.scroll_into_view_if_needed()  # below the tiles and the caption on a phone
+    expect(chart).to_be_in_viewport()
+    expect(chart.locator(".bars .point")).to_have_count(10)
+    chart_box = chart.bounding_box()
+    assert chart_box is not None
+    assert chart_box["x"] >= 0
+    assert chart_box["x"] + chart_box["width"] <= 390
+    assert_no_exception(page)
+
+
+def test_desktop_glance_tiles_are_four_across(browser: Browser, viewer_url: str) -> None:
+    page = open_viewer(browser, viewer_url, 1280, 900)
+    boxes = tile_boxes(page)
+    assert len({round(box["y"]) for box in boxes}) == 1, boxes
+    assert_no_horizontal_overflow(page)
+
+
+def test_clicking_a_bar_or_a_cell_searches_for_it(browser: Browser, viewer_url: str) -> None:
+    page = open_viewer(browser, viewer_url, 1280, 900)
+    bars = page.get_by_role("tabpanel", name=GLANCE_TABS[0]).locator(".bars .point")
+    expect(bars).to_have_count(10)
+    juliet = bars.nth(2).bounding_box()  # Sungold, Cherokee Purple, Juliet, ...
+    assert juliet is not None
+    page.mouse.click(juliet["x"] + juliet["width"] / 2, juliet["y"] + juliet["height"] / 2)
+    expect(page.get_by_label(SEARCH_LABEL)).to_have_value("Juliet")
+    expect(heading(page, "Reports (5)")).to_be_visible()
+
+    page.get_by_role("tab", name=GLANCE_TABS[1], exact=True).click()
+    grid = plot_area(page, GLANCE_TABS[1])
+    page.mouse.click(grid["x"] + 10, grid["y"] + 8)  # top-left cell: Sungold x Productivity
+    expect(page.get_by_label(SEARCH_LABEL)).to_have_value("Sungold")
+    expect(page.get_by_test_id("stMultiSelect")).to_contain_text("productivity")
     assert_no_exception(page)

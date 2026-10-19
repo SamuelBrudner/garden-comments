@@ -21,6 +21,14 @@ map:
   # publish comments whose source is cleared.
   public_min_cell_count: 1
 
+overview:
+  # "At a glance" header. The bar chart lists this many of the most-discussed varieties
+  # (distinct comments naming each one) ...
+  top_varieties: 10
+  # ... and the topic grid shows this many of them, the first ones in the same order (at most
+  # top_varieties).
+  heatmap_varieties: 8
+
 extraction:
   # A fact is rejected when the sentence containing its evidence quote contains one of
   # these markers (case-insensitive, word-bounded): advice, plans and hypotheticals are

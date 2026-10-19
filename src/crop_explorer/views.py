@@ -203,6 +203,10 @@ class SearchQuery(BaseModel):
     topics: tuple[Topic, ...] = ()
     year: str | None = None
     region_filter: str | None = None
+    variety: str | None = None
+    """A ``variety_key``: only mentions of that variety pass (all its spellings). The viewer
+    sets it when a variety bar or a topic cell of "At a glance" is clicked, so the reports
+    shown are exactly the comments the chart counted."""
     garden: GardenContext = GardenContext()
     only_stated_matches: bool = False
 

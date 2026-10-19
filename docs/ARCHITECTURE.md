@@ -10,7 +10,7 @@ rules so modules can be built and tested independently. Shared types live in:
 | `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `SELF_DESCRIBED_KEYS`, `DESCRIBED_AS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
 | `regions.py` | `US_STATES`, `CA_PROVINCES`, `COUNTRIES`, `REGION_NAMES`, `is_us_state`, `us_postal`, `region_name` |
 | `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus` (incl. `described_differently`), `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` (titles: Search rule 5) |
-| `config.py` | `AppConfig` and sub-models, `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
+| `config.py` | `AppConfig` and sub-models (incl. `OverviewConfig(top_varieties, heatmap_varieties)`, `heatmap_varieties <= top_varieties`), `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
 | `logging_setup.py` | `configure_logging(cfg)` |
 
 ## Engineering rules (all modules)
@@ -58,6 +58,7 @@ model step (offline, docs/EXTRACTION_PROMPT.md) --> ParsedComment JSONL
                                                                      |
 viewer (app.py) --search.search(conn, scope, query, now)--> SearchResult (groups, counts)
                --geography.region_counts(...)--> map counts
+               --overview.summarize(views, cfg.overview)--> Overview --overview_charts.*--> figures
 
 hosted demo (streamlit_app.py) --demo.prepare_hosted_demo (temp dir)--> app.main(--scope public)
 ```
@@ -845,6 +846,82 @@ def choropleth(counts: RegionCounts) -> plotly.graph_objects.Figure
   sometimes be derived by subtraction from the bucket totals. Real small-cell protection would
   have to cover the cards too (a design change, not a threshold).
 
+## Overview (`overview.py`) and its charts (`overview_charts.py`) — pure, no I/O
+
+The data behind the viewer's "At a glance" header. Every count is a number of **distinct
+comments** over the `CommentView`s passed in (the viewer passes its run's scope-gated views, so
+public scope never counts `private_unverified` rows). Counts measure conversation, never
+quality: no score, rate, ranking of "best" varieties or recommendation is computed or shown.
+
+```python
+SETUP_KEYS = ("method", "shelter")
+VARIETY_COLUMNS = ("variety_key", "label", "crop", "n_comments")
+TOPIC_COLUMNS = ("variety_key", "label", "topic", "n_comments")
+SETUP_COLUMNS = ("key", "value", "label", "n_comments")
+class Headline(BaseModel):  # frozen; n_with_conditions <= n_reports; property n_places
+    n_reports: int; n_varieties: int; n_with_conditions: int; n_us_states: int; n_other_regions: int
+@dataclass(frozen=True) class Overview: headline; varieties; topics; setups; n_with_setup
+def headline(views: Sequence[CommentView]) -> Headline
+def variety_counts(views, top_n: int) -> pd.DataFrame
+def topic_matrix(views, variety_keys: Sequence[str]) -> pd.DataFrame
+def setup_counts(views) -> pd.DataFrame
+def n_stating_setup(views) -> int
+def summarize(views, cfg: OverviewConfig) -> Overview
+```
+
+- `headline`: `n_reports` = visible comments (analysed or not); `n_varieties` = distinct
+  `variety_key`s (a crop-only mention is no variety); `n_with_conditions` = comments with an
+  applicable fact (`environment_match.applicable_facts`) giving a normalized value for a
+  comparable key: exactly `CommentResult.has_conditions` for an empty query, so it equals
+  `search.build_result(views, SearchQuery()).n_with_conditions` (a property test checks it);
+  `n_us_states` / `n_other_regions` = distinct normalized region codes that are U.S. states /
+  Canadian provinces or countries other than the United States (the bare country `US` is not a
+  place of its own). An invalid region code raises `ValueError` naming the comment.
+- `variety_counts`: one row per variety key, `n_comments` = distinct comments with a mention of
+  it (two mentions in one comment count once). `label` = the `variety_as_written` used by the
+  most comments, ties alphabetical (casefolded, then exact); `crop` likewise, `None` when no
+  mention names one. Sorted by `n_comments` descending, label (casefolded), label, key; cut to
+  `top_n` (`ValueError` below 1). The total is `Headline.n_varieties` ("top 10 of 44").
+- `topic_matrix`: tidy, every `(variety, topic)` cell for the topics occurring on the given
+  varieties' mentions, zeros included; rows in the given key order, topics by total comments
+  across the grid descending, ties in `schemas.TOPICS` order. A repeated or invisible key
+  raises.
+- `setup_counts`: per `method` / `shelter` value, the distinct comments whose mentions'
+  applicable facts state it (so a `whole_comment` fact on one mention counts its comment once);
+  display-only facts never count; only values stated at least once; `label` =
+  `vocab.value_label` capitalised ("Containers", "Greenhouse / tunnel"). Sorted by key (method
+  first), count descending, vocabulary order. `n_stating_setup` = comments stating either key.
+- `summarize`: varieties cut to `cfg.top_varieties`; the topic grid's rows are the first
+  `cfg.heatmap_varieties` of them, in the same order. Every function rejects duplicate
+  comment ids; results do not depend on the order of the views (property tests).
+- `overview_charts` (form chosen first, per the dataviz rules): `varieties_bar` = one horizontal
+  `Bar` trace in **one** colour (categorical slot 1: light `#2a78d6`, dark `#3987e5`), never a
+  value ramp, largest at the top, tick labels "Sungold · tomato" (`short_label`: at most
+  `MAX_LABEL_CHARS` = 24 characters, ending in "…"; hover and table keep the full name), the
+  count at each tip in primary ink, no legend, hidden value axis, hairline baseline, `BAR_PX` =
+  20 px bars in `ROW_PX` = 32 px bands (≤ 24 px), `CORNER_PX` = 4 px rounded data ends,
+  `hovermode="y"` (the whole row is the hover and click target), `customdata = [label]`.
+  `topics_heatmap` = a `Heatmap` on the 13-step sequential blue ramp (zero = the step nearest
+  the surface), 2 px cell gaps, a horizontal colorbar titled "Comments" above the grid, rotated
+  topic labels ("Weather tolerance", `TOPIC_TITLES`), no number in the cells, under an invisible
+  `Scatter` with one point per cell that carries hover ("Sungold · Flavor: 4 comments") and
+  `customdata = [label, topic]`, because Plotly can select scatter points but not heatmap cells.
+  `setups_bar` = two single-colour bar facets ("Growing method", "Setting", `SETUP_TITLES`) on
+  one scale with equal bar thickness; an empty facet is left out. Every builder raises
+  `ValueError` for other columns or no rows (the viewer shows a note instead).
+- Themes: `ChartTheme` (series, ramp, meter track, text primary/secondary/muted, gridline,
+  baseline, surface, tile border) is defined once as `LIGHT` and `DARK`, both selected from the
+  same validated ramps; `DARK.ramp` runs from step 700 (no comments: recedes into the dark
+  surface) to step 150. `theme_for(st.context.theme.type)` picks one (`None` → light; anything
+  else raises). Text never wears the series colour. Figures are static: transparent
+  backgrounds, `template="none"`, `dragmode=False`, `fixedrange` axes, `CHART_CONFIG` (no mode
+  bar, zoom or double-click), fixed heights that include every axis band.
+- Escaping: Plotly renders `<a href>`, `<b>`, `<br>`, `<span>` inside tick labels, bar text and
+  hover labels, so every comment-derived string in a figure (ticks, hover text, `customdata`)
+  goes through `plotly_text` (`&`, `<`, `>` → `&amp;`, `&lt;`, `&gt;`; quotes → `&#34;`,
+  `&#39;`, since Plotly does not decode `&quot;`). Shortening happens before escaping. The
+  viewer `html.unescape`s click data.
+
 ## Demo database (`demo.py`) and the hosted demo (`streamlit_app.py`)
 
 ```python
@@ -980,6 +1057,35 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   only synthetic sources are visible (a mixed notice when synthetic and cleared are both
   visible; none for cleared only); private → "Private local view — includes unverified imported
   comments. Do not publish or share." A `private_unverified` row in public scope raises.
+- **At a glance** (subheader, right after the banner, before "My growing conditions"), from
+  `overview.summarize(views, cfg.overview)` over the views `_browse` already loaded (same scope
+  gating; computed once per run, never cached). Stat tiles (`ui.kpi_tiles_html(headline,
+  theme)`: trusted HTML built from numbers and fixed labels only, a CSS grid four across and two
+  by two below 640 px, proportional figures): "Reports", "Varieties mentioned", "State growing
+  conditions" ("33 of 69" with a `role="meter"` bar whose track is a lighter step of the fill's
+  ramp, drawn with flex ratios so no percentage appears) and "Places named" ("18 U.S. states ·
+  3 outside the U.S."). With no visible report the tiles show zeros and no tabs follow. Then
+  `st.tabs(ui.GLANCE_TABS)` = **Most-discussed varieties** | **What people talk about** | **How
+  people grow**, each with a caption (`ui.varieties_caption`: "Comments that mention each
+  variety, top 10 of 44 across all 69 reports. This counts conversation, not quality: a failed
+  crop counts the same as a great one. Select a bar to read those comments."; `ui.topics_caption`;
+  `ui.setups_caption`: "Only reports that state a growing method or setting are counted: 20 of
+  69. Most don't say. A report can state more than one."), the chart (`st.plotly_chart(...,
+  theme=None, width="stretch", config=CHART_CONFIG)`) and a "Show as table" expander with
+  `st.dataframe` of the tidy data (`ui.variety_table`, `ui.topic_table`, `ui.setup_table`:
+  readable column names, names as written, shown as plain text). An empty chart is replaced by
+  `ui.NO_VARIETIES`, `ui.NO_TOPICS` or `ui.NO_SETUPS`. Tokens come from
+  `overview_charts.theme_for(st.context.theme.type)`; `.streamlit/config.toml` sets
+  `[theme.light]` and `[theme.dark]` accents (a single `[theme]` colour would pin a light custom
+  theme while `st.context.theme` reports the visitor's dark setting). A theme switched in the
+  settings menu applies to the charts on the next rerun.
+- **Click-through** (like the map): the variety and topic charts use `on_select` callbacks with
+  `selection_mode="points"`. `ui.variety_click_updates(selection, max_chars)` sets the search
+  text to the bar's label (unescaped, cut to `viewer.max_query_chars`) and clears Topics;
+  `ui.cell_click_updates` sets the search text to the variety and Topics to the cell's topic.
+  Anything else (no point, wrong shape, unknown topic) changes nothing. Other filters and the
+  garden conditions are left as they are. Chart keys are `ui.glance_key(chart, state)`, which
+  change with the search text and topics, so a chart remounts without a stale selection.
 - **My growing conditions** panel (always visible, works with nothing selected), laid out per
   SPEC §2 "Which controls are prominent?": Region (selectbox: "Not set", then U.S. states,
   Canadian provinces, countries, each by name) and `ui.ALWAYS_VISIBLE_KEYS`
@@ -1019,7 +1125,8 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   config links each tagged with its label badge (`regional climate reference`, `published
   external trial`, `community report` for outside gardeners' ratings such as Cornell's; never
   on an official host, see `config.is_official_host`).
-- Tabs: **Comments** | **Map**. The Comments tab starts with the active hard-filter notes, each
+- Result tabs: **Comments** | **Map** (after the three "At a glance" tabs). The Comments tab
+  starts with the active hard-filter notes, each
   with its reset button: "Showing only reports that say they grew in YEAR." + "Any year"
   (`ui.year_filter_note`), and the reported-state note + "Show all states". Then the
   limitation message and the count summary (`ui.count_summary`, e.g. "70 reports · 3
@@ -1115,12 +1222,21 @@ function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
   `paging_fixes`/`cards_to_show`/`show_more_label`/`page_key`, `source_link`,
   `provenance_note`, `source_rows`, `summary_line`, `outside_link_markdown`, `label_badge`,
   `min_cell_count`, `map_key`, `map_notes`, `map_colorbar`, `state_choices`,
-  `selected_state`, `parse_app_args`, `is_loopback_address`, `private_bind_error`.
-- Tests: `tests/test_ui.py` (pure helpers), `tests/test_app.py` (AppTest end to end, incl. a
+  `selected_state`, `parse_app_args`, `is_loopback_address`, `private_bind_error`, and for
+  the header `kpi_tiles_html`, `varieties_caption`, `topics_caption`, `setups_caption`,
+  `variety_click_updates`, `cell_click_updates`, `glance_key`, `variety_table`, `topic_table`,
+  `setup_table`.
+- Tests: `tests/test_overview.py` and `tests/test_overview_charts.py` (counts, tie-breaks,
+  marks, colours per theme, escaping, Hypothesis properties), `tests/test_ui.py` (pure
+  helpers), `tests/test_app.py` (AppTest end to end, incl. the header's place and numbers on
+  the demo database, a public view whose `private_unverified` variety, crop and state never
+  reach a tile, figure or table, no quality words in the header, and a
   cleared comment's "Source ↗" URL, the synthetic/no-link notes, the loopback guard and
   invalid options) and `tests/test_browser.py` (marker `browser`: `streamlit run` headless on a
   free loopback port, Playwright Chromium at 390x844 — no horizontal overflow, search box and
   always-visible selects shown, zone 6b regroups, Clear restores the first-load values and
   placeholders, the Source link's href, the Hot & humid chip's "In their own words" lines
-  without overflow — then a 1280x900 smoke test; CI runs
+  without overflow, the "At a glance" tiles two by two with the first chart rendered — then a
+  1280x900 smoke test, tiles four across, and a real click on a variety bar (search becomes
+  "Juliet", 5 reports) and on a topic cell (search "Sungold", Topics "productivity"); CI runs
   `uv run playwright install --with-deps chromium` first).

@@ -17,7 +17,10 @@ quality.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import html
 import ipaddress
+import json
 import math
 import string
 from collections import Counter
@@ -27,11 +30,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, NoReturn, cast, get_args
 
+import pandas as pd
+
 from crop_explorer.config import DEFAULT_CONFIG_PATH, ContextLabel, OutsideLink, QuickChip
 from crop_explorer.environment_match import match_context, values_with
 from crop_explorer.geography import RegionCounts, count_label
+from crop_explorer.overview import Headline
+from crop_explorer.overview_charts import FONT_FAMILY, SETUP_TITLES, TOPIC_TITLES, ChartTheme
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
-from crop_explorer.schemas import Basis, EnvKey, RightsStatus
+from crop_explorer.schemas import TOPICS, Basis, EnvKey, RightsStatus
 from crop_explorer.search import FilterOptions
 from crop_explorer.views import (
     TIER_ORDER,
@@ -68,16 +75,21 @@ __all__ = [
     "CROP_KEY",
     "DEMO_BANNER",
     "EVIDENCE_LABEL",
+    "GLANCE_TABS",
     "MISSING_DB_COMMAND",
     "MORE_KEYS",
     "NOT_ANALYSED_LINE",
     "NO_RESULTS",
+    "NO_SETUPS",
+    "NO_TOPICS",
+    "NO_VARIETIES",
     "PAGE_QUERY_KEY",
     "PRIVATE_BANNER",
     "REGION_FILTER_KEY",
     "REGION_KEY",
     "STRICT_KEY",
     "SYNTHETIC_NOTE",
+    "TABLE_LABEL",
     "TEXT_KEY",
     "TOPICS_KEY",
     "WORD_JOINER",
@@ -90,6 +102,7 @@ __all__ = [
     "card_heading",
     "card_title",
     "cards_to_show",
+    "cell_click_updates",
     "chip_help",
     "chip_is_active",
     "chip_state",
@@ -104,9 +117,11 @@ __all__ = [
     "evidence_rows",
     "flatten",
     "garden_from_state",
+    "glance_key",
     "group_heading",
     "is_loopback_address",
     "key_label",
+    "kpi_tiles_html",
     "label_badge",
     "map_colorbar",
     "map_key",
@@ -130,6 +145,8 @@ __all__ = [
     "reset_values",
     "scope_banner",
     "selected_state",
+    "setup_table",
+    "setups_caption",
     "show_more_label",
     "source_link",
     "source_rows",
@@ -138,6 +155,11 @@ __all__ = [
     "strict_note",
     "summary_line",
     "topic_label",
+    "topic_table",
+    "topics_caption",
+    "varieties_caption",
+    "variety_click_updates",
+    "variety_table",
     "visible_chips",
     "year_filter_note",
     "year_label",
@@ -1353,6 +1375,215 @@ def outside_link_markdown(link: OutsideLink) -> str:
 def label_badge(label: ContextLabel) -> str:
     """Return a Streamlit Markdown badge for an evidence-type label (SPEC §7 data boundary)."""
     return f":{_BADGE_COLORS[label]}-badge[{label}]"
+
+
+# --------------------------------------------------------------------------- at a glance
+
+GLANCE_TABS: Final = ("Most-discussed varieties", "What people talk about", "How people grow")
+NO_VARIETIES: Final = "No variety has been identified in these reports yet."
+NO_SETUPS: Final = "No report states a growing method or setting yet."
+NO_TOPICS: Final = "No topics have been identified for these varieties yet."
+TABLE_LABEL: Final = "Show as table"
+_CONVERSATION_NOT_QUALITY: Final = (
+    "This counts conversation, not quality: a failed crop counts the same as a great one."
+)
+_TILE_STYLE: Final = (
+    "<style>"
+    ".glance-kpis{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;"
+    "margin:0 0 8px;font-family:{font}}}"
+    "@media (max-width:640px){{.glance-kpis{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}"
+    ".glance-tile{{border:1px solid {border};border-radius:10px;padding:12px 14px;min-width:0;"
+    "overflow-wrap:anywhere}}"
+    ".glance-label{{color:{secondary};font-size:0.875rem;line-height:1.3}}"
+    ".glance-value{{color:{primary};font-size:1.75rem;font-weight:600;line-height:1.2;"
+    "margin-top:6px;font-variant-numeric:proportional-nums}}"
+    ".glance-of{{font-size:1rem;font-weight:500;color:{secondary}}}"
+    ".glance-note{{color:{muted};font-size:0.75rem;line-height:1.35;margin-top:4px}}"
+    ".glance-meter{{display:flex;height:6px;border-radius:3px;background:{track};"
+    "overflow:hidden;margin-top:10px}}"
+    ".glance-meter span:first-child{{background:{fill};border-radius:3px}}"
+    "</style>"
+)
+"""Tile styles, filled with one theme's tokens: 4 across, 2 x 2 at phone width."""
+_TILE: Final = (
+    '<div class="glance-tile"><div class="glance-label">{label}</div>'
+    '<div class="glance-value">{value}</div>{extra}</div>'
+)
+_METER: Final = (
+    '<div class="glance-meter" role="meter" aria-label="Reports that state growing conditions" '
+    'aria-valuemin="0" aria-valuemax="{total}" aria-valuenow="{part}">'
+    '<span style="flex:{part} 1 0px"></span><span style="flex:{rest} 1 0px"></span></div>'
+)
+_COMPACT_FROM: Final = 10_000
+_VARIETIES_NOTE: Final = "distinct varieties named"
+
+
+def _figure(n: int) -> str:
+    """Format a tile value: ``1,284``, then ``12.9K`` and ``3.4M`` from ten thousand."""
+    if n < _COMPACT_FROM:
+        return f"{n:,}"
+    return f"{n / 1_000:.1f}K" if n < 1_000_000 else f"{n / 1_000_000:.1f}M"
+
+
+def _tile(label: str, value: str, extra: str = "") -> str:
+    return _TILE.format(label=label, value=value, extra=extra)
+
+
+def _note(text: str) -> str:
+    return f'<div class="glance-note">{text}</div>'
+
+
+def _tile_style(theme: ChartTheme) -> str:
+    return _TILE_STYLE.format(
+        font=FONT_FAMILY,
+        border=theme.border,
+        primary=theme.text_primary,
+        secondary=theme.text_secondary,
+        muted=theme.text_muted,
+        track=theme.meter_track,
+        fill=theme.series,
+    )
+
+
+def _conditions_tile(part: int, total: int) -> str:
+    """Return the "33 of 69" tile, with a meter of the same proportion."""
+    value = f'{_figure(part)}<span class="glance-of"> of {_figure(total)}</span>'
+    meter = _METER.format(total=total, part=part, rest=total - part)
+    return _tile("State growing conditions", value, meter)
+
+
+def kpi_tiles_html(headline: Headline, theme: ChartTheme) -> str:
+    """Return the "At a glance" stat tiles as trusted HTML (numbers and fixed labels only).
+
+    Parameters
+    ----------
+    headline : Headline
+        The counts to show; nothing else (no comment text) ever reaches this HTML.
+    theme : ChartTheme
+        The light or dark tokens, the same ones the charts use.
+
+    Returns
+    -------
+    str
+        A style block and a CSS grid of four tiles, four across (two by two at phone width):
+        "Reports", "Varieties mentioned", "State growing conditions" ("33 of 69" with a meter
+        whose track is a lighter step of the fill's ramp) and "Places named" (U.S. states and
+        places outside the U.S.). Values use proportional figures.
+    """
+    places = f"{_plural(headline.n_us_states, 'U.S. state')} · {headline.n_other_regions} "
+    tiles = (
+        _tile("Reports", _figure(headline.n_reports), _note("comments in this view")),
+        _tile("Varieties mentioned", _figure(headline.n_varieties), _note(_VARIETIES_NOTE)),
+        _conditions_tile(headline.n_with_conditions, headline.n_reports),
+        _tile("Places named", _figure(headline.n_places), _note(f"{places}outside the U.S.")),
+    )
+    return f'{_tile_style(theme)}<div class="glance-kpis">{"".join(tiles)}</div>'
+
+
+def varieties_caption(n_shown: int, headline: Headline) -> str:
+    """Say what the variety bars count, and that conversation is not quality."""
+    n_reports = headline.n_reports
+    where = "in the only report" if n_reports == 1 else f"across all {n_reports} reports"
+    if n_shown < headline.n_varieties:
+        lead = (
+            f"Comments that mention each variety, top {n_shown} of {headline.n_varieties} {where}."
+        )
+    else:
+        lead = f"Comments that mention each variety ({headline.n_varieties} in all) {where}."
+    return f"{lead} {_CONVERSATION_NOT_QUALITY} Select a bar to read those comments."
+
+
+def topics_caption(n_rows: int) -> str:
+    """Say what the topic grid counts: what was discussed, never whether it went well."""
+    rows = (
+        "the most-discussed variety" if n_rows == 1 else f"the {n_rows} most-discussed varieties"
+    )
+    return (
+        f"Comments about each topic for {rows}, in the bar chart's order. A comment can touch "
+        "several topics, and a topic says what was discussed, not whether it went well. Select a "
+        "cell to read those comments."
+    )
+
+
+def setups_caption(n_with_setup: int, n_reports: int) -> str:
+    """Say how few reports state a growing method or setting at all."""
+    most = " Most don't say." if 2 * n_with_setup < n_reports else ""
+    return (
+        "Only reports that state a growing method or setting are counted: "
+        f"{n_with_setup} of {n_reports}.{most} A report can state more than one."
+    )
+
+
+def _clicked(selection: Mapping[str, Any], size: int) -> list[str] | None:
+    """Return the first selected point's ``customdata`` if it is ``size`` strings."""
+    points = (selection.get("selection") or {}).get("points") or ()
+    for point in points:
+        data = point.get("customdata")
+        if isinstance(data, list) and len(data) == size and all(isinstance(x, str) for x in data):
+            return data
+    return None
+
+
+def variety_click_updates(selection: Mapping[str, Any], max_chars: int) -> dict[str, Any]:
+    """Return the session updates for a click on a variety bar (empty when nothing usable).
+
+    The search text becomes the variety's label (unescaped from the figure's ``customdata``,
+    cut to ``max_chars``) and the Topics filter is cleared, so the comments shown are the ones
+    the bar counts; every other control is left as it is.
+    """
+    data = _clicked(selection, 1)
+    if data is None:
+        return {}
+    return {TEXT_KEY: html.unescape(data[0])[:max_chars], TOPICS_KEY: []}
+
+
+def cell_click_updates(selection: Mapping[str, Any], max_chars: int) -> dict[str, Any]:
+    """Return the session updates for a click on a topic cell (empty when nothing usable).
+
+    The search text becomes the variety's label and the Topics filter that one topic.
+    """
+    data = _clicked(selection, 2)
+    if data is None or data[1] not in TOPICS:
+        return {}
+    return {TEXT_KEY: html.unescape(data[0])[:max_chars], TOPICS_KEY: [data[1]]}
+
+
+def glance_key(chart: str, state: Mapping[str, Any]) -> str:
+    """Return an "At a glance" chart's widget key, which changes with the search and topics.
+
+    Like :func:`map_key`: after a click sets the search, the chart remounts without a stale
+    click selection, so the next click always registers.
+    """
+    fingerprint = json.dumps([state.get(TEXT_KEY) or "", sorted(state.get(TOPICS_KEY) or ())])
+    return f"glance_{chart}_{hashlib.sha256(fingerprint.encode()).hexdigest()[:12]}"
+
+
+def variety_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the variety counts as a readable table (names as written: shown as plain text)."""
+    crops = ["not named" if not isinstance(crop, str) else crop for crop in frame["crop"]]
+    return pd.DataFrame(
+        {"Variety": list(frame["label"]), "Crop": crops, "Comments": list(frame["n_comments"])}
+    )
+
+
+def topic_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the variety x topic cells as a readable table."""
+    topics = [TOPIC_TITLES[str(topic)] for topic in frame["topic"]]
+    return pd.DataFrame(
+        {"Variety": list(frame["label"]), "Topic": topics, "Comments": list(frame["n_comments"])}
+    )
+
+
+def setup_table(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return the growing method and setting counts as a readable table."""
+    conditions = [SETUP_TITLES[str(key)] for key in frame["key"]]
+    return pd.DataFrame(
+        {
+            "Condition": conditions,
+            "Stated as": list(frame["label"]),
+            "Comments": list(frame["n_comments"]),
+        }
+    )
 
 
 # --------------------------------------------------------------------------- map

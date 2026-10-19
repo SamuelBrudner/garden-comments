@@ -62,6 +62,23 @@ def test_streamlit_config_pins_neither_address_nor_port() -> None:
     assert "port" not in server
 
 
+def test_streamlit_theme_follows_the_visitors_light_or_dark_setting() -> None:
+    """A single top-level theme colour pins a light custom theme: dark-mode visitors would get
+    a light page while ``st.context.theme.type`` reports dark (the "At a glance" charts pick
+    their tokens from it). Accents are set per mode instead."""
+    theme = streamlit_settings()["theme"]
+    assert set(theme) == {"light", "dark"}
+    assert theme["light"]["primaryColor"]
+    assert theme["dark"]["primaryColor"]
+    assert "base" not in theme
+
+
+def test_overview_chart_sizes_are_configured() -> None:
+    overview = load_config().overview
+
+    assert (overview.top_varieties, overview.heatmap_varieties) == (10, 8)
+
+
 def test_streamlit_config_keeps_the_viewer_safety_settings() -> None:
     settings = streamlit_settings()
 

@@ -18,20 +18,23 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Final
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from crop_explorer import db, geography, search, ui
+from crop_explorer import db, geography, overview, overview_charts, search, ui
 from crop_explorer.config import AppConfig, LoggingConfig, QuickChip, load_config
 from crop_explorer.geography import RegionCounts
 from crop_explorer.logging_setup import configure_logging
+from crop_explorer.overview import Overview
+from crop_explorer.overview_charts import ChartTheme
 from crop_explorer.schemas import utc_now_iso
 from crop_explorer.search import FilterOptions
 from crop_explorer.views import (
@@ -85,9 +88,21 @@ _MAP_ALT: Final = (
     "Map of U.S. states shaded by how many reports name each state as where they grew."
 )
 _MAP_CONFIG: Final = {"displayModeBar": False, "scrollZoom": False}
+_GLANCE_TITLE: Final = "At a glance"
+_GLANCE_ALTS: Final = {
+    "varieties": "Bar chart: how many comments mention each of the most-discussed varieties.",
+    "topics": (
+        "Grid: how many comments about each of the most-discussed varieties touch each topic."
+    ),
+    "setups": "Bar charts: how many comments state each growing method and each setting.",
+}
 _DB_ERROR: Final = (
     "The database at {path} cannot be opened: {reason}. Build a new one with: {command}"
 )
+
+
+_ClickReader = Callable[[Mapping[str, Any], int], dict[str, Any]]
+"""Reads a chart's click selection into session-state updates (``ui.*_click_updates``)."""
 
 
 @dataclass(frozen=True)
@@ -127,6 +142,11 @@ def _on_map_select(widget_key: str) -> None:
         st.session_state[ui.REGION_FILTER_KEY] = code
 
 
+def _on_glance_select(widget_key: str, read: _ClickReader, max_chars: int) -> None:
+    """Turn a click on an "At a glance" chart into a search (nothing for an empty selection)."""
+    _apply(read(st.session_state[widget_key], max_chars))
+
+
 def _apply(updates: dict[str, Any]) -> None:
     for key, value in updates.items():
         st.session_state[key] = value
@@ -152,6 +172,80 @@ def _banner(scope: ViewerScope, views: Collection[CommentView]) -> None:
     banner = ui.scope_banner(scope, {view.rights_status for view in views})
     if banner is not None:
         (st.warning if scope == "private" else st.info)(banner)
+
+
+# --------------------------------------------------------------------------- at a glance
+
+
+def _glance_chart(
+    figure: go.Figure, chart: str, read: _ClickReader | None, max_chars: int
+) -> None:
+    key = ui.glance_key(chart, _state())
+    st.plotly_chart(
+        figure,
+        key=key,
+        on_select="ignore" if read is None else partial(_on_glance_select, key, read, max_chars),
+        selection_mode="points",
+        config=dict(overview_charts.CHART_CONFIG),
+        theme=None,
+        width="stretch",
+        alt=_GLANCE_ALTS[chart],
+    )
+
+
+def _table(frame: pd.DataFrame) -> None:
+    """Show the chart's table-view twin: every value readable without hovering."""
+    with st.expander(ui.TABLE_LABEL):
+        st.dataframe(frame, hide_index=True, width="stretch")
+
+
+def _varieties_panel(data: Overview, theme: ChartTheme, max_chars: int) -> None:
+    if data.varieties.empty:
+        st.caption(ui.NO_VARIETIES)
+        return
+    st.caption(ui.varieties_caption(len(data.varieties), data.headline))
+    figure = overview_charts.varieties_bar(data.varieties, theme)
+    _glance_chart(figure, "varieties", ui.variety_click_updates, max_chars)
+    _table(ui.variety_table(data.varieties))
+
+
+def _topics_panel(data: Overview, theme: ChartTheme, max_chars: int) -> None:
+    if data.topics.empty:
+        st.caption(ui.NO_TOPICS)
+        return
+    st.caption(ui.topics_caption(data.topics["variety_key"].nunique()))
+    figure = overview_charts.topics_heatmap(data.topics, theme)
+    _glance_chart(figure, "topics", ui.cell_click_updates, max_chars)
+    _table(ui.topic_table(data.topics))
+
+
+def _setups_panel(data: Overview, theme: ChartTheme, max_chars: int) -> None:
+    if data.setups.empty:
+        st.caption(ui.NO_SETUPS)
+        return
+    st.caption(ui.setups_caption(data.n_with_setup, data.headline.n_reports))
+    _glance_chart(overview_charts.setups_bar(data.setups, theme), "setups", None, max_chars)
+    _table(ui.setup_table(data.setups))
+
+
+_GLANCE_PANELS: Final = (_varieties_panel, _topics_panel, _setups_panel)
+
+
+def _glance(ctx: _Context, views: Sequence[CommentView]) -> None:
+    """Render "At a glance": stat tiles, then one tab per chart, from the visible views only.
+
+    The views are the run's scope-gated views, so a public view never counts private rows.
+    Colors follow Streamlit's theme type (light tokens until the browser reports one).
+    """
+    data = overview.summarize(views, ctx.cfg.overview)
+    theme = overview_charts.theme_for(st.context.theme.type)
+    st.subheader(_GLANCE_TITLE, anchor=False)
+    st.markdown(ui.kpi_tiles_html(data.headline, theme), unsafe_allow_html=True)
+    if not data.headline.n_reports:
+        return
+    for tab, panel in zip(st.tabs(list(ui.GLANCE_TABS)), _GLANCE_PANELS, strict=True):
+        with tab:
+            panel(data, theme, ctx.cfg.viewer.max_query_chars)
 
 
 # --------------------------------------------------------------------------- conditions
@@ -453,10 +547,11 @@ def _outside_context(cfg: AppConfig) -> None:
 # --------------------------------------------------------------------------- page
 
 
-def _controls(ctx: _Context, views: Collection[CommentView]) -> SearchQuery:
+def _controls(ctx: _Context, views: Sequence[CommentView]) -> SearchQuery:
     """Render the header panels and every input; return the query they describe."""
     _about(ctx, views)
     _banner(ctx.scope, views)
+    _glance(ctx, views)
     options = search.filter_options(ctx.conn, ctx.scope, ctx.now)
     _apply(ui.stale_state_fixes(_state(), options))
     _conditions_panel()

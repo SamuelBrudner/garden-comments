@@ -363,7 +363,7 @@ class TestBrowseScreen:
         } <= labels
         assert at.multiselect(key=ui.TOPICS_KEY).label == "Topics"
         assert at.checkbox(key=ui.STRICT_KEY).label == "Only show stated matches"
-        assert [tab.label for tab in at.tabs] == ["Comments", "Map"]
+        assert [tab.label for tab in at.tabs] == [*ui.GLANCE_TABS, "Comments", "Map"]
         assert {"About / Sources", "More conditions", "Optional outside context"} <= {
             e.label for e in at.expander
         }
@@ -432,8 +432,10 @@ class TestLayout:
             i for i, n in enumerate(nodes) if getattr(n, "label", "") == "Optional outside context"
         )
         strict = next(i for i, n in enumerate(nodes) if getattr(n, "key", "") == ui.STRICT_KEY)
-        first_tab = next(i for i, n in enumerate(nodes) if type(n).__name__ == "Tab")
-        assert strict < outside < first_tab
+        comments_tab = next(
+            i for i, n in enumerate(nodes) if type(n).__name__ == "Tab" and n.label == "Comments"
+        )
+        assert strict < outside < comments_tab
 
     def test_search_box_is_capped(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
@@ -761,7 +763,7 @@ class TestProvenanceLabels:
 
     def test_map_tab_is_labelled(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
-        (_, map_tab) = at.tabs
+        (map_tab,) = [tab for tab in at.tabs if tab.label == "Map"]
         badges = f"{ui.label_badge('community report')} {ui.label_badge('reported conditions')}"
         assert badges in [m.value for m in map_tab.markdown]
 
@@ -1043,3 +1045,329 @@ class TestContext:
         assert "not variety quality" in text
         assert "synthetic demo data" in text
         assert "synthetic\\-demo" in text
+
+
+# --------------------------------------------------------------------------- at a glance
+
+GLANCE_VARIETY = "Aardvark Gold"
+GLANCE_CROP = "rutabaga"
+GLANCE_SECRETS = ("Aardvark", "aardvark", GLANCE_CROP, "PRIVATEGLANCE", "Hawaii", "glance-private")
+QUALITY_WORDS = ("best", "top-rated", "recommend", "score", "%")
+DEMO_TILES = (
+    "Reports 70 comments in this view "
+    "Varieties mentioned 44 distinct varieties named "
+    "State growing conditions 33 of 70 "
+    "Places named 21 18 U.S. states · 3 outside the U.S."
+)
+"""The public test database: 69 synthetic fixtures plus one unextracted Markdown comment."""
+
+
+def _glance_fact(key: str, written: str, value: str, quote: str) -> dict[str, str]:
+    return {
+        "key": key,
+        "value_as_written": written,
+        "normalized_value": value,
+        "evidence_quote": quote,
+        "applicability": "this_mention",
+        "basis": "reported_garden_context",
+    }
+
+
+def _glance_private_rows(n: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``n`` private comments about a variety, crop and state that no public row mentions."""
+    comments, extractions = [], []
+    for i in range(n):
+        comment_id = f"glance-private-{i}"
+        text = f"PRIVATEGLANCE {i}: {GLANCE_VARIETY} {GLANCE_CROP} grew in pots in Hawaii."
+        comments.append({"comment_id": comment_id, "text": text})
+        mention = {
+            "crop": GLANCE_CROP,
+            "variety_as_written": GLANCE_VARIETY,
+            "topics": ["flavor"],
+            "evidence_quote": f"{GLANCE_VARIETY} {GLANCE_CROP}",
+            "environment": [
+                _glance_fact("method", "pots", "container", "grew in pots"),
+                _glance_fact("region", "Hawaii", "US-HI", "in Hawaii"),
+            ],
+        }
+        extractions.append(
+            {
+                "comment_id": comment_id,
+                "extractor_version": "test-v1",
+                "status": "parsed",
+                "mentions": [mention],
+            }
+        )
+    return comments, extractions
+
+
+@pytest.fixture(scope="module")
+def glance_env(
+    app_env: AppEnv, tmp_path_factory: pytest.TempPathFactory, source_importer: Any
+) -> AppEnv:
+    """The viewer database plus three ``private_unverified`` comments with unique names."""
+    root = tmp_path_factory.mktemp("glance")
+    db_path = root / "glance.sqlite"
+    shutil.copyfile(app_env.db_path, db_path)
+    comments, extractions = _glance_private_rows(3)
+    conn = db.connect(db_path)
+    try:
+        source_importer(
+            conn, root, source_id="glance-private", comments=comments, extractions=extractions
+        )
+    finally:
+        conn.close()
+    return AppEnv(
+        root=root, config=_write_config(root, db_path), db_path=db_path, texts=app_env.texts
+    )
+
+
+def glance_tabs(at: AppTest) -> list[Any]:
+    tabs = [tab for tab in at.tabs if tab.label in ui.GLANCE_TABS]
+    assert [tab.label for tab in tabs] == list(ui.GLANCE_TABS)
+    return tabs
+
+
+def glance_figures(at: AppTest) -> list[dict[str, Any]]:
+    """The figure JSON of every chart in the "At a glance" tabs."""
+    return [
+        json.loads(chart.proto.spec)
+        for tab in glance_tabs(at)
+        for chart in tab.get("plotly_chart")
+    ]
+
+
+def tiles_markup(at: AppTest) -> str:
+    (markup,) = [str(m.value) for m in at.markdown if "glance-kpis" in str(m.value)]
+    return markup
+
+
+def tile_text(markup: str) -> str:
+    visible = re.sub(r"<style>.*?</style>", "", markup, flags=re.DOTALL)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
+
+
+def _strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def displayed_strings(figure: dict[str, Any]) -> list[str]:
+    """What a reader of a figure can see: titles, tick labels, bar text, hover text, legends."""
+    layout = figure["layout"]
+    found = [a.get("text", "") for a in layout.get("annotations", [])]
+    for name, axis in layout.items():
+        if name.startswith(("xaxis", "yaxis")):
+            found += list(_strings(axis.get("ticktext", [])))
+    for trace in figure["data"]:
+        found += [*_strings(trace.get("text", [])), *_strings(trace.get("hovertext", []))]
+        found.append(trace.get("colorbar", {}).get("title", {}).get("text", ""))
+    return found
+
+
+def header_text(at: AppTest) -> str:
+    """Every word the "At a glance" header shows: tiles, tab labels, captions and charts."""
+    captions = [str(c.value) for tab in glance_tabs(at) for c in tab.caption]
+    figures = [s for figure in glance_figures(at) for s in displayed_strings(figure)]
+    return " ".join(
+        ["At a glance", tile_text(tiles_markup(at)), *ui.GLANCE_TABS, *captions, *figures]
+    )
+
+
+class TestAtAGlance:
+    """The creator's overview at the top of the page: counts of comments, never quality."""
+
+    def test_header_sits_after_the_banner_and_before_my_growing_conditions(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        values = [
+            value if isinstance(value := getattr(node, "value", None), str) else None
+            for node in walk(at.main)
+        ]
+        kinds = [type(node).__name__ for node in walk(at.main)]
+        banner = values.index(ui.DEMO_BANNER)
+        glance = values.index("At a glance")
+        tiles = next(i for i, v in enumerate(values) if isinstance(v, str) and "glance-kpis" in v)
+        first_tab = kinds.index("Tab")
+        conditions = values.index("My growing conditions")
+        assert banner < glance < tiles < first_tab < conditions
+        assert [tab.label for tab in at.tabs][:3] == list(ui.GLANCE_TABS)
+
+    def test_tiles_show_the_counts_of_the_visible_reports(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        markup = tiles_markup(at)
+        assert tile_text(markup) == DEMO_TILES
+        assert 'aria-valuenow="33"' in markup
+        assert 'aria-valuemax="70"' in markup
+        assert "Only 33 of 70 reports mention comparable growing conditions" in " ".join(infos(at))
+
+    def test_each_tab_has_a_caption_a_chart_and_a_table(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        expected = ({"bar"}, {"heatmap", "scatter"}, {"bar"})
+        for tab, types in zip(glance_tabs(at), expected, strict=True):
+            (caption,) = tab.caption
+            assert caption.value
+            (chart,) = tab.get("plotly_chart")
+            figure = json.loads(chart.proto.spec)
+            assert {trace["type"] for trace in figure["data"]} == types
+            assert json.loads(chart.proto.config)["displayModeBar"] is False
+            (table,) = [e for e in tab.expander if e.label == ui.TABLE_LABEL]
+            (frame,) = table.dataframe
+            assert not frame.value.empty
+
+    def test_the_variety_chart_and_captions_on_the_demo(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        varieties, topics, setups = glance_tabs(at)
+        assert varieties.caption[0].value.startswith(
+            "Comments that mention each variety, top 10 of 44 across all 70 reports. This counts "
+            "conversation, not quality: a failed crop counts the same as a great one."
+        )
+        assert "the 8 most-discussed varieties" in topics.caption[0].value
+        assert setups.caption[0].value.startswith(
+            "Only reports that state a growing method or setting are counted: 20 of 70. Most "
+            "don't say."
+        )
+        (bars,) = glance_figures(at)[0]["data"]
+        assert bars["x"][:3] == [10, 5, 5]
+        ticks = glance_figures(at)[0]["layout"]["yaxis"]["ticktext"]
+        assert ticks[:3] == ["Sungold · tomato", "Cherokee Purple · tomato", "Juliet · tomato"]
+        rows = glance_figures(at)[1]["layout"]["yaxis"]["ticktext"]
+        assert rows == [tick.split(" · ")[0] for tick in ticks[:8]]
+
+    def test_only_the_variety_and_topic_charts_are_clickable(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        modes = [list(tab.get("plotly_chart")[0].proto.selection_mode) for tab in glance_tabs(at)]
+        assert [bool(mode) for mode in modes] == [True, True, False]
+
+    def test_charts_remount_when_the_search_changes(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        before = ui.glance_key("varieties", {})
+        assert before in at.session_state
+        at.text_input(key=ui.TEXT_KEY).input("Juliet").run()
+        assert before not in at.session_state
+        assert ui.glance_key("varieties", {ui.TEXT_KEY: "Juliet"}) in at.session_state
+
+    def test_no_quality_words_anywhere_in_the_header(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        text = header_text(at).casefold()
+        assert "sungold" in text
+        assert "greenhouse" in text
+        for word in QUALITY_WORDS:
+            assert word not in text, word
+        assert "%" not in tiles_markup(at)
+
+    def test_private_rows_never_reach_the_public_header(
+        self, monkeypatch: pytest.MonkeyPatch, glance_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, glance_env)
+        markup = tiles_markup(at)
+        figures = json.dumps(glance_figures(at), ensure_ascii=False)
+        tables = " ".join(frame.value.to_string() for frame in at.dataframe)
+        for secret in GLANCE_SECRETS:
+            assert secret not in markup, secret
+            assert secret not in figures, secret
+            assert secret not in tables, secret
+        page = all_text(at)  # every region is a Region option, so Hawaii is checked below
+        assert not [secret for secret in GLANCE_SECRETS if secret != "Hawaii" and secret in page]
+        reported = at.selectbox(key=ui.REGION_FILTER_KEY).options
+        assert not [option for option in reported if "Hawaii" in option]
+        assert tile_text(markup) == DEMO_TILES
+
+    def test_the_same_rows_do_show_in_the_private_view(
+        self, monkeypatch: pytest.MonkeyPatch, glance_env: AppEnv
+    ) -> None:
+        """Proves the public check above looks at the right places."""
+        at = run_app(monkeypatch, glance_env, scope="private")
+        figures = json.dumps(glance_figures(at), ensure_ascii=False)
+        assert f"{GLANCE_VARIETY} · {GLANCE_CROP}" in figures
+        text = tile_text(tiles_markup(at))
+        assert "Varieties mentioned 45 " in text
+        assert "Places named 22 19 U.S. states" in text
+
+    def test_untrusted_names_are_escaped_in_the_figures(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        app_env: AppEnv,
+        tmp_path: Path,
+        source_importer: Any,
+    ) -> None:
+        db_copy = tmp_path / "evil.sqlite"
+        shutil.copyfile(app_env.db_path, db_copy)
+        evil = "<b>Bold</b> Beauty"
+        text = f"EVILNAME {evil} tomato was lovely."
+        line = {
+            "comment_id": "evil-0001",
+            "extractor_version": "test-v1",
+            "status": "parsed",
+            "mentions": [
+                {
+                    "crop": "tomato",
+                    "variety_as_written": evil,
+                    "topics": ["flavor"],
+                    "evidence_quote": f"{evil} tomato",
+                    "environment": [],
+                }
+            ],
+        }
+        conn = db.connect(db_copy)
+        try:
+            source_importer(
+                conn,
+                tmp_path,
+                source_id="evil",
+                comments=[{"comment_id": "evil-0001", "text": text}],
+                extractions=[line],
+                rights_status="synthetic",
+            )
+        finally:
+            conn.close()
+        config = _write_config(tmp_path, db_copy, name="evil.yaml")
+        raw = yaml.safe_load(config.read_text(encoding="utf-8"))
+        raw["overview"] = {"top_varieties": 50, "heatmap_varieties": 50}
+        config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        at = run_app(monkeypatch, app_env, db_path=db_copy, config=config)
+        figures = json.dumps(glance_figures(at), ensure_ascii=False)
+        assert "&lt;b&gt;Bold&lt;/b&gt; Beauty" in figures
+        assert "<b>Bold" not in figures
+
+    def test_an_empty_database_shows_zero_tiles_and_no_charts(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, tmp_path: Path
+    ) -> None:
+        empty = tmp_path / "empty.sqlite"
+        db.connect(empty).close()
+        at = run_app(monkeypatch, app_env, db_path=empty)
+        assert not at.exception
+        assert tile_text(tiles_markup(at)).startswith("Reports 0 ")
+        assert [tab.label for tab in at.tabs] == ["Comments", "Map"]
+
+    def test_unanalysed_comments_explain_the_empty_charts(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, tmp_path: Path
+    ) -> None:
+        bare = tmp_path / "bare.sqlite"
+        conn = db.connect(bare)
+        try:
+            rows = [{"comment_id": MARKDOWN_ID, "text": MARKDOWN_TEXT}]
+            _import(conn, _write_jsonl(tmp_path / "md.jsonl", rows), "markdown-test", "synthetic")
+        finally:
+            conn.close()
+        at = run_app(monkeypatch, app_env, db_path=bare)
+        assert not at.exception
+        captions = [tab.caption[0].value for tab in glance_tabs(at)]
+        assert captions == [ui.NO_VARIETIES, ui.NO_TOPICS, ui.NO_SETUPS]
+        assert glance_figures(at) == []
