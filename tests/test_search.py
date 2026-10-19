@@ -155,6 +155,7 @@ def ask(
     topics: tuple[Topic, ...] = (),
     year: str | None = None,
     region_filter: str | None = None,
+    variety: str | None = None,
     only_stated: bool = False,
     **garden: str,
 ) -> SearchQuery:
@@ -164,6 +165,7 @@ def ask(
         topics=topics,
         year=year,
         region_filter=region_filter,
+        variety=variety,
         garden=GardenContext.model_validate(garden),
         only_stated_matches=only_stated,
     )
@@ -1242,6 +1244,48 @@ class TestMentionFilters:
         relevant = card(result, "mixed").mention_matches
         assert [mm.mention.variety_as_written for mm in relevant] == ["Sungold"]
 
+    def test_variety_filter_keeps_only_mentions_of_that_variety_key(self) -> None:
+        other = comment("other", mention("other#m0", variety="Juliet"), order=1)
+        result = build_result([three_varieties(), two_crops(), other], ask(variety="juliet"))
+        assert layout(result) == {"all": ["trio", "other"]}
+        relevant = card(result, "trio").mention_matches
+        assert [mm.mention.variety_as_written for mm in relevant] == ["Juliet"]
+        assert [f.fact_id for f in relevant[0].facts] == ["region=US-CT", "method=container"]
+
+    def test_variety_and_topic_filters_must_hold_on_the_same_mention(self) -> None:
+        assert (
+            build_result([two_crops()], ask(variety="sungold", topics=("disease",))).groups == ()
+        )
+        result = build_result([two_crops()], ask(variety="sungold", topics=("flavor",)))
+        assert [mm.mention.mention_id for mm in card(result, "mixed").mention_matches] == [
+            "mixed#m0"
+        ]
+
+    def test_the_variety_filter_ignores_comments_without_mentions(self) -> None:
+        result = build_result([UNRESOLVED, NEVER_EXTRACTED, two_crops()], ask(variety="sungold"))
+        assert layout(result) == {"all": ["mixed"]}
+        assert result.n_not_analysed == 0
+
+    def test_the_variety_filter_counts_spellings_of_one_key(self) -> None:
+        views = [
+            comment("a", mention("a#m0", variety="Sun Gold")),
+            comment("b", mention("b#m0", variety="Sungold"), order=1),
+        ]
+        views = [
+            view.model_copy(
+                update={
+                    "mentions": tuple(
+                        m.model_copy(
+                            update={"variety_key": variety_key(m.variety_as_written or "")}
+                        )
+                        for m in view.mentions
+                    )
+                }
+            )
+            for view in views
+        ]
+        assert build_result(views, ask(variety="sungold")).n_candidates == 2
+
     def test_crop_filter_compares_normalized_crop_names(self) -> None:
         result = build_result([two_crops()], ask(crop="  PEPPERS "))
         assert [mm.mention.crop for mm in card(result, "mixed").mention_matches] == ["pepper"]
@@ -1259,8 +1303,21 @@ class TestMentionFilters:
             ask(region_filter="Connecticut"),
             ask(region_filter="us-ct"),
             ask(crop="   "),
+            ask(variety=""),
+            ask(variety="Sungold"),
+            ask(variety="sun gold"),
         ],
-        ids=["short-year", "padded-year", "old-year", "region-name", "lowercase-code", "blank"],
+        ids=[
+            "short-year",
+            "padded-year",
+            "old-year",
+            "region-name",
+            "lowercase-code",
+            "blank",
+            "blank-variety",
+            "variety-label",
+            "variety-with-space",
+        ],
     )
     def test_invalid_filter_values_fail_loudly(self, query: SearchQuery) -> None:
         with pytest.raises(ValueError):
@@ -1600,6 +1657,12 @@ class TestSearchDatabase:
         pepper = search(conn, "public", ask(text="jalapeno", shelter="greenhouse"), NOW)
         assert layout(pepper) == {"match": ["p-split"]}
 
+    def test_the_variety_filter_never_reaches_private_comments(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        assert search(conn, "public", ask(variety="clemsonspineless"), NOW).n_candidates == 0
+        assert search(conn, "private", ask(variety="clemsonspineless"), NOW).n_candidates == 1
+
     def test_filters_use_stored_facts(self, conn: sqlite3.Connection) -> None:
         by_year = search(conn, "public", ask(year="2024"), NOW)
         assert layout(by_year) == {"all": ["p-pots"]}
@@ -1675,7 +1738,10 @@ class TestFilterOptions:
     ) -> None:
         options = filter_options(conn, "public", NOW)
         assert options == FilterOptions(
-            crops=("pepper", "tomato"), topics=("flavor", "productivity"), years=("2024",)
+            crops=("pepper", "tomato"),
+            topics=("flavor", "productivity"),
+            years=("2024",),
+            varieties=("blackkrim", "jalapeño", "juliet", "roma", "sungold"),
         )
 
     def test_private_options_include_private_imports(self, conn: sqlite3.Connection) -> None:
@@ -1683,6 +1749,7 @@ class TestFilterOptions:
         assert options.crops == ("okra", "pepper", "tomato")
         assert options.topics == ("flavor", "productivity", "weather_tolerance")
         assert options.years == ("2022", "2024")
+        assert "clemsonspineless" in options.varieties
 
     def test_options_are_immutable(self, conn: sqlite3.Connection) -> None:
         options = filter_options(conn, "public", NOW)

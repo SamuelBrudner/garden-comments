@@ -119,7 +119,7 @@ def test_renders_the_synthetic_demo_in_public_scope() -> None:
     assert at.text_input(key=ui.TEXT_KEY).label == (
         "Search crops, varieties, or anything people mentioned"
     )
-    assert [tab.label for tab in at.tabs] == ["Comments", "Map"]
+    assert [tab.label for tab in at.tabs] == [*ui.GLANCE_TABS, "Comments", "Map"]
 
 
 def test_search_reruns_against_the_demo_database() -> None:

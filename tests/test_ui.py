@@ -14,6 +14,7 @@ import string
 from collections.abc import Sequence
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -22,6 +23,8 @@ from pydantic import ValidationError
 from crop_explorer import ui
 from crop_explorer.config import DEFAULT_CONFIG_PATH, OutsideLink, QuickChip
 from crop_explorer.geography import RegionCounts, region_counts
+from crop_explorer.overview import Headline
+from crop_explorer.overview_charts import DARK, LIGHT, ChartTheme, plotly_text
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
 from crop_explorer.schemas import Applicability, Basis, EnvKey, RightsStatus, Topic
 from crop_explorer.search import FilterOptions, build_result
@@ -1206,6 +1209,7 @@ class TestOptions:
         assert ui.year_label(None) == "Any year"
         assert ui.year_label("2023") == "2023"
         assert ui.topic_label("weather_tolerance") == "weather tolerance"
+        assert ui.topic_title("weather_tolerance") == "Weather tolerance"  # as on the grid
 
 
 # --------------------------------------------------------------------------- state
@@ -1224,6 +1228,7 @@ class TestState:
             ui.YEAR_KEY,
             ui.STRICT_KEY,
             ui.REGION_FILTER_KEY,
+            ui.VARIETY_FILTER_KEY,
         }
         assert set(keys) == expected
         assert set(ui.CONDITION_KEYS) == set(COMPARABLE_KEYS)
@@ -1248,6 +1253,7 @@ class TestState:
             ui.YEAR_KEY: "2024",
             ui.STRICT_KEY: True,
             ui.REGION_FILTER_KEY: "US-ME",
+            ui.VARIETY_FILTER_KEY: "sungold",
         }
         assert ui.query_from_state(state, max_query_chars=MAX_CHARS) == SearchQuery(
             text="Sungold",
@@ -1255,6 +1261,7 @@ class TestState:
             topics=("flavor",),
             year="2024",
             region_filter="US-ME",
+            variety="sungold",
             garden=GardenContext(region="US-CT", zone="6b", humidity="humid"),
             only_stated_matches=True,
         )
@@ -1359,14 +1366,24 @@ class TestPaging:
         assert ui.show_more_label(7, 20) == "Show 7 more"
 
 
-OPTIONS = FilterOptions(crops=("pepper", "tomato"), topics=("disease", "flavor"), years=("2024",))
+OPTIONS = FilterOptions(
+    crops=("pepper", "tomato"),
+    topics=("disease", "flavor"),
+    years=("2024",),
+    varieties=("juliet", "sungold"),
+)
 
 
 class TestStaleState:
     def test_valid_or_unset_filters_need_no_fix(self) -> None:
         assert ui.stale_state_fixes(ui.reset_values(), OPTIONS) == {}
         assert ui.stale_state_fixes({}, OPTIONS) == {}
-        state = {ui.CROP_KEY: "tomato", ui.TOPICS_KEY: ["flavor"], ui.YEAR_KEY: "2024"}
+        state = {
+            ui.CROP_KEY: "tomato",
+            ui.TOPICS_KEY: ["flavor"],
+            ui.YEAR_KEY: "2024",
+            ui.VARIETY_FILTER_KEY: "juliet",
+        }
         assert ui.stale_state_fixes(state, OPTIONS) == {}
 
     def test_values_that_vanished_from_the_options_are_reset(self) -> None:
@@ -1375,11 +1392,13 @@ class TestStaleState:
             ui.TOPICS_KEY: ["pests", "flavor"],
             ui.YEAR_KEY: "2019",
             ui.REGION_FILTER_KEY: "US-VT",
+            ui.VARIETY_FILTER_KEY: "brandywine",
         }
         assert ui.stale_state_fixes(state, OPTIONS) == {
             ui.CROP_KEY: None,
             ui.TOPICS_KEY: ["flavor"],
             ui.YEAR_KEY: None,
+            ui.VARIETY_FILTER_KEY: None,
         }
 
     @given(
@@ -1767,3 +1786,334 @@ class TestLoopback:
     @pytest.mark.parametrize("address", [None, "", "0.0.0.0", "::", "192.168.1.5", "example.org"])
     def test_other_addresses_are_not_loopback(self, address: str | None) -> None:
         assert not ui.is_loopback_address(address)
+
+
+# --------------------------------------------------------------------------- at a glance
+
+
+def glance_headline(**changes: int) -> Headline:
+    values = {
+        "n_reports": 69,
+        "n_varieties": 44,
+        "n_crops": 8,
+        "n_with_conditions": 33,
+        "n_us_states": 18,
+        "n_other_regions": 3,
+    }
+    return Headline.model_validate(values | changes)
+
+
+def tile_text(markup: str) -> str:
+    """The visible text of the tiles: the style block and tags removed."""
+    visible = re.sub(r"<style>.*?</style>", "", markup, flags=re.DOTALL)
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
+
+
+def plotly_selection(*customdata: list[str]) -> dict[str, object]:
+    points = [
+        {"curve_number": 0, "point_index": i, "customdata": c} for i, c in enumerate(customdata)
+    ]
+    return {"selection": {"points": points, "point_indices": [], "box": [], "lasso": []}}
+
+
+QUALITY_WORDS = ("best", "top-rated", "recommend", "score", "%", "success", "rating")
+KNOWN = frozenset({"sungold", "juliet", "auntruby's"})
+NAVIGATION = {
+    ui.TEXT_KEY: "",
+    ui.CROP_KEY: None,
+    ui.YEAR_KEY: None,
+    ui.REGION_FILTER_KEY: None,
+}
+"""What a chart click clears, so the reports shown are the ones the mark counted."""
+
+
+class TestGlanceTiles:
+    @pytest.mark.parametrize("theme", [LIGHT, DARK], ids=["light", "dark"])
+    def test_four_tiles_with_labels_values_and_the_places_split(self, theme: ChartTheme) -> None:
+        markup = ui.kpi_tiles_html(glance_headline(), theme)
+        assert markup.count('class="glance-tile"') == 4
+        assert tile_text(markup) == (
+            "Reports 69 comments in this view "
+            "Varieties mentioned 44 across 8 crops "
+            "Describe conditions 33 of 69 zone, method, heat… "
+            "Places named 21 18 U.S. states · 3 outside the U.S."
+        )
+        for token in (theme.text_primary, theme.text_secondary, theme.series, theme.meter_track):
+            assert token in markup
+
+    def test_notes_use_the_secondary_ink_for_contrast(self) -> None:
+        markup = ui.kpi_tiles_html(glance_headline(), LIGHT)
+        (note_rule,) = re.findall(r"\.glance-note\{[^}]*\}", markup)
+        assert f"color:{LIGHT.text_secondary}" in note_rule  # 7.9:1 on white, muted is 3.6:1
+        assert LIGHT.text_muted not in markup
+
+    def test_tiles_use_the_page_font(self) -> None:
+        markup = ui.kpi_tiles_html(glance_headline(), LIGHT)
+        assert "font-family:inherit" in markup
+        assert "system-ui" not in markup
+
+    def test_four_across_on_desktop_two_by_two_on_a_phone(self) -> None:
+        markup = ui.kpi_tiles_html(glance_headline(), LIGHT)
+        assert "grid-template-columns:repeat(4,minmax(0,1fr))" in markup
+        assert re.search(
+            r"@media \(max-width:\d+px\)\{\.glance-kpis\{grid-template-columns:repeat\(2,", markup
+        )
+        assert "tabular-nums" not in markup
+        assert "proportional-nums" in markup
+
+    def test_the_meter_is_proportional_without_percentages(self) -> None:
+        markup = ui.kpi_tiles_html(glance_headline(), LIGHT)
+        assert 'role="meter"' in markup
+        assert 'aria-valuenow="33"' in markup
+        assert 'aria-valuemax="69"' in markup
+        assert "flex:33 1 0px" in markup
+        assert "flex:36 1 0px" in markup
+        for word in QUALITY_WORDS:
+            assert word not in markup.casefold(), word
+
+    def test_the_touch_hint_shows_only_without_a_hovering_pointer(self) -> None:
+        markup = ui.kpi_tiles_html(glance_headline(), LIGHT)
+        assert ".glance-touch{display:none}" in markup
+        assert (
+            "@media (hover:none){.glance-touch{display:inline}.glance-mouse{display:none}}"
+            in markup
+        )
+
+    def test_singulars_and_large_numbers(self) -> None:
+        one = tile_text(
+            ui.kpi_tiles_html(glance_headline(n_us_states=1, n_other_regions=0, n_crops=1), LIGHT)
+        )
+        assert "1 U.S. state · 0 outside the U.S." in one
+        assert "across 1 crop " in one
+        big = glance_headline(n_reports=12_900, n_with_conditions=1_234)
+        assert "1,234 of 12.9K" in tile_text(ui.kpi_tiles_html(big, LIGHT))
+
+    def test_empty_data(self) -> None:
+        empty = Headline(
+            n_reports=0,
+            n_varieties=0,
+            n_crops=0,
+            n_with_conditions=0,
+            n_us_states=0,
+            n_other_regions=0,
+        )
+        markup = ui.kpi_tiles_html(empty, LIGHT)
+        assert "0 of 0" in tile_text(markup)
+        assert "crop" not in tile_text(markup)  # no "across 0 crops"
+        assert 'aria-valuemax="0"' in markup
+
+
+class TestGlanceCaptions:
+    def test_variety_caption_is_one_short_line(self) -> None:
+        caption = ui.varieties_caption(10, 44)
+        assert caption == "Comments that mention each variety: top 10 of 44."
+        assert len(caption) <= 52  # one line at phone width
+
+    def test_variety_caption_when_every_variety_is_shown(self) -> None:
+        assert ui.varieties_caption(1, 1) == "Comments that mention each variety (all 1)."
+        assert ui.varieties_caption(44, 44) == "Comments that mention each variety (all 44)."
+
+    def test_variety_caption_says_what_it_counts_and_that_it_is_not_quality(self) -> None:
+        caption = ui.varieties_caption_html(10, 44, 0, 2)
+        assert caption.startswith(
+            "Comments that mention each variety: top 10 of 44. This counts conversation, not "
+            "quality: a failed crop counts the same as a great one. "
+        )
+        assert "ties are listed" not in caption
+
+    def test_variety_caption_says_how_many_equal_varieties_were_cut(self) -> None:
+        assert "2 more varieties also have 2 comments; ties are listed alphabetically." in (
+            ui.varieties_caption_html(10, 46, 2, 2)
+        )
+        assert "1 more variety also has 1 comment; ties are listed alphabetically." in (
+            ui.varieties_caption_html(10, 46, 1, 1)
+        )
+
+    def test_captions_end_with_a_mouse_and_a_touch_hint(self) -> None:
+        caption = ui.varieties_caption_html(10, 44, 0, 2)
+        assert caption.endswith(
+            '<span class="glance-mouse">Click a bar to show its comments below.</span>'
+            '<span class="glance-touch">Tap a bar once to see its count, then tap it again to '
+            "show its comments below.</span>"
+        )
+        cells = ui.topics_caption_html(8, 0, 3)
+        assert "Click a cell to show those comments below." in cells
+        assert "Tap a cell once to see its count, then tap it again" in cells
+
+    def test_topic_caption(self) -> None:
+        assert ui.topics_caption(8) == (
+            "Comments about each topic, for the 8 most-discussed varieties in the bar chart's "
+            "order."
+        )
+        assert ui.topics_caption(1) == "Comments about each topic, for the most-discussed variety."
+        caption = ui.topics_caption_html(8, 0, 3)
+        assert caption.startswith(ui.topics_caption(8))
+        assert "not whether it went well" in caption
+        assert "ties are listed" not in caption
+        assert "1 more variety also has 3 comments" in ui.topics_caption_html(8, 1, 3)
+
+    def test_captions_are_built_from_numbers_and_fixed_text_only(self) -> None:
+        for caption in (ui.varieties_caption_html(10, 44, 3, 2), ui.topics_caption_html(8, 1, 2)):
+            text = re.sub(r"<span class=\"glance-(mouse|touch)\">|</span>", "", caption)
+            assert "<" not in text
+            assert ">" not in text
+
+    def test_setup_caption_is_honest_about_how_few_say(self) -> None:
+        assert ui.setups_caption(20, 69) == (
+            "Only reports that state a growing method or setting are counted: 20 of 69. Most "
+            "don't say. A report can state more than one."
+        )
+        assert "Most don't say" not in ui.setups_caption(40, 69)
+
+    def test_short_tab_labels_fit_a_phone(self) -> None:
+        assert ui.GLANCE_TABS == ("Varieties", "Topics", "How people grow")
+        assert sum(len(label) for label in ui.GLANCE_TABS) <= 30
+
+    @pytest.mark.parametrize("n_shown", [1, 10])
+    def test_no_quality_words(self, n_shown: int) -> None:
+        text = " ".join(
+            [
+                ui.varieties_caption(n_shown, 44),
+                ui.varieties_caption_html(n_shown, 44, 3, 2),
+                ui.topics_caption(n_shown),
+                ui.topics_caption_html(n_shown, 3, 2),
+                ui.setups_caption(5, 69),
+                ui.glance_feedback("Sungold · tomato", ["flavor"]),
+                ui.variety_filter_note("Sungold · tomato"),
+                *ui.GLANCE_TABS,
+                ui.NO_VARIETIES,
+                ui.NO_SETUPS,
+            ]
+        ).casefold()
+        for word in QUALITY_WORDS:
+            assert word not in text, word
+
+
+class TestGlanceClicks:
+    def test_a_bar_click_filters_to_the_variety_key_and_clears_narrowing_filters(self) -> None:
+        selection = plotly_selection([plotly_text("auntruby's")])
+        assert ui.variety_click_updates(selection, KNOWN) == {
+            ui.VARIETY_FILTER_KEY: "auntruby's",
+            ui.TOPICS_KEY: [],
+            **NAVIGATION,
+        }
+
+    def test_a_cell_click_filters_to_the_variety_and_topic(self) -> None:
+        selection = plotly_selection(["sungold", "weather_tolerance"])
+        assert ui.cell_click_updates(selection, KNOWN) == {
+            ui.VARIETY_FILTER_KEY: "sungold",
+            ui.TOPICS_KEY: ["weather_tolerance"],
+            **NAVIGATION,
+        }
+
+    def test_the_garden_and_strict_mode_are_left_alone(self) -> None:
+        updates = ui.variety_click_updates(plotly_selection(["juliet"]), KNOWN)
+        assert ui.REGION_KEY not in updates
+        assert ui.STRICT_KEY not in updates
+        assert not set(ui.CONDITION_KEYS.values()) & set(updates)
+
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            {},
+            {"selection": {"points": []}},
+            {"selection": {"points": [{"x": 1}]}},
+            plotly_selection(["a", "b", "c"]),
+            plotly_selection(["sungold", "not_a_topic"]),
+            plotly_selection(["brandywine", "flavor"]),  # not a visible variety
+        ],
+    )
+    def test_anything_else_changes_nothing(self, selection: dict[str, object]) -> None:
+        assert ui.cell_click_updates(selection, KNOWN) == {}
+        assert ui.variety_click_updates(selection, KNOWN) == {}
+
+    def test_an_unknown_or_forged_variety_changes_nothing(self) -> None:
+        assert ui.variety_click_updates(plotly_selection(["brandywine"]), KNOWN) == {}
+        assert ui.variety_click_updates(plotly_selection(["Sungold"]), KNOWN) == {}
+
+    def test_a_cell_selection_is_not_a_bar_selection(self) -> None:
+        assert ui.variety_click_updates(plotly_selection(["sungold", "flavor"]), KNOWN) == {}
+
+    def test_chart_keys_change_with_the_variety_filter_and_topics(self) -> None:
+        first = ui.glance_key("varieties", {ui.TEXT_KEY: "", ui.TOPICS_KEY: []})
+        assert first == ui.glance_key("varieties", {})
+        assert first != ui.glance_key("varieties", {ui.VARIETY_FILTER_KEY: "sungold"})
+        assert first != ui.glance_key("varieties", {ui.TEXT_KEY: "Sungold"})
+        assert first != ui.glance_key("topics", {})
+        topics = {ui.VARIETY_FILTER_KEY: "sungold", ui.TOPICS_KEY: ["flavor", "pests"]}
+        assert ui.glance_key("x", topics) == ui.glance_key(
+            "x", {ui.VARIETY_FILTER_KEY: "sungold", ui.TOPICS_KEY: ["pests", "flavor"]}
+        )
+
+
+class TestGlanceFeedback:
+    def test_names_come_from_the_variety_table(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "variety_key": ["sungold", "x"],
+                "label": ["Sungold", "Mystery"],
+                "crop": ["tomato", None],
+                "n_comments": [3, 1],
+            }
+        )
+        assert ui.variety_names(frame) == {"sungold": "Sungold · tomato", "x": "Mystery"}
+
+    def test_feedback_names_the_variety_and_topics_and_links_to_the_reports(self) -> None:
+        line = ui.glance_feedback("Sungold · tomato", ["flavor", "weather_tolerance"])
+        assert line.startswith("Showing the reports that mention Sungold · tomato about ")
+        assert "Flavor or Weather tolerance" in line
+        assert line.endswith(f"[Go to the reports ↓](#{ui.RESULTS_ANCHOR})")
+        assert "about" not in ui.glance_feedback("Sungold · tomato", [])
+
+    def test_feedback_and_filter_note_escape_the_untrusted_name(self) -> None:
+        evil = "[click](https://evil.example) <b>x</b>"
+        for text in (ui.glance_feedback(evil, []), ui.variety_filter_note(evil)):
+            assert "](https" not in text
+            assert "<b>" not in text
+            assert ui.escape_markdown(evil) in text
+
+    def test_filter_note(self) -> None:
+        assert ui.variety_filter_note("Juliet · tomato") == (
+            "Showing only reports that mention Juliet · tomato (all spellings)."
+        )
+
+    def test_the_results_anchor_is_trusted_fixed_markup(self) -> None:
+        expected = f'<div id="{ui.RESULTS_ANCHOR}"></div>'
+        assert expected == ui.RESULTS_ANCHOR_HTML
+
+
+class TestGlanceTables:
+    def test_tables_use_readable_columns_and_raw_names(self) -> None:
+        varieties = pd.DataFrame(
+            {
+                "variety_key": ["evil", "x"],
+                "label": ["<b>Evil</b>", "Mystery"],
+                "crop": ["tomato", None],
+                "n_comments": [3, 1],
+            }
+        )
+        table = ui.variety_table(varieties)
+        assert list(table.columns) == ["Variety", "Crop", "Comments"]
+        assert table.values.tolist() == [["<b>Evil</b>", "tomato", 3], ["Mystery", "not named", 1]]
+
+    def test_topic_and_setup_tables(self) -> None:
+        topics = pd.DataFrame(
+            {
+                "variety_key": ["s"],
+                "label": ["Sungold"],
+                "topic": ["weather_tolerance"],
+                "n_comments": [2],
+            }
+        )
+        assert ui.topic_table(topics).values.tolist() == [["Sungold", "Weather tolerance", 2]]
+        setups = pd.DataFrame(
+            {
+                "key": ["shelter"],
+                "value": ["greenhouse"],
+                "label": ["Greenhouse / tunnel"],
+                "n_comments": [5],
+            }
+        )
+        table = ui.setup_table(setups)
+        assert list(table.columns) == ["Condition", "Stated as", "Comments"]
+        assert table.values.tolist() == [["Setting", "Greenhouse / tunnel", 5]]

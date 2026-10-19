@@ -35,7 +35,7 @@ from crop_explorer.environment_match import (
     match_context,
     region_status,
 )
-from crop_explorer.normalization import crops_named, normalize_crop
+from crop_explorer.normalization import crops_named, normalize_crop, variety_key
 from crop_explorer.regions import REGION_NAMES
 from crop_explorer.schemas import EnvKey, Topic
 from crop_explorer.views import (
@@ -106,6 +106,8 @@ class FilterOptions(BaseModel):
     """Topics of visible mentions."""
     years: tuple[str, ...]
     """Normalized growing years stated by visible facts."""
+    varieties: tuple[str, ...]
+    """Variety keys of visible mentions (the values the variety filter can take)."""
 
 
 # --------------------------------------------------------------------------- mention filters
@@ -134,16 +136,18 @@ class _MentionFilter:
     topics: frozenset[Topic]
     year: str | None
     region: str | None
+    variety: str | None
     text: _TextNames
     """What the search text names; it picks the relevant mentions among those passing the rest."""
 
     def is_set(self) -> bool:
-        return any((self.crop, self.topics, self.year, self.region))
+        return any((self.crop, self.topics, self.year, self.region, self.variety))
 
     def passes(self, mention: MentionView, facts: Sequence[FactView]) -> bool:
         """Return whether one mention satisfies every set filter."""
         return (
             (self.crop is None or mention.crop == self.crop)
+            and (self.variety is None or mention.variety_key == self.variety)
             and (not self.topics or not self.topics.isdisjoint(mention.topics))
             and (self.year is None or _states(facts, "growing_year", self.year))
             and (self.region is None or _states(facts, "region", self.region))
@@ -184,22 +188,33 @@ def _names(text: _TextNames, mention: MentionView) -> bool:
     return bool(crop) and normalize_crop(" ".join(crop)) in text.crops
 
 
+def _is_variety_key(value: str) -> bool:
+    """Whether ``value`` is a stored variety key (keys are their own key; names are not)."""
+    try:
+        return variety_key(value) == value
+    except ValueError:
+        return False
+
+
 def _mention_filter(query: SearchQuery) -> _MentionFilter:
     """Validate and normalize the query's mention-level filters.
 
     Raises
     ------
     ValueError
-        If the year is not a 19xx/20xx year, the region filter is not a known region code or
-        the crop is blank.
+        If the year is not a 19xx/20xx year, the region filter is not a known region code, the
+        crop is blank or the variety is not a variety key (e.g. a name such as "Sun Gold").
     """
     if query.year is not None and YEAR_PATTERN.fullmatch(query.year) is None:
         raise ValueError(f"year filter must be a 4-digit 19xx/20xx year, got {query.year!r}")
     if query.region_filter is not None and query.region_filter not in REGION_NAMES:
         raise ValueError(f"Unknown region_filter code {query.region_filter!r}")
+    if query.variety is not None and not _is_variety_key(query.variety):
+        raise ValueError(f"variety filter must be a variety key, got {query.variety!r}")
     crop = None if query.crop is None else normalize_crop(query.crop)
     text = _text_names(query.text or "")
-    return _MentionFilter(crop, frozenset(query.topics), query.year, query.region_filter, text)
+    topics, region = frozenset(query.topics), query.region_filter
+    return _MentionFilter(crop, topics, query.year, region, query.variety, text)
 
 
 def _relevant(
@@ -225,8 +240,8 @@ def relevant_mentions(view: CommentView, query: SearchQuery) -> tuple[MentionMat
     view : CommentView
         A visible comment.
     query : SearchQuery
-        The viewer's query. ``crop``, ``topics``, ``year`` and ``region_filter`` are
-        mention-level filters. ``text`` picks candidates in the database read; here it only
+        The viewer's query. ``crop``, ``topics``, ``year``, ``region_filter`` and ``variety``
+        are mention-level filters. ``text`` picks candidates in the database read; here it only
         chooses among the mentions that pass those filters, so a filter only ever narrows the
         mentions the text names and never brings back one it did not name.
 
@@ -500,7 +515,8 @@ def build_result(views: Sequence[CommentView], query: SearchQuery) -> SearchResu
     ------
     ValueError
         If two views share a ``comment_id``, the year filter is not a 19xx/20xx year, the
-        region filter is not a known region code, or the crop filter is blank.
+        region filter is not a known region code, the crop filter is blank or the variety
+        filter is not a variety key.
     """
     mention_filter = _mention_filter(query)
     _require_unique_ids(views)
@@ -617,7 +633,7 @@ def chip_support(
 
 
 def filter_options(conn: sqlite3.Connection, scope: ViewerScope, now: str) -> FilterOptions:
-    """List the crops, topics and growing years present in data visible in ``scope``.
+    """List the crops, topics, growing years and variety keys visible in ``scope``.
 
     Parameters
     ----------
@@ -631,7 +647,7 @@ def filter_options(conn: sqlite3.Connection, scope: ViewerScope, now: str) -> Fi
     Returns
     -------
     FilterOptions
-        Distinct, sorted crops, topics and years.
+        Distinct, sorted crops, topics, years and variety keys.
 
     Raises
     ------
@@ -649,4 +665,5 @@ def filter_options(conn: sqlite3.Connection, scope: ViewerScope, now: str) -> Fi
         crops=tuple(sorted({m.crop for m in mentions if m.crop is not None})),
         topics=tuple(sorted({topic for m in mentions for topic in m.topics})),
         years=tuple(sorted(years)),
+        varieties=tuple(sorted({m.variety_key for m in mentions if m.variety_key is not None})),
     )

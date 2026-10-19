@@ -17,5 +17,11 @@ magicEnabled = false
 [client]
 toolbarMode = "minimal"
 
-[theme]
+# One accent per mode, so the viewer follows the visitor's light or dark system setting (a
+# single [theme] colour would pin a light custom theme). The "At a glance" charts pick their
+# light or dark tokens from st.context.theme.type.
+[theme.light]
 primaryColor = "#2E7D32"
+
+[theme.dark]
+primaryColor = "#66BB6A"

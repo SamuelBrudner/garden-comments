@@ -89,6 +89,37 @@ for growing conditions", and a condition stated in words the app cannot compare 
 (official references, published trials and outside gardeners' ratings, each badged) sits just
 above the Comments and Map tabs.
 
+**At a glance.** Above "My growing conditions", a header shows what the community shared,
+counted over the visible reports only (the public view never counts private imports). Four stat
+tiles (four across, two by two on a phone): **Reports**, **Varieties mentioned** ("across 8
+crops"), **Describe conditions** ("33 of 69", with a meter; any comparable condition such as
+zone, method or heat, the same definition as "Only N of M reports mention comparable growing
+conditions") and **Places named** (U.S. states and places outside the U.S.). Three short tabs,
+each chart directly under its tab with its caption below: **Varieties** (comments naming each of
+the top `overview.top_varieties` varieties, one bar colour, the count at each bar's tip),
+**Topics** (a grid of comments per variety and topic for the first
+`overview.heatmap_varieties` of those varieties, on a one-hue blue scale with a "Comments"
+legend; the catch-all "General" is always the last column) and **How people grow** (comments
+stating each growing method and setting). Every number is a count of distinct comments: it
+measures conversation, never quality, and the captions say so ("a failed crop counts the same
+as a great one"; "most don't say"). When the cut at the top 10 splits varieties with equal
+counts, the caption says how many more have that count and that ties are listed
+alphabetically. Each chart has one hover readout per bar or cell and a "Show as table" view.
+
+Clicking a variety's bar (anywhere on its row) shows **exactly the reports that bar counts**: it
+sets a variety filter (every spelling of that variety, so "Sun Gold" and "Sungold" both count)
+and clears the search text and the Crop, Topics, Year and state filters, while your garden
+conditions stay as they are. Clicking a grid cell does the same and sets Topics to that topic.
+A line right above the chart then names what is shown, with a "Go to the reports ↓" link, and
+the results start with "Showing only reports that mention Sungold · tomato (all spellings)."
+and an "Any variety" button (Clear resets it too). On a touch screen Plotly selects a bar on
+the second tap (the first tap shows its count), so phones get the hint "Tap a bar once to see
+its count, then tap it again", and mouse users "Click a bar". The charts use their own light
+and dark colour tokens, chosen from Streamlit's theme (`.streamlit/config.toml` sets an accent
+per mode so the viewer follows the visitor's system setting), and the page's own typeface;
+variety names from comments are escaped before Plotly sees them, and long names are shortened
+with "…" on the axis (the hover and the table keep the full name).
+
 ## Host the public demo on Streamlit Community Cloud
 
 [`streamlit_app.py`](streamlit_app.py) is the entrypoint for a free, public
@@ -272,6 +303,7 @@ config file):
 | `viewer.min_reports_for_chip` | A quick chip ("Containers", "Hot & humid", ...) appears only when at least this many visible reports state at least one of its conditions. |
 | `viewer.max_query_chars` | Longest search text accepted (the search box is capped; it bounds full-text search cost). |
 | `viewer.page_size` | Cards shown per result group before "Show N more". |
+| `overview.top_varieties`, `overview.heatmap_varieties` | How many most-discussed varieties the "At a glance" bar chart lists (default 10), and how many of those same varieties, in the same order, the topic grid shows (default 8; at most `top_varieties`). |
 | `map.public_min_cell_count` | In public scope, map cells with fewer reports are drawn as "fewer than k". This **only coarsens the map display**: cards still show each comment's text and region, and filtering by that state still lists the reports, so it is not a privacy control. Only publish comments whose source is cleared. |
 | `extraction.hypothetical_markers` | Phrases that make a sentence advice, a plan or a wish; facts quoted from such sentences (and from questions) are rejected. A marker starting with `^` (`^maybe`) counts only at the start of a sentence. Keep the list in `docs/EXTRACTION_PROMPT.md` Part 2 in step (a test checks it). |
 | `quick_chips` | Label plus the garden conditions each chip sets. |
@@ -301,8 +333,12 @@ references) is covered by `tests/test_app.py` (Clear, the "Source ↗" link of a
 the synthetic and no-link notes) and by `tests/test_browser.py`: it starts `streamlit run`
 headless on a free loopback port and drives Chromium at 390x844 (no sideways scrolling, search
 box and the always-visible selects on screen, a zone choice regroups the reports, Clear restores
-the first-load labels, the source link's address), then a desktop smoke test. That test is
-marked `browser`, takes about 15 seconds and needs Playwright's Chromium (`uv run playwright
+the first-load labels, the source link's address, the "At a glance" tiles two by two with all
+three tab labels on screen and the first bars above the fold), then desktop checks (tiles four
+across; one hover box per row; clicking a variety bar or a topic cell shows exactly the reports
+it counts, names them above the chart and links down to them) and a touch-screen check (the
+touch hint shows; two taps on a bar show its reports). That test is
+marked `browser`, takes about 40 seconds and needs Playwright's Chromium (`uv run playwright
 install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
 `tests/test_code_standards.py` fails for any function in `src/`, `app.py` or `streamlit_app.py`
 with more than 15 code lines. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in
@@ -339,6 +375,8 @@ runs the tests with coverage.
 │   ├── environment_match.py      # pure, explainable matching and tiers
 │   ├── search.py                 # candidates, groups, honest counts, chips, filter options
 │   ├── geography.py              # conservative state counts and the choropleth
+│   ├── overview.py               # "At a glance" counts (distinct comments, never quality)
+│   ├── overview_charts.py        # its Plotly figures, light/dark tokens, escaping
 │   ├── db.py                     # SQLite + FTS5 persistence and scope-gated reads
 │   ├── visibility.py             # rights/expiry gate shared by every viewer read
 │   └── ui.py                     # pure viewer helpers (escaping, card text, state)

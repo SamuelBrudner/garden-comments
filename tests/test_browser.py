@@ -6,7 +6,12 @@ permalink. Headless Chromium then checks, at 390x844, that the page never scroll
 the search box and the always-visible condition selects are on screen, that choosing a zone
 regroups the reports, that Clear restores the first-load labels (never "Choose an option"),
 that a source reference opens the comment's permalink, and that the Hot & humid chip's "In their
-own words" condition lines fit; then a 1280x900 smoke test. Marked ``browser`` (deselect with
+own words" condition lines fit, and that the "At a glance" stat tiles sit two by two with all
+three tab labels on screen and the first bars above the fold; then a 1280x900 smoke test (tiles
+four across) and click-through tests: clicking a variety bar or a topic cell shows exactly the
+reports it counts, says so above the chart and links down to them; on a touch screen the touch
+hint is shown and two taps on a bar (Plotly selects on the second) show its reports.
+Marked ``browser`` (deselect with
 ``-m "not browser"``); CI installs Chromium with ``uv run playwright install --with-deps
 chromium``.
 """
@@ -52,6 +57,7 @@ CLEARED_COMMENT = {
     "created_at": "2024-07-01T00:00:00Z",
 }
 N_PUBLIC = 70  # 69 synthetic fixtures + 1 cleared comment
+GLANCE_TABS = ("Varieties", "Topics", "How people grow")
 
 
 # --------------------------------------------------------------------------- server
@@ -175,8 +181,12 @@ def browser() -> Iterator[Browser]:
 # --------------------------------------------------------------------------- page helpers
 
 
-def open_viewer(browser: Browser, url: str, width: int, height: int) -> Page:
-    page = browser.new_context(viewport={"width": width, "height": height}).new_page()
+def open_viewer(
+    browser: Browser, url: str, width: int, height: int, *, touch: bool = False
+) -> Page:
+    viewport = {"width": width, "height": height}
+    context = browser.new_context(viewport=viewport, has_touch=touch, is_mobile=touch)
+    page = context.new_page()
     page.set_default_timeout(TIMEOUT_MS)
     page.goto(url)
     expect(heading(page, f"Reports ({N_PUBLIC})")).to_be_visible()
@@ -288,4 +298,156 @@ def test_desktop_smoke(browser: Browser, viewer_url: str) -> None:
     expect(combobox(map_panel, "Filter by reported state")).to_be_visible()
     expect(map_panel.get_by_text("community report", exact=True)).to_be_visible()
     expect(map_panel.get_by_text("reported conditions", exact=True)).to_be_visible()
+    assert_no_exception(page)
+
+
+# --------------------------------------------------------------------------- at a glance
+
+
+def tile_boxes(page: Page) -> list[dict[str, float]]:
+    tiles = page.locator(".glance-tile")
+    expect(tiles).to_have_count(4)
+    boxes = [tiles.nth(i).bounding_box() for i in range(4)]
+    assert all(box is not None for box in boxes)
+    return [box for box in boxes if box is not None]
+
+
+def painted_bars(page: Page) -> Locator:
+    """The visible variety bars (the second bar trace: the first is the invisible row layer)."""
+    panel = page.get_by_role("tabpanel", name=GLANCE_TABS[0])
+    return panel.locator(".barlayer .trace").nth(1).locator(".point")
+
+
+def plot_area(page: Page, tab: str) -> dict[str, float]:
+    """The plotting area (where clicks land) of the chart in an "At a glance" tab."""
+    box = (
+        page.get_by_role("tabpanel", name=tab).locator(".js-plotly-plot .nsewdrag").first
+    ).bounding_box()
+    assert box is not None
+    return box
+
+
+def test_phone_width_glance_tiles_are_two_by_two_and_the_first_chart_shows(
+    browser: Browser, viewer_url: str
+) -> None:
+    page = open_viewer(browser, viewer_url, 390, 844, touch=True)  # a phone: overlay scrollbars
+    boxes = tile_boxes(page)
+    assert len({round(box["y"]) for box in boxes}) == 2, boxes
+    assert len({round(box["x"]) for box in boxes}) == 2, boxes
+    assert all(box["x"] >= 0 and box["x"] + box["width"] <= 390 for box in boxes), boxes
+    assert_no_horizontal_overflow(page)
+    for label in GLANCE_TABS:  # no tab label clipped in the tab strip
+        tab = page.get_by_role("tab", name=label, exact=True).bounding_box()
+        assert tab is not None
+        assert tab["x"] + tab["width"] <= 390 - 16, (label, tab)
+    chart = page.get_by_role("tabpanel", name=GLANCE_TABS[0]).locator(".js-plotly-plot")
+    expect(chart).to_be_visible()
+    first_bar = painted_bars(page).first.bounding_box()
+    assert first_bar is not None
+    assert first_bar["y"] < 844, first_bar  # the bars start above the fold
+    chart.scroll_into_view_if_needed()
+    expect(chart).to_be_in_viewport()
+    expect(painted_bars(page)).to_have_count(10)
+    chart_box = chart.bounding_box()
+    assert chart_box is not None
+    assert chart_box["x"] >= 0
+    assert chart_box["x"] + chart_box["width"] <= 390
+    assert_no_exception(page)
+
+
+def test_desktop_glance_tiles_are_four_across(browser: Browser, viewer_url: str) -> None:
+    page = open_viewer(browser, viewer_url, 1280, 900)
+    boxes = tile_boxes(page)
+    assert len({round(box["y"]) for box in boxes}) == 1, boxes
+    assert_no_horizontal_overflow(page)
+    panel = page.get_by_role("tabpanel", name=GLANCE_TABS[0])
+    expect(panel.get_by_text("Click a bar to show its comments below.")).to_be_visible()
+    expect(panel.locator(".glance-touch")).to_be_hidden()
+
+
+def bar_box(page: Page, index: int) -> dict[str, float]:
+    bar = painted_bars(page).nth(index)
+    bar.scroll_into_view_if_needed()
+    box = bar.bounding_box()
+    assert box is not None
+    return box
+
+
+def hover_texts(page: Page) -> list[str]:
+    texts: list[str] = page.evaluate(
+        "[...document.querySelectorAll('.hoverlayer text')].map(t => t.textContent)"
+    )
+    return texts
+
+
+def feedback(page: Page, tab: str, name: str) -> Locator:
+    """The line above the chart in ``tab`` naming what a click is showing."""
+    panel = page.get_by_role("tabpanel", name=tab)
+    return panel.get_by_text(f"Showing the reports that mention {name}")
+
+
+def test_clicking_a_bar_shows_exactly_its_reports_and_says_so(
+    browser: Browser, viewer_url: str
+) -> None:
+    page = open_viewer(browser, viewer_url, 1280, 900)
+    expect(painted_bars(page)).to_have_count(10)
+    juliet = bar_box(page, 2)  # Sungold, Cherokee Purple, Juliet, ...
+    grid = plot_area(page, GLANCE_TABS[0])
+    row_y = juliet["y"] + juliet["height"] / 2
+    page.mouse.move(grid["x"] + grid["width"] - 20, row_y)  # anywhere on the row
+    expect(page.locator(".hoverlayer .hovertext")).to_have_count(1)  # one box, not two
+    assert hover_texts(page) == ["Juliet · tomato: 5 comments"]
+    page.mouse.click(grid["x"] + grid["width"] - 20, row_y)
+    expect(heading(page, "Reports (5)")).to_be_visible()  # exactly the bar's count
+    expect(page.get_by_label(SEARCH_LABEL)).to_have_value("")
+    shown = feedback(page, GLANCE_TABS[0], "Juliet · tomato")
+    expect(shown).to_be_in_viewport()  # right above the chart that was clicked
+    expect(page.get_by_text("Showing only reports that mention Juliet · tomato")).to_be_attached()
+
+    page.get_by_role("link", name="Go to the reports ↓").first.click()
+    page.wait_for_function(  # the empty anchor div scrolls to the top of the window
+        "() => Math.abs(document.getElementById('glance-results').getBoundingClientRect().top) < 4"
+    )
+    expect(heading(page, "Reports (5)")).to_be_in_viewport()
+    page.get_by_role("button", name="Any variety", exact=True).click()
+    expect(heading(page, f"Reports ({N_PUBLIC})")).to_be_visible()
+    assert_no_exception(page)
+
+
+def test_clicking_a_topic_cell_shows_exactly_its_reports(
+    browser: Browser, viewer_url: str
+) -> None:
+    page = open_viewer(browser, viewer_url, 1280, 900)
+    page.get_by_role("tab", name=GLANCE_TABS[1], exact=True).click()
+    plot = page.get_by_role("tabpanel", name=GLANCE_TABS[1]).locator(".js-plotly-plot")
+    expect(plot).to_be_visible()
+    first: list[Any] = plot.evaluate(
+        "e => [e.data[0].z[0][0], e.layout.xaxis.ticktext[0], e.layout.yaxis.ticktext[0]]"
+    )
+    count, topic, variety = first
+    grid = plot_area(page, GLANCE_TABS[1])
+    page.mouse.click(grid["x"] + 10, grid["y"] + 8)  # top-left cell
+    expect(heading(page, f"Reports ({count})")).to_be_visible()
+    expect(page.get_by_test_id("stMultiSelect")).to_contain_text(topic)  # same label as the grid
+    expect(feedback(page, GLANCE_TABS[1], f"{variety} · tomato about {topic}")).to_be_in_viewport()
+    assert_no_exception(page)
+
+
+def test_on_a_touch_screen_two_taps_on_a_bar_show_its_reports(
+    browser: Browser, viewer_url: str
+) -> None:
+    """Plotly selects on the second tap (the first shows the count), and the hint says so."""
+    page = open_viewer(browser, viewer_url, 390, 844, touch=True)
+    panel = page.get_by_role("tabpanel", name=GLANCE_TABS[0])
+    expect(panel.get_by_text("Tap a bar once to see its count, then tap it again")).to_be_visible()
+    expect(panel.locator(".glance-mouse")).to_be_hidden()
+    juliet = bar_box(page, 2)
+    point = (juliet["x"] + juliet["width"] / 2, juliet["y"] + juliet["height"] / 2)
+    page.touchscreen.tap(*point)
+    expect(page.locator(".hoverlayer .hovertext")).to_have_count(1)
+    assert hover_texts(page) == ["Juliet · tomato: 5 comments"]
+    page.touchscreen.tap(*point)
+    expect(heading(page, "Reports (5)")).to_be_visible()
+    expect(feedback(page, GLANCE_TABS[0], "Juliet · tomato")).to_be_attached()
+    assert_no_horizontal_overflow(page)
     assert_no_exception(page)

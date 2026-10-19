@@ -63,6 +63,28 @@ class MapConfig(BaseModel):
     public_min_cell_count: int = Field(ge=1)
 
 
+class OverviewConfig(BaseModel):
+    """Sizes of the viewer's "At a glance" charts.
+
+    ``top_varieties`` is how many of the most-discussed varieties the bar chart lists;
+    ``heatmap_varieties`` is how many of those same varieties (the first ones, in the same
+    order) the topic grid shows, so it can never exceed ``top_varieties``.
+    """
+
+    model_config = _STRICT
+    top_varieties: int = Field(ge=1)
+    heatmap_varieties: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _heatmap_within_top(self) -> Self:
+        if self.heatmap_varieties > self.top_varieties:
+            raise ValueError(
+                f"heatmap_varieties ({self.heatmap_varieties}) cannot exceed top_varieties "
+                f"({self.top_varieties}): the grid shows the bar chart's first varieties"
+            )
+        return self
+
+
 class ExtractionConfig(BaseModel):
     """Validation rules applied to extractor output."""
 
@@ -152,6 +174,7 @@ class AppConfig(BaseModel):
     database: DatabaseConfig
     viewer: ViewerConfig
     map: MapConfig
+    overview: OverviewConfig
     extraction: ExtractionConfig
     quick_chips: tuple[QuickChip, ...]
     outside_context: tuple[OutsideLink, ...]
