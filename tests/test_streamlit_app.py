@@ -39,7 +39,7 @@ TIMEOUT = 60
 PRIVATE_ID = "private-0001"
 PRIVATE_SOURCE = "my-private-export"
 PRIVATE_TEXT = "PRIVATEONLY Brandywine grown in containers in zone 6b near Hartford, CT."
-DEMO_HEADING = "Reports (69)"
+DEMO_HEADING = "Comments (69)"
 
 
 @dataclass(frozen=True)
@@ -116,9 +116,7 @@ def test_renders_the_synthetic_demo_in_public_scope() -> None:
     at = run_hosted()
 
     assert_public_demo(at)
-    assert at.text_input(key=ui.TEXT_KEY).label == (
-        "Search crops, varieties, or anything people mentioned"
-    )
+    assert at.text_input(key=ui.TEXT_KEY).label == "Search comments"
     assert [tab.label for tab in at.tabs] == [*ui.GLANCE_TABS, "Comments", "Map"]
 
 
@@ -127,7 +125,7 @@ def test_search_reruns_against_the_demo_database() -> None:
     at.text_input(key=ui.TEXT_KEY).input("kids watch").run()
 
     assert not at.exception
-    assert "1 report" in [caption.value for caption in at.caption]
+    assert "1 comment" in [caption.value for caption in at.caption]
 
 
 def test_builds_its_database_in_a_fresh_temporary_directory(sandbox: Sandbox) -> None:

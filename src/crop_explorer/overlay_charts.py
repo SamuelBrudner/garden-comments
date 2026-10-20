@@ -3,9 +3,9 @@
 An overlay is **context, not an answer** (SPEC §6-§7). It is off by default; when one is on it
 is the map's only fill, the state outlines stay, and the shown reports become one count label
 per state that has any (an aggregate placed by Plotly at the state's centre from its own
-``USA-states`` shapes: no coordinates are passed or derived for reports). Every overlay names
-its evidence label (:data:`~crop_explorer.overlays.OVERLAY_LABEL`), source and period, and the
-zone layer, and anything derived from it, carries
+``USA-states`` shapes: no coordinates are passed or derived for reports). Every overlay is shown
+under its evidence label's badge (:data:`~crop_explorer.overlays.OVERLAY_LABEL`) and names its
+source and period, and the zone layer, and anything derived from it, carries
 :data:`~crop_explorer.overlays.ZONE_DISCLAIMER` (the data are simplified, so no USDA-ARS or OSU
 logo may appear). Nothing here reads a comment: the counts arrive as a
 :class:`~crop_explorer.geography.RegionCounts`, and no zone or climate value is ever attached to
@@ -46,12 +46,10 @@ from crop_explorer.overlays import (
     HALF_ZONES,
     MIN_STATE_ZONE_SHARE,
     NORMALS_PERIOD,
-    NORMALS_SOURCE,
-    OVERLAY_LABEL,
+    NORMALS_SOURCE_TEXT,
     SERVED_ZONES_NAME,
     ZONE_DISCLAIMER,
-    ZONE_PERIOD,
-    ZONE_SOURCE,
+    ZONE_PERIOD_TEXT,
     Overlays,
     ZoneLayer,
     zone_rank,
@@ -96,7 +94,7 @@ NormalElement = Literal["july_avg_high_f", "jan_avg_low_f", "annual_precip_in"]
 OVERLAY_KEYS: Final[tuple[OverlayKey, ...]] = get_args(OverlayKey)
 OVERLAY_LABELS: Final[Mapping[OverlayKey, str]] = MappingProxyType(
     {
-        "none": "None",
+        "none": "Number of comments",
         "zones": "USDA hardiness zones (2023)",
         "july_avg_high_f": "Average July high (NOAA 1991-2020)",
         "jan_avg_low_f": "Average January low (NOAA 1991-2020)",
@@ -233,33 +231,31 @@ _UNITS: Final[Mapping[NormalElement, str]] = MappingProxyType(
 )
 _SCALE_TITLES: Final[Mapping[NormalElement, str]] = MappingProxyType(
     {
-        "july_avg_high_f": "July average high (°F)",
-        "jan_avg_low_f": "January average low (°F)",
+        "july_avg_high_f": "Average July high (°F)",
+        "jan_avg_low_f": "Average January low (°F)",
         "annual_precip_in": "Annual precipitation (inches)",
     }
 )
 _SHORT: Final[Mapping[NormalElement, str]] = MappingProxyType(
     {
-        "july_avg_high_f": "July average high",
-        "jan_avg_low_f": "January average low",
+        "july_avg_high_f": "average July high",
+        "jan_avg_low_f": "average January low",
         "annual_precip_in": "annual precipitation",
     }
 )
 _NON_CONTIGUOUS: Final = frozenset({"US-AK", "US-HI"})
 """States outside the NOAA colour scale's span (it covers the 48 contiguous states)."""
 _ZONE_SCALE_TITLE: Final = "USDA hardiness zone (2023): colder ← → warmer"
+_NOT_FROM_COMMENTS: Final = "The shading does not come from the comments."
 _ZONES_NOTE: Final = (
-    "Zones describe the coldest winter nights only (not summer heat, humidity, season length, "
-    "soil or sun) and are never assigned to the reports here."
+    "They say nothing about summer heat, humidity, season length, soil or sun. "
+    f"{_NOT_FROM_COMMENTS}"
 )
 _NORMALS_NOTE: Final = (
-    "A statistical average over a whole state: not the weather of any season or garden, not "
-    "NOAA's station-based Climate Normals, and never attached to the reports here."
+    "One average per state hides local differences and says nothing about any one year or "
+    f"garden. {_NOT_FROM_COMMENTS} These are not NOAA's weather-station Climate Normals."
 )
-_COUNTS_NOTE: Final = (
-    "Numbers: shown reports naming each state (one per comment and state), at the state's "
-    "centre: aggregates, not garden locations."
-)
+_COUNTS_NOTE: Final = "Numbers show how many comments name each state."
 _COLORBAR: Final = MappingProxyType(
     {
         "orientation": "h",
@@ -301,8 +297,9 @@ class OverlayView:
     ----------
     title : str
         The line above the map ("Where zone 6b is (2023 USDA zones)").
-    source, period : str
-        Where the data come from and the period they describe.
+    source : str
+        Where the values come from and the period they describe, as one sentence. The zone
+        layer's disclaimer above the map already names its source, so this names its period.
     note : str
         What the layer does and does not say.
     disclaimer : str or None
@@ -311,19 +308,13 @@ class OverlayView:
 
     title: str
     source: str
-    period: str
     note: str
     disclaimer: str | None
 
     @property
     def caption(self) -> str:
-        """The caption under the map: label, source, period, the note and the counts note.
-
-        The period is left out when the source already names it (the NOAA citation does).
-        """
-        parts = [OVERLAY_LABEL.capitalize(), self.source]
-        parts += [] if self.period in self.source else [self.period]
-        return f"{' · '.join(parts)}. {self.note} {_COUNTS_NOTE}"
+        """The caption under the map: the source sentence, the note and the counts note."""
+        return f"{self.source} {self.note} {_COUNTS_NOTE}"
 
 
 def emphasis_zones(zone: str | None) -> tuple[str, ...]:
@@ -366,10 +357,10 @@ def overlay_view(key: OverlayKey, zone: str | None = None) -> OverlayView:
     if key == "none":
         raise ValueError("The report-count map has no overlay")
     if key == "zones":
-        title = _zone_title(zone)
-        return OverlayView(title, ZONE_SOURCE, ZONE_PERIOD, _ZONES_NOTE, ZONE_DISCLAIMER)
-    source = NORMALS_SOURCE
-    return OverlayView(OVERLAY_LABELS[key], source, NORMALS_PERIOD, _NORMALS_NOTE, None)
+        source = f"Zones use the {ZONE_PERIOD_TEXT}."
+        return OverlayView(_zone_title(zone), source, _ZONES_NOTE, ZONE_DISCLAIMER)
+    source = f"Source: {NORMALS_SOURCE_TEXT}."
+    return OverlayView(OVERLAY_LABELS[key], source, _NORMALS_NOTE, None)
 
 
 @dataclass(frozen=True)
@@ -379,10 +370,10 @@ class RegionalReference:
     Attributes
     ----------
     summary : str
-        One line of trusted text: main zones and the three statewide averages, or what is
+        One line of trusted text: the zones listed and the three statewide averages, or what is
         missing.
     sources : str
-        What "main zones" means (and where to look up an exact zone), the NOAA source when
+        Which zones are listed (and where to look up an exact zone), the NOAA source when
         averages are shown, and what the numbers are not ("" when nothing is shown). The zones'
         source is named by the disclaimer.
     disclaimer : str or None
@@ -398,17 +389,17 @@ class RegionalReference:
 _SHARE_PERCENT: Final = f"{MIN_STATE_ZONE_SHARE:.1%}"
 """The smallest share of a state's area a listed half-zone covers ("0.1%")."""
 _ZONE_SCOPE: Final = (
-    f"Main zones: the half-zones covering at least {_SHARE_PERCENT} of the state's area, so a "
-    "few places can be in a zone not listed; for an exact zone, look up a ZIP code at "
+    f"Zones listed cover at least {_SHARE_PERCENT} of the state. "
+    "A few places may be in a zone not listed. For an exact zone, look up a ZIP code at "
     "planthardiness.ars.usda.gov."
 )
 _REFERENCE_SCOPE: Final = (
-    "Background for the region you chose, not a reading from any report's garden; never used "
-    "to sort or match reports."
+    "This box describes the whole region you chose, not any one garden. It is not used to sort "
+    "or match comments."
 )
 _REFERENCE_AVERAGES: Final = (
-    "Averages: NOAA NCEI Climate at a Glance (nClimDiv), whole-state statistics, not observed "
-    "weather."
+    "Averages are from NOAA NCEI Climate at a Glance. Each one is a 30-year average for the "
+    "whole state, not the weather of any one year or place."
 )
 
 
@@ -425,9 +416,9 @@ def regional_reference(code: str | None, refs: Overlays) -> RegionalReference | 
     Returns
     -------
     RegionalReference or None
-        ``None`` without a region. For a U.S. state: "Connecticut — main USDA zones by area
-        6a-7b (2023, simplified; largest area 6b); July average high 83°F, January average low
-        18°F, annual precipitation 49 in (NOAA 1991-2020 statewide averages)", saying what is
+        ``None`` without a region. For a U.S. state: "Connecticut. USDA hardiness zones (2023):
+        6a to 7b. Zone 6b covers the most ground. Average July high 83°F, average January low
+        18°F, annual precipitation 49 in (NOAA 1991-2020 statewide averages).", saying what is
         missing (DC has no NOAA statewide series). Elsewhere: a line saying no reference is
         available there.
     """
@@ -435,14 +426,14 @@ def regional_reference(code: str | None, refs: Overlays) -> RegionalReference | 
         return None
     name = REGION_NAMES[code]
     if not is_us_state(code):
-        missing = f"No regional climate reference for {name}: these references cover U.S. states."
+        missing = f"No climate data for {name}. This page has climate data for U.S. states only."
         return RegionalReference(missing, "", None)
     zones = _state_zone_phrase(refs.state_zones, code)
     climate = _state_normals_phrase(refs.normals, code, name)
     has_averages = not _state_rows(refs.normals, code).empty
     averages = [_REFERENCE_AVERAGES] if has_averages else []
     sources = " ".join([_ZONE_SCOPE, *averages, _REFERENCE_SCOPE])
-    return RegionalReference(f"{name} — {zones}{climate}", sources, ZONE_DISCLAIMER)
+    return RegionalReference(f"{name}. {zones}{climate}", sources, ZONE_DISCLAIMER)
 
 
 def _state_rows(table: pd.DataFrame, code: str) -> pd.DataFrame:
@@ -455,6 +446,17 @@ def _zone_span(rows: pd.DataFrame) -> str:
     return coldest if coldest == warmest else f"{coldest}-{warmest}"
 
 
+def _zone_words(rows: pd.DataFrame) -> tuple[str, str]:
+    """Return ("zones", "6a to 7b"), or ("zone", "7b") when a state has only one."""
+    span = _zone_span(rows)
+    return ("zones", span.replace("-", " to ")) if "-" in span else ("zone", span)
+
+
+def _first_upper(text: str) -> str:
+    """Capitalize the first letter only ("average July high" -> "Average July high")."""
+    return text[:1].upper() + text[1:]
+
+
 def _largest_zone(rows: pd.DataFrame) -> str:
     """Return the half-zone covering most of the state (the colder one on a tie)."""
     return str(rows["zone"].iloc[int(rows["area_share"].to_numpy().argmax())])
@@ -462,8 +464,9 @@ def _largest_zone(rows: pd.DataFrame) -> str:
 
 def _state_zone_phrase(state_zones: pd.DataFrame, code: str) -> str:
     rows = _state_rows(state_zones, code)
-    span, largest = _zone_span(rows), _largest_zone(rows)
-    return f"main USDA zones by area {span} (2023, simplified; largest area {largest})"
+    noun, span = _zone_words(rows)
+    largest = f"Zone {_largest_zone(rows)} covers the most ground"
+    return f"USDA hardiness {noun} (2023): {span}. {largest}"
 
 
 def _whole(value: float) -> int:
@@ -481,7 +484,7 @@ def _state_normals_phrase(normals: pd.DataFrame, code: str, name: str) -> str:
         return f". NOAA statewide averages are not available for {name}."
     values = dict(zip(rows["element"], rows["value"], strict=True))
     parts = [_normal_text(element, values[element]) for element in _elements()]
-    return f"; {', '.join(parts)} (NOAA 1991-2020 statewide averages)"
+    return f". {_first_upper(', '.join(parts))} (NOAA 1991-2020 statewide averages)."
 
 
 def _elements() -> tuple[NormalElement, ...]:
@@ -491,17 +494,17 @@ def _elements() -> tuple[NormalElement, ...]:
 # --------------------------------------------------------------------------- tables
 
 
-_RANGE_COLUMNS: Final = ("State", "Main zones", "Largest area")
+_RANGE_COLUMNS: Final = ("State", "Zones", "Covers the most ground")
 _SHARE_COLUMNS: Final = ("State", "Zone", "Share of the state's area (%)")
 _RANGE_TITLE: Final = (
-    f"Main zones by area: the half-zones covering at least {_SHARE_PERCENT} of each state "
-    "(2023, simplified)"
+    "USDA zones in each state (2023, simplified). Each zone listed covers at least "
+    f"{_SHARE_PERCENT} of the state."
 )
-_SHARE_TITLE: Final = "Share of each state's area by half-zone (2023, simplified)"
+_SHARE_TITLE: Final = "Share of each state's area in each zone (2023, simplified)"
 
 
 def zone_range_table(state_zones: pd.DataFrame) -> pd.DataFrame:
-    """Return each state's main zones by area, by state name (the zone hover's twin).
+    """Return each state's listed zones, by state name (the zone hover's twin).
 
     Parameters
     ----------
@@ -511,9 +514,9 @@ def zone_range_table(state_zones: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        Columns "State", "Main zones" ("6a-7b": the coldest to the warmest half-zone
-        covering at least :data:`~crop_explorer.overlays.MIN_STATE_ZONE_SHARE` of the state)
-        and "Largest area" ("6b"), one row per state and DC.
+        Columns "State", "Zones" ("6a-7b": the coldest to the warmest half-zone covering at
+        least :data:`~crop_explorer.overlays.MIN_STATE_ZONE_SHARE` of the state) and "Covers
+        the most ground" ("6b"), one row per state and DC.
     """
     rows = [
         (REGION_NAMES[str(code)], _zone_span(group), _largest_zone(group))
@@ -545,7 +548,7 @@ def zone_key_table(zones: ZoneLayer) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "Zone": list(zones.table["zone"]),
-            "Average coldest winter night (°F)": list(zones.table["temp_range_f"]),
+            "Average lowest winter temperature (°F)": list(zones.table["temp_range_f"]),
         }
     )
 
@@ -565,7 +568,7 @@ def normals_table(normals: pd.DataFrame, element: NormalElement) -> pd.DataFrame
 def overlay_tables(key: OverlayKey, refs: Overlays) -> tuple[tuple[str, pd.DataFrame], ...]:
     """Return an overlay's table twin as titled tables (every value without hovering).
 
-    The zone layer: each state's main zones by area, each state's share per half-zone (tidy),
+    The zone layer: each state's listed zones, each state's share per half-zone (tidy),
     then the zone key (each half-zone's temperature band); the viewer shows them under the
     zone disclaimer. A NOAA layer: each state's 1991-2020 average.
 
@@ -677,7 +680,7 @@ def normals_figure(
     -------
     plotly.graph_objects.Figure
         A ``USA-states`` ``Choropleth`` (the fill, the outlines, hover and the click target)
-        with a horizontal scale legend titled e.g. "July average high (°F)", then the count
+        with a horizontal scale legend titled e.g. "Average July high (°F)", then the count
         labels; ``cfg.height_px`` pixels tall.
 
     Raises
@@ -713,7 +716,7 @@ def scale_note(key: OverlayKey, refs: Overlays) -> str | None:
         return None
     rows = _element_rows(refs.normals, key)
     low, high = _contiguous_range(rows)
-    span = f"The colour scale spans the 48 contiguous states ({_value(key, low)} to "
+    span = f"The color scale covers the lower 48 states ({_value(key, low)} to "
     span += f"{_value(key, high)})"
     outside = _outside_scale(rows, key, low, high)
     return f"{span}; {outside}." if outside else f"{span}."
@@ -748,7 +751,7 @@ def _side_clause(found: pd.DataFrame, element: NormalElement, side: str, end: st
     if not names:
         return ""
     verb = "is" if len(names) == 1 else "are"
-    return f"{' and '.join(names)} {verb} {side} it and drawn in its {end} colour"
+    return f"{' and '.join(names)} {verb} {side} that range and shown in the {end} color"
 
 
 # --------------------------------------------------------------------------- figure helpers
@@ -858,19 +861,19 @@ def _state_layer(codes: Sequence[str], hover: Sequence[str], theme: ChartTheme) 
     )
 
 
-def _reports(code: str, counts: RegionCounts, not_attached: str) -> str:
-    """Return the hover's own reports line, saying the layer's value is not attached to them.
+def _reports(code: str, counts: RegionCounts) -> str:
+    """Return the hover's own reports line (the caption says the layer is not from them).
 
-    "Reports naming this state: 4 (zones are not assigned to reports)"; a suppressed cell
-    shows "fewer than 3", never its count; a state without shown reports "none shown".
+    "Comments naming this state: 4"; a suppressed cell shows "fewer than 3", never its count;
+    a state without shown reports "0".
     """
     rows = counts.table[counts.table["region_code"] == code]
-    shown = "none shown"
+    shown = "0"
     if not rows.empty:
         n, suppressed = int(rows["n_comments"].iloc[0]), bool(rows["suppressed"].iloc[0])
         label = count_label(n, suppressed=suppressed, min_cell_count=counts.min_cell_count)
-        shown = label.removesuffix(" reports").removesuffix(" report")
-    return f"Reports naming this state: {shown} ({not_attached})"
+        shown = label.removesuffix(" comments").removesuffix(" comment")
+    return f"Comments naming this state: {shown}"
 
 
 def _lines(*lines: str) -> str:
@@ -879,16 +882,15 @@ def _lines(*lines: str) -> str:
 
 
 def _zone_hover(code: str, ranges: pd.DataFrame, counts: RegionCounts) -> str:
-    zones = f"Main USDA zones by area: {_zone_span(_state_rows(ranges, code))} (2023, simplified)"
-    reports = _reports(code, counts, "zones are not assigned to reports")
-    return _lines(US_STATES[code], zones, reports)
+    """Short lines, so the label fits over the map on a phone ("USDA zones 6a to 7b (2023)")."""
+    noun, span = _zone_words(_state_rows(ranges, code))
+    return _lines(US_STATES[code], f"USDA {noun} {span} (2023)", _reports(code, counts))
 
 
 def _normals_hover(code: str, element: NormalElement, value: float, counts: RegionCounts) -> str:
-    average = f"{_SHORT[element].capitalize()}: {_value(element, value)}"
-    period = "statewide 1991-2020 average (NOAA)"
-    reports = _reports(code, counts, "the average is not attached to reports")
-    return _lines(US_STATES[code], average, period, reports)
+    average = f"{_first_upper(_SHORT[element])}: {_value(element, value)}"
+    period = f"NOAA average, {NORMALS_PERIOD}"
+    return _lines(US_STATES[code], average, period, _reports(code, counts))
 
 
 def _normals_trace(

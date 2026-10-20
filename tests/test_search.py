@@ -769,7 +769,7 @@ class TestSelfDescribedConditions:
     """Summer heat, humidity, rainfall and season length are the gardener's own, uncalibrated
     words (``vocab.SELF_DESCRIBED_KEYS``): one unlike the viewer's is never "different"."""
 
-    NOT_COMPARABLE_TITLE = "Conditions not stated or not comparable"
+    NOT_COMPARABLE_TITLE = "Not found or can't be compared"
 
     def test_a_description_unlike_yours_is_not_comparable_rather_than_different(self) -> None:
         result = build_result([reporting("humid", HUMID)], ask(humidity="dry_air"))
@@ -907,8 +907,8 @@ class TestGracefulSparsity:
     """SPEC §11 #16: no conditions anywhere gives honest broad results, never false matches."""
 
     NONE_STATED = (
-        "None of these 3 reports mention comparable growing conditions, so none can be compared "
-        "with your garden. All are shown below."
+        "None of these 3 comments mention garden details that can be compared with yours. All "
+        "are shown below."
     )
 
     @staticmethod
@@ -928,15 +928,15 @@ class TestGracefulSparsity:
 
     def test_message_for_a_single_report_is_singular(self) -> None:
         assert build_result(self.bare(1), ask()).limitation_message == (
-            "The 1 report found does not mention comparable growing conditions, so it cannot be "
-            "compared with your garden. It is shown below."
+            "The 1 comment found does not mention any garden details that can be compared with "
+            "yours. It is shown below."
         )
 
     @pytest.mark.parametrize(
         ("n_with", "n", "message"),
         [
-            (1, 3, "Only 1 of 3 reports mentions comparable growing conditions."),
-            (2, 3, "Only 2 of 3 reports mention comparable growing conditions."),
+            (1, 3, "Only 1 of 3 comments mentions garden details that can be compared."),
+            (2, 3, "Only 2 of 3 comments mention garden details that can be compared."),
             (3, 3, None),
             (1, 1, None),
         ],
@@ -967,7 +967,7 @@ class TestGracefulSparsity:
         ]
         result = build_result(views, ask(soil="loam"))
         assert result.limitation_message == (
-            "Only 1 of 2 reports mentions comparable growing conditions."
+            "Only 1 of 2 comments mentions garden details that can be compared."
         )
         assert card(result, "vague").explanation == (
             'Soil mentioned as "rocky hillside dirt" (not comparable).'
@@ -996,8 +996,8 @@ class TestGracefulSparsity:
             assert not any(r.has_conditions for r in shown(result))
             assert result.limitation_message == self.NONE_STATED
         assert build_result(views[:2], ask(zone="6b")).limitation_message == (
-            "None of these 2 reports mention comparable growing conditions, so none can be "
-            "compared with your garden. All are shown below."
+            "None of these 2 comments mention garden details that can be compared with yours. "
+            "All are shown below."
         )
 
     def test_a_single_region_only_report_is_said_to_be_not_comparable(self) -> None:
@@ -1006,8 +1006,8 @@ class TestGracefulSparsity:
         result = build_result([maine], ask(zone="6b"))
         assert layout(result) == {"not_stated": ["maine"]}
         assert result.limitation_message == (
-            "The 1 report found does not mention comparable growing conditions, so it cannot be "
-            "compared with your garden. It is shown below."
+            "The 1 comment found does not mention any garden details that can be compared with "
+            "yours. It is shown below."
         )
 
     def test_region_only_reports_are_not_counted_among_comparable_ones(self) -> None:
@@ -1018,7 +1018,7 @@ class TestGracefulSparsity:
         ]
         result = build_result(views, ask(zone="6b"))
         assert result.limitation_message == (
-            "Only 1 of 3 reports mentions comparable growing conditions."
+            "Only 1 of 3 comments mentions garden details that can be compared."
         )
 
 
@@ -1037,14 +1037,14 @@ class TestNotYetAnalysed:
         assert (result.n_candidates, result.n_with_conditions, result.n_not_analysed) == (3, 0, 3)
         assert layout(result) == {"not_stated": ["u0", "u1", "u2"]}
         assert result.limitation_message == (
-            "None of these 3 reports have been analysed for growing conditions yet, so none can "
-            "be compared with your garden. All are shown below."
+            "None of these 3 comments have been read for garden details yet, so none can be "
+            "compared with your garden. All are shown below."
         )
 
     def test_one_unanalysed(self) -> None:
         assert build_result(self.unanalysed(1), ask()).limitation_message == (
-            "The 1 report found has not been analysed for growing conditions yet, so it cannot "
-            "be compared with your garden. It is shown below."
+            "The 1 comment found has not been read for garden details yet, so it can't be "
+            "compared with your garden. It is shown below."
         )
 
     def test_unanalysed_and_unstated(self) -> None:
@@ -1052,13 +1052,15 @@ class TestNotYetAnalysed:
         result = build_result(views, ask())
         assert result.n_not_analysed == 1
         assert result.limitation_message == (
-            "None of these 3 reports can be compared with your garden: 2 do not mention "
-            "comparable growing conditions and 1 has not been analysed yet. All are shown below."
+            "None of these 3 comments can be compared with your garden: 2 do not mention garden "
+            "details that can be compared, and 1 has not been read for garden details yet. All "
+            "are shown below."
         )
         mostly_new = build_result([*self.unanalysed(2), UNRESOLVED], ask())
         assert mostly_new.limitation_message == (
-            "None of these 3 reports can be compared with your garden: 1 does not mention "
-            "comparable growing conditions and 2 have not been analysed yet. All are shown below."
+            "None of these 3 comments can be compared with your garden: 1 does not mention "
+            "garden details that can be compared, and 2 have not been read for garden details "
+            "yet. All are shown below."
         )
 
     def test_some_with_conditions_and_some_unanalysed(self) -> None:
@@ -1066,7 +1068,8 @@ class TestNotYetAnalysed:
         result = build_result(views, SPEC_GARDEN)
         assert (result.n_with_conditions, result.n_not_analysed) == (1, 1)
         assert result.limitation_message == (
-            "Only 1 of 3 reports mentions comparable growing conditions (1 not yet analysed)."
+            "Only 1 of 3 comments mentions garden details that can be compared (1 not yet read "
+            "for garden details)."
         )
 
     def test_mention_filters_leave_no_unanalysed_candidates(self) -> None:
@@ -1079,23 +1082,23 @@ class TestNotYetAnalysed:
 class TestStrictAwareLimitation:
     """F30: with reports hidden by strict mode the message never says they are shown below."""
 
-    HIDDEN = 'hidden by "Only show stated matches"'
+    HIDDEN = 'hidden by "Only show comments that match your garden"'
 
     def test_every_report_hidden(self) -> None:
         views = [reporting("c0"), reporting("c1", order=1)]
         result = build_result(views, ask(method="container", only_stated=True))
         assert result.groups == ()
         assert result.limitation_message == (
-            "None of these 2 reports mention comparable growing conditions, so none can be "
-            f"compared with your garden. All 2 are {self.HIDDEN}; untick it to see them."
+            "None of these 2 comments mention garden details that can be compared with yours. "
+            f"All 2 are {self.HIDDEN}. Uncheck the box to see them."
         )
 
     def test_the_only_report_hidden(self) -> None:
         unanalysed = comment("new", status=None)
         result = build_result([unanalysed], ask(method="container", only_stated=True))
         assert result.limitation_message == (
-            "The 1 report found has not been analysed for growing conditions yet, so it cannot "
-            f"be compared with your garden. It is {self.HIDDEN}; untick it to see it."
+            "The 1 comment found has not been read for garden details yet, so it can't be "
+            f"compared with your garden. It is {self.HIDDEN}. Uncheck the box to see it."
         )
 
     def test_strict_mode_without_a_selection_still_shows_everything(self) -> None:
@@ -1647,7 +1650,8 @@ class TestSearchDatabase:
         }
         assert (result.n_with_conditions, result.n_not_analysed) == (3, 1)
         assert result.limitation_message == (
-            "Only 3 of 5 reports mention comparable growing conditions (1 not yet analysed)."
+            "Only 3 of 5 comments mention garden details that can be compared (1 not yet read "
+            "for garden details)."
         )
 
     def test_searching_a_variety_compares_that_variety(self, conn: sqlite3.Connection) -> None:
@@ -1865,13 +1869,14 @@ class TestSyntheticFixtures:
         result = search(synthetic, "public", ask(), NOW)
         assert (result.n_candidates, result.n_not_analysed) == (69, 3)
         assert result.limitation_message == (
-            "Only 33 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+            "Only 33 of 69 comments mention garden details that can be compared (3 not yet read "
+            "for garden details)."
         )
         region_only = search(synthetic, "public", ask(text="visiting relatives", zone="6b"), NOW)
         assert layout(region_only) == {"not_stated": ["syn-0008"]}
         assert region_only.limitation_message == (
-            "The 1 report found does not mention comparable growing conditions, so it cannot be "
-            "compared with your garden. It is shown below."
+            "The 1 comment found does not mention any garden details that can be compared with "
+            "yours. It is shown below."
         )
 
     def test_quick_chip_support(self, synthetic: sqlite3.Connection) -> None:

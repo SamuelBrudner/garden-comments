@@ -32,12 +32,19 @@ from typing import Any, Final, NoReturn, cast, get_args
 
 import pandas as pd
 
-from crop_explorer.config import DEFAULT_CONFIG_PATH, ContextLabel, OutsideLink, QuickChip
+from crop_explorer.config import (
+    DEFAULT_CONFIG_PATH,
+    LABEL_TEXT,
+    OUTSIDE_LABEL_TEXT,
+    ContextLabel,
+    OutsideLink,
+    QuickChip,
+)
 from crop_explorer.environment_match import match_context, values_with
 from crop_explorer.geography import RegionCounts, count_label
 from crop_explorer.overlay_charts import OVERLAY_KEYS, OVERLAY_LABELS, OverlayKey
 from crop_explorer.overview import Headline
-from crop_explorer.overview_charts import SETUP_TITLES, TOPIC_TITLES, ChartTheme, variety_name
+from crop_explorer.overview_charts import SETUP_TITLES, TOPIC_TITLES, ChartTheme
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
 from crop_explorer.schemas import TOPICS, Basis, EnvKey, RightsStatus
 from crop_explorer.search import FilterOptions
@@ -94,6 +101,7 @@ __all__ = [
     "RESULTS_ANCHOR",
     "RESULTS_ANCHOR_HTML",
     "STRICT_KEY",
+    "STRICT_LABEL",
     "SYNTHETIC_NOTE",
     "TABLE_LABEL",
     "TEXT_KEY",
@@ -140,6 +148,7 @@ __all__ = [
     "min_cell_count",
     "more_conditions_label",
     "option_label",
+    "outside_badge",
     "outside_link_markdown",
     "outside_overlay_note",
     "overlay_choice",
@@ -161,6 +170,7 @@ __all__ = [
     "setup_table",
     "setups_caption",
     "show_more_label",
+    "source_line",
     "source_link",
     "source_rows",
     "stale_state_fixes",
@@ -185,25 +195,28 @@ __all__ = [
 
 # --------------------------------------------------------------------------- copy
 
-EVIDENCE_LABEL: Final = "community report · reported conditions"
+EVIDENCE_LABEL: Final = "Exact words from the comment"
 """Provenance label of every evidence chip (SPEC §7 hard data boundary, §11 #18)."""
-DEMO_BANNER: Final = "Demo data: synthetic comments, not real gardener reports"
+DEMO_BANNER: Final = (
+    "Every comment on this page is a made-up example, not a real comment from a gardener."
+)
 MIXED_DEMO_BANNER: Final = (
-    "Includes synthetic demo comments, which are not real gardener reports. "
-    "Each one is marked on its card."
+    "Some comments on this page are made-up examples, not real comments from gardeners. "
+    "Each one is marked as made up on its card."
 )
 PRIVATE_BANNER: Final = (
-    "Private local view — includes unverified imported comments. Do not publish or share."
+    "Private view, on this computer only. It includes imported comments that have not been "
+    "checked or cleared for publishing. Do not publish or share."
 )
-SYNTHETIC_NOTE: Final = "Synthetic demo comment — no source link"
+SYNTHETIC_NOTE: Final = "Made-up example comment"
 """Shown on every synthetic card: fiction is always marked and never links out."""
-NO_LINK_NOTE: Final = "No source link available"
-NOT_STATED_LINE: Final = "Growing conditions not stated"
-NOT_ANALYSED_LINE: Final = "Not yet analysed for growing conditions"
+NO_LINK_NOTE: Final = "No link to the original comment"
+NOT_STATED_LINE: Final = "No garden details found"
+NOT_ANALYSED_LINE: Final = "Not yet read for garden details"
 """Shown for a comment that has never been through extraction (``parse_status is None``)."""
-WRITTEN_LABEL: Final = "Mentioned as written, not comparable"
+WRITTEN_LABEL: Final = "Mentioned, but can't be compared"
 """Leads the line of display-only phrases (facts without a normalized value)."""
-NO_RESULTS: Final = "No reports to show. Try a different search, or remove a filter or condition."
+NO_RESULTS: Final = "No comments to show. Try a different search or remove a filter."
 ALL_STATES: Final = "All states"
 MISSING_DB_COMMAND: Final = "uv run python -m crop_explorer demo"
 PRIVATE_COMMAND: Final = (
@@ -213,36 +226,40 @@ WORD_JOINER: Final = "\u2060"
 """Invisible character after ``:`` and before ``.``: shortcodes and autolinks cannot form."""
 
 _NOT_SET: Final = "Not set"
-_MORE_CONDITIONS: Final = "More conditions"
-_STRICT_CHECKBOX: Final = '"Only show stated matches"'
-_HIDDEN_CONDITIONS: Final = "not stated, not comparable or differ"
+_MORE_CONDITIONS: Final = "More garden details"
+STRICT_LABEL: Final = "Only show comments that match your garden"
+"""The strict checkbox's label, quoted wherever a message names the checkbox."""
+_STRICT_CHECKBOX: Final = f'"{STRICT_LABEL}"'
+_HIDDEN_CONDITIONS: Final = "where no garden detail matches yours, or where one is different"
 """What strict mode hides: the "not stated or not comparable" and "different" groups."""
 _STRICT_NEEDS_CONDITION: Final = (
-    "Choose at least one growing condition first: until then nothing is hidden."
+    "Choose at least one garden detail first. Until then, nothing is hidden."
 )
 _STRICT_REGION_ONLY: Final = (
-    "Region only lists reports from your area first; choose a condition such as zone or "
-    "growing method to use this filter. Until then nothing is hidden."
+    "Region only puts comments from your area first. Choose a garden detail, such as hardiness "
+    "zone or growing method, to use this checkbox. Until then, nothing is hidden."
 )
 _LOCALHOST: Final = "localhost"
 _NBSP: Final = "\u00a0"
 _ASCII_PUNCTUATION: Final = frozenset(string.punctuation)
 _ITEM_SEPARATOR: Final = " · "
 _BASIS_LABELS: Final[Mapping[Basis, str]] = MappingProxyType(
-    {"observed_experience": "observed that season", "reported_garden_context": "garden context"}
+    {"observed_experience": "seen that season", "reported_garden_context": "about their garden"}
 )
+_MADE_UP_SOURCE: Final = "Made-up examples"
+"""How the About panel names a source of made-up examples (never its id)."""
 _RIGHTS_LABELS: Final[Mapping[RightsStatus, str]] = MappingProxyType(
     {
-        "synthetic": "synthetic demo data (fictional)",
-        "cleared": "cleared for publication",
-        "private_unverified": "private and unverified (local view only)",
+        "synthetic": "made-up examples",
+        "cleared": "cleared for publishing",
+        "private_unverified": "not checked or cleared for publishing (private view only)",
     }
 )
 _TIER_WORDS: Final = MappingProxyType(
     {
         "match": "matching",
-        "partial": "partially matching",
-        "not_stated": "not stated or not comparable",
+        "partial": "partly matching",
+        "not_stated": "not found or can't be compared",
         "different": "different",
     }
 )
@@ -653,7 +670,7 @@ def chip_is_active(chip: QuickChip, state: Mapping[str, Any]) -> bool:
 
 
 _CHIP_LABELS: Final[Mapping[str, str]] = MappingProxyType(
-    {"humid": "humid conditions", "rainy": "rainy conditions"}
+    {"humid": "humid weather", "rainy": "rainy weather"}
 )
 """Tooltip wording for values whose short label is a bare adjective ("describe humid ...")."""
 
@@ -671,11 +688,9 @@ def _verb(n: int, singular: str, plural: str) -> str:
     return singular if n == 1 else plural
 
 
-def _chip_verbs(described: bool, single: bool) -> tuple[str, str]:
-    """Return a tooltip's verb (singular, plural): self-reports are described, not stated."""
-    if described:
-        return ("describes", "describe")
-    return ("states", "state") if single else ("mentions", "mention")
+def _chip_verbs(described: bool) -> tuple[str, str]:
+    """Return a tooltip's verb (singular, plural): self-reports are described, not mentioned."""
+    return ("describes", "describe") if described else ("mentions", "mention")
 
 
 def chip_help(chip: QuickChip, support: ChipSupport) -> str:
@@ -691,12 +706,13 @@ def chip_help(chip: QuickChip, support: ChipSupport) -> str:
     Returns
     -------
     str
-        ``"Set this condition (8 reports state it)"`` for one condition; for several, both
-        counts, e.g. ``"6 reports mention containers or greenhouse / tunnel; 2 mention both"``.
-        A chip with a self-described condition (``vocab.SELF_DESCRIBED_KEYS``) counts reports
-        that describe it in their own, uncalibrated words, and says so: ``"6 reports describe
-        hot summers or humid conditions in their own words; 2 describe both"``, ``"Set this
-        condition (4 reports describe it in their own words)"``.
+        ``"Sets this garden detail (8 comments mention it)"`` for one condition; for several,
+        both counts, e.g. ``"Sets these garden details (6 comments mention containers or
+        greenhouse / tunnel; 2 mention both)"``. A chip with a self-described condition
+        (``vocab.SELF_DESCRIBED_KEYS``) counts reports that describe it in their own,
+        uncalibrated words, and says so: ``"Sets these garden details (6 comments describe hot
+        summers or humid weather in their own words; 2 describe both)"``, ``"Sets this garden
+        detail (4 comments describe it in their own words)"``.
 
     Raises
     ------
@@ -705,16 +721,17 @@ def chip_help(chip: QuickChip, support: ChipSupport) -> str:
     """
     labels = [_condition_value_label(key, value) for key, value in chip.conditions.items()]
     described = any(key in SELF_DESCRIBED_KEYS for key in chip.conditions)
-    singular, plural = _chip_verbs(described, single=len(labels) == 1)
+    singular, plural = _chip_verbs(described)
     suffix = " in their own words" if described else ""
     n_any, n_all = support.n_any, support.n_all
     if len(labels) == 1:
-        counted = f"{_plural(n_any, 'report')} {_verb(n_any, singular, plural)} it{suffix}"
-        return f"Set this condition ({counted})"
+        counted = f"{_plural(n_any, 'comment')} {_verb(n_any, singular, plural)} it{suffix}"
+        return f"Sets this garden detail ({counted})"
     every = "both" if len(labels) == 2 else "all of them"
     return (
-        f"{_plural(n_any, 'report')} {_verb(n_any, singular, plural)} {_or_join(labels)}{suffix}; "
-        f"{n_all} {_verb(n_all, singular, plural)} {every}"
+        f"Sets these garden details ({_plural(n_any, 'comment')} "
+        f"{_verb(n_any, singular, plural)} {_or_join(labels)}{suffix}; "
+        f"{n_all} {_verb(n_all, singular, plural)} {every})"
     )
 
 
@@ -751,7 +768,7 @@ def flatten(result: SearchResult) -> tuple[CommentResult, ...]:
 
 def count_summary(result: SearchResult) -> str:
     """Summarise how many reports were found and how they split across tiers."""
-    total = _plural(result.n_candidates, "report")
+    total = _plural(result.n_candidates, "comment")
     tiers = [f"{n} {_TIER_WORDS[tier]}" for tier, n in result.tier_counts.items()]
     return _ITEM_SEPARATOR.join([total, *tiers])
 
@@ -776,23 +793,21 @@ def strict_note(result: SearchResult, query: SearchQuery) -> str | None:
     if not query.garden.selected():
         return _strict_note_without_conditions(query)
     if query.only_stated_matches:
-        hidden = _plural(result.n_hidden_by_strict, "report")
-        return f"{hidden} hidden because their conditions were {_HIDDEN_CONDITIONS}."
+        hidden = _plural(result.n_hidden_by_strict, "comment")
+        return f"Hidden: {hidden} {_HIDDEN_CONDITIONS}."
     n_hideable = result.tier_counts["not_stated"] + result.tier_counts["different"]
-    return (
-        f"Ticking this would hide {_plural(n_hideable, 'report')} whose conditions "
-        f"were {_HIDDEN_CONDITIONS}."
-    )
+    n_comments = _plural(n_hideable, "comment")
+    return f"Checking this box would hide {n_comments} {_HIDDEN_CONDITIONS}."
 
 
 def region_filter_note(code: str) -> str:
     """Describe an active reported-state filter."""
-    return f"Showing only reports that name {REGION_NAMES[code]} as where they grew."
+    return f"Showing only comments that name {REGION_NAMES[code]} as where they grew."
 
 
 def year_filter_note(year: str) -> str:
     """Describe an active growing-year filter (it hides every report without that year)."""
-    return f"Showing only reports that say they grew in {year}."
+    return f"Showing only comments that say they grew in {year}."
 
 
 def empty_state(result: SearchResult) -> str | None:
@@ -817,8 +832,10 @@ def empty_state(result: SearchResult) -> str | None:
     if result.n_with_conditions == 0 and result.limitation_message is not None:
         return None
     if n_hidden == 1:
-        return f"The 1 report found is hidden by {_STRICT_CHECKBOX}. Untick it to see it."
-    return f"All {n_hidden} reports are hidden by {_STRICT_CHECKBOX}. Untick it to see them."
+        return f"The 1 comment found is hidden by {_STRICT_CHECKBOX}. Uncheck the box to see it."
+    return (
+        f"All {n_hidden} comments are hidden by {_STRICT_CHECKBOX}. Uncheck the box to see them."
+    )
 
 
 # --------------------------------------------------------------------------- paging
@@ -883,7 +900,7 @@ def _mention_name(mention: MentionView) -> str:
 
 
 def _mention_label(mention: MentionView) -> str:
-    return mention.variety_as_written or mention.crop or "unidentified variety"
+    return mention.variety_as_written or mention.crop or "unnamed variety"
 
 
 def _unique(items: Iterable[str]) -> list[str]:
@@ -909,8 +926,8 @@ def _best(matches: Sequence[MentionMatch]) -> MentionMatch | None:
     return min(matches, key=_rank, default=None)
 
 
-_RELEVANT: Final = "Relevant"
-_NOT_STATED: Final = "Not stated"
+_RELEVANT: Final = "Matches"
+_NOT_STATED: Final = "Not found"
 _DIFFERENT: Final = "Different"
 _OWN_WORDS: Final = "In their own words"
 _COUNTED: Final = "own words, counted"
@@ -919,7 +936,7 @@ _NOT_COUNTED: Final = "own words, not counted"
 """Part holding the own-words lines described differently or not comparable."""
 _COUNTED_STATUSES: Final[frozenset[MatchStatus]] = frozenset({"match", "imprecise"})
 _OWN_WORDS_NOTES: Final[Mapping[str, str]] = MappingProxyType(
-    {"described_differently": "not counted as a difference", "not_stated": "not comparable"}
+    {"described_differently": "not counted as a difference", "not_stated": "can't be compared"}
 )
 _TIER_PARTS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
@@ -950,8 +967,8 @@ def _quoted(phrase: str) -> str:
 def _imprecise_item(dimension: DimensionMatch) -> str:
     coarse = [value for value in values_with(dimension, "imprecise") if value.isdigit()]
     if dimension.key == "zone" and coarse:
-        return f"zone {coarse[0]}, subzone unknown (you: {_viewer_label(dimension)})"
-    return f"{_labels(dimension, 'imprecise')} (you: {_viewer_label(dimension)})"
+        return f"zone {coarse[0]}, a or b not given (you chose {_viewer_label(dimension)})"
+    return f"{_labels(dimension, 'imprecise')} (you chose {_viewer_label(dimension)})"
 
 
 def _relevant_item(dimension: DimensionMatch) -> str:
@@ -970,7 +987,7 @@ def _not_stated_item(dimension: DimensionMatch) -> str:
     label = KEY_LABELS[dimension.key]
     if not dimension.reported_values:
         return label
-    return f"{label} (only {_labels(dimension, 'not_stated')} reported, not comparable)"
+    return f"{label} (only {_labels(dimension, 'not_stated')} mentioned, can't be compared)"
 
 
 def _written_item(dimension: DimensionMatch) -> str:
@@ -979,7 +996,7 @@ def _written_item(dimension: DimensionMatch) -> str:
 
 
 def _different_item(dimension: DimensionMatch) -> str:
-    return f"{_labels(dimension, 'different')} (you: {_viewer_label(dimension)})"
+    return f"{_labels(dimension, 'different')} (you chose {_viewer_label(dimension)})"
 
 
 def _in_own_words(dimension: DimensionMatch) -> bool:
@@ -1004,10 +1021,13 @@ def _own_words_quotes(dimension: DimensionMatch) -> str:
 
 
 def _own_words_reading(dimension: DimensionMatch) -> str:
-    """Say how the words were read: counted as the viewer's value, or their label beside it."""
+    """Say how the words were read: as the viewer's value, close to it, or as something else."""
+    viewer, read = _viewer_label(dimension), _labels(dimension, dimension.status)
     if dimension.status == "match":
-        return f"counted as {_viewer_label(dimension)}"
-    return f"{_labels(dimension, dimension.status)}; you chose {_viewer_label(dimension)}"
+        return f"counted as {viewer}"
+    if dimension.status == "imprecise":
+        return f"read as {read}, a partial match for your {viewer}"
+    return f"read as {read}; you chose {viewer}"
 
 
 def _own_words_region(facts: Iterable[FactView]) -> str:
@@ -1018,7 +1038,7 @@ def _own_words_region(facts: Iterable[FactView]) -> str:
     regions = [fact for fact in facts if fact.key == "region"]
     names = _unique(REGION_NAMES[code] for f in regions if (code := f.normalized_value))
     unmapped = _unique(
-        f"{f.value_as_written} (not mapped)" for f in regions if not f.normalized_value
+        f"{f.value_as_written} (not recognized)" for f in regions if not f.normalized_value
     )
     return ", ".join(names or unmapped)
 
@@ -1075,10 +1095,28 @@ def _tier_line(match: MatchResult, facts: Iterable[FactView]) -> str:
     return parts[part][0]
 
 
+_OTHER_MENTION_LEADS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        _RELEVANT: "{name} matches",
+        _NOT_STATED: "Not found for {name}",
+        WRITTEN_LABEL: "Mentioned for {name}, but can't be compared",
+        _DIFFERENT: "{name} is different",
+        _OWN_WORDS: "{name}, in their own words",
+    }
+)
+"""A tier line's lead rewritten to name another mention ("Jalapeño is different: ...")."""
+
+
+def _other_mention_line(name: str, line: str) -> str:
+    """Name the mention inside the tier line's lead, so two colons never follow each other."""
+    lead, items = line.split(": ", 1)
+    return f"{_OTHER_MENTION_LEADS[lead].format(name=name)}: {items}"
+
+
 def _other_mention_lines(matches: Sequence[MentionMatch], best: MatchResult) -> tuple[str, ...]:
     """State the tier line of every other relevant mention whose tier differs from the best."""
     return tuple(
-        f"{_mention_label(m.mention)}: {_tier_line(m.match, m.facts)}"
+        _other_mention_line(_mention_label(m.mention), _tier_line(m.match, m.facts))
         for m in matches
         if m.match is not None and m.match.tier != best.tier
     )
@@ -1118,9 +1156,9 @@ def _reported_value_lines(matches: Sequence[MentionMatch]) -> tuple[str, ...]:
         if items:
             by_items.setdefault(items, []).append(_mention_label(match.mention))
     if len(matches) == 1:
-        return tuple(f"Reported: {_ITEM_SEPARATOR.join(items)}" for items in by_items)
+        return tuple(f"Garden details: {_ITEM_SEPARATOR.join(items)}" for items in by_items)
     return tuple(
-        f"Reported for {', '.join(_unique(labels))}: {_ITEM_SEPARATOR.join(items)}"
+        f"Garden details for {', '.join(_unique(labels))}: {_ITEM_SEPARATOR.join(items)}"
         for items, labels in by_items.items()
     )
 
@@ -1176,7 +1214,8 @@ def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, 
         return _reported_lines(matches)
     if best is None or len(matches) == 1:
         return _match_lines(match, best.facts if best is not None else ())
-    lead = f"Shown for {_mention_label(best.mention)} (1 of {len(matches)} mentions)"
+    n_varieties = f"1 of {len(matches)} crops or varieties"
+    lead = f"Details for {_mention_label(best.mention)} ({n_varieties})"
     return (lead, *_match_lines(match, best.facts), *_other_mention_lines(matches, match))
 
 
@@ -1244,8 +1283,8 @@ def region_line(result: CommentResult) -> str:
         return f"Region: {', '.join(REGION_NAMES[code] for code in codes)}{same}"
     written = _unique(f.value_as_written for f in facts)
     if written:
-        return f"Region as written: {', '.join(written)} (not mapped)"
-    return "Region not reported"
+        return f"Region: {', '.join(written)} (not recognized)"
+    return "Region not mentioned"
 
 
 @dataclass(frozen=True)
@@ -1292,7 +1331,7 @@ def _evidence_row(fact: FactView, owners: Mapping[str, str]) -> EvidenceRow:
         quote=fact.evidence_quote,
         label=EVIDENCE_LABEL,
         basis=_BASIS_LABELS[fact.basis],
-        applies_to="whole comment" if whole else owners[fact.fact_id],
+        applies_to="the whole comment" if whole else owners[fact.fact_id],
     )
 
 
@@ -1387,13 +1426,24 @@ def source_rows(views: Sequence[CommentView]) -> tuple[SourceRow, ...]:
     )
 
 
+def source_line(row: SourceRow) -> str:
+    """Return a source's line in the About panel, e.g. ``"demo: 3 comments shown · ..."``.
+
+    A source of made-up examples is named "Made-up examples" (its id stays in the data).
+    """
+    shown = f"{_plural(row.n_comments, 'comment')} shown"
+    if row.rights == _RIGHTS_LABELS["synthetic"]:
+        return f"{_MADE_UP_SOURCE}: {shown}"
+    return f"{row.source_id}: {shown} · {row.rights}"
+
+
 def summary_line(counts: Mapping[str, int]) -> str:
     """Describe the visible data from :func:`crop_explorer.db.summary_counts`."""
     parts = (
         f"{_plural(counts['comments'], 'comment')} from {_plural(counts['sources'], 'source')}",
-        f"{counts['parsed_comments']} extracted",
-        _plural(counts["mentions"], "variety mention"),
-        _plural(counts["facts"], "condition fact"),
+        f"{counts['parsed_comments']} read for garden details",
+        f"varieties named {_plural(counts['mentions'], 'time')}",
+        _plural(counts["facts"], "quote"),
     )
     return _ITEM_SEPARATOR.join(parts)
 
@@ -1414,13 +1464,13 @@ def outside_link_markdown(link: OutsideLink) -> str:
 _OVERLAY_NOTES: Final = MappingProxyType(
     {
         "zones": (
-            "Also available as a map overlay: Map tab, Overlay, "
+            "The Map tab can also show "
             f"\u201c{OVERLAY_LABELS['zones']}\u201d (simplified data, not the official map)."
         ),
         "normals": (
-            "Also available as a map overlay: Map tab, Overlay, the three NOAA 1991-2020 "
-            "choices (statewide averages from NOAA's Climate at a Glance, not this "
-            "station-based product)."
+            "The Map tab can also color states by the three NOAA 1991-2020 choices. Those are "
+            "whole-state averages from NOAA's Climate at a Glance, not the weather-station "
+            "Climate Normals at this link."
         ),
     }
 )
@@ -1434,28 +1484,43 @@ def outside_overlay_note(link: OutsideLink) -> str | None:
     return None if link.overlay is None else _OVERLAY_NOTES[link.overlay]
 
 
-def label_badge(label: ContextLabel) -> str:
-    """Return a Streamlit Markdown badge for an evidence-type label (SPEC §7 data boundary)."""
-    return f":{_BADGE_COLORS[label]}-badge[{label}]"
+def label_badge(label: ContextLabel, text: str | None = None) -> str:
+    """Return a Streamlit Markdown badge for an evidence-type label (SPEC §7 data boundary).
+
+    The badge's colour comes from ``label``; its words are ``text`` (fixed, trusted text),
+    else the label's own display words (:data:`~crop_explorer.config.LABEL_TEXT`).
+    """
+    return f":{_BADGE_COLORS[label]}-badge[{LABEL_TEXT[label] if text is None else text}]"
+
+
+def outside_badge(link: OutsideLink) -> str:
+    """Return an outside link's badge, in words that name its kind of site.
+
+    Climate data, university trials and other gardeners' ratings each keep their own words
+    (:data:`~crop_explorer.config.OUTSIDE_LABEL_TEXT`), so outside ratings never read like this
+    video's comments.
+    """
+    return label_badge(link.label, OUTSIDE_LABEL_TEXT[link.label])
 
 
 # --------------------------------------------------------------------------- at a glance
 
 GLANCE_TABS: Final = ("Varieties", "Topics", "How people grow")
 """Short tab labels, so all three fit across a phone (the captions say the rest)."""
-NO_VARIETIES: Final = "No variety has been identified in these reports yet."
-NO_SETUPS: Final = "No report states a growing method or setting yet."
-NO_TOPICS: Final = "No topics have been identified for these varieties yet."
+NO_VARIETIES: Final = "No variety is named in these comments yet."
+NO_SETUPS: Final = "No comment mentions a growing method or setting yet."
+NO_TOPICS: Final = "No topics found for these varieties yet."
 TABLE_LABEL: Final = "Show as table"
 RESULTS_ANCHOR: Final = "glance-results"
 """Element id just above the results, the target of the "Go to the reports" link."""
 RESULTS_ANCHOR_HTML: Final = f'<div id="{RESULTS_ANCHOR}"></div>'
 """Trusted, fixed markup placing :data:`RESULTS_ANCHOR` on the page."""
 _CONVERSATION_NOT_QUALITY: Final = (
-    "This counts conversation, not quality: a failed crop counts the same as a great one."
+    "This counts comments, not how well a variety did. A failed crop counts the same as a good "
+    "one."
 )
 _TOPIC_NOT_OUTCOME: Final = (
-    "A comment can touch several topics, and a topic says what was discussed, not whether it "
+    "A comment can mention several topics. A topic is what was talked about, not whether it "
     "went well."
 )
 _HINTS: Final = MappingProxyType(
@@ -1465,8 +1530,8 @@ _HINTS: Final = MappingProxyType(
             "Tap a bar once to see its count, then tap it again to show its comments below.",
         ),
         "cell": (
-            "Click a cell to show those comments below.",
-            "Tap a cell once to see its count, then tap it again to show those comments below.",
+            "Click a square to show those comments.",
+            "Tap a square once to see its count, then again to show those comments.",
         ),
     }
 )
@@ -1502,8 +1567,8 @@ _TILE: Final = (
     '<div class="glance-value">{value}</div>{extra}</div>'
 )
 _METER: Final = (
-    '<div class="glance-meter" role="meter" aria-label="Reports that describe growing '
-    'conditions" aria-valuemin="0" aria-valuemax="{total}" aria-valuenow="{part}">'
+    '<div class="glance-meter" role="meter" aria-label="Comments that mention garden '
+    'details" aria-valuemin="0" aria-valuemax="{total}" aria-valuenow="{part}">'
     '<span style="flex:{part} 1 0px"></span><span style="flex:{rest} 1 0px"></span></div>'
 )
 _COMPACT_FROM: Final = 10_000
@@ -1546,7 +1611,7 @@ def _conditions_tile(part: int, total: int) -> str:
     """Return the "33 of 69" tile, with a meter of the same proportion."""
     value = f'{_figure(part)}<span class="glance-of"> of {_figure(total)}</span>'
     meter = _METER.format(total=total, part=part, rest=total - part)
-    return _tile("Describe conditions", value, meter + _note(_CONDITIONS_NOTE))
+    return _tile("With garden details", value, meter + _note(_CONDITIONS_NOTE))
 
 
 def kpi_tiles_html(headline: Headline, theme: ChartTheme) -> str:
@@ -1571,7 +1636,7 @@ def kpi_tiles_html(headline: Headline, theme: ChartTheme) -> str:
     places = f"{_plural(headline.n_us_states, 'U.S. state')} · {headline.n_other_regions} "
     crops = f"across {_plural(headline.n_crops, 'crop')}" if headline.n_crops else ""
     tiles = (
-        _tile("Reports", _figure(headline.n_reports), _note("comments in this view")),
+        _tile("Comments", _figure(headline.n_reports), _note("in total")),
         _tile("Varieties mentioned", _figure(headline.n_varieties), _note(crops)),
         _conditions_tile(headline.n_with_conditions, headline.n_reports),
         _tile("Places named", _figure(headline.n_places), _note(f"{places}outside the U.S.")),
@@ -1593,7 +1658,7 @@ def _ties(n_tied_off: int, n_comments: int) -> str:
     more = (
         "1 more variety also has" if n_tied_off == 1 else f"{n_tied_off} more varieties also have"
     )
-    return f" {more} {_plural(n_comments, 'comment')}; ties are listed alphabetically."
+    return f" {more} {_plural(n_comments, 'comment')} but did not fit (ties are in A to Z order)."
 
 
 def _caption_html(lead: str, sentence: str, ties: str, mark: str) -> str:
@@ -1638,11 +1703,8 @@ def varieties_caption_html(
 def topics_caption(n_rows: int) -> str:
     """Say in one short sentence what the topic grid counts."""
     if n_rows == 1:
-        return "Comments about each topic, for the most-discussed variety."
-    return (
-        f"Comments about each topic, for the {n_rows} most-discussed varieties in the bar "
-        "chart's order."
-    )
+        return "Comments about each topic for the most-discussed variety."
+    return f"Comments about each topic for the {n_rows} most-discussed varieties."
 
 
 def topics_caption_html(n_rows: int, n_tied_off: int, last_count: int) -> str:
@@ -1659,8 +1721,8 @@ def setups_caption(n_with_setup: int, n_reports: int) -> str:
     """Say how few reports state a growing method or setting at all."""
     most = " Most don't say." if 2 * n_with_setup < n_reports else ""
     return (
-        "Only reports that state a growing method or setting are counted: "
-        f"{n_with_setup} of {n_reports}.{most} A report can state more than one."
+        "Only comments that mention a growing method or setting are counted: "
+        f"{n_with_setup} of {n_reports}.{most} A comment can mention more than one."
     )
 
 
@@ -1730,16 +1792,16 @@ def glance_key(chart: str, state: Mapping[str, Any]) -> str:
 
 
 def variety_names(frame: pd.DataFrame) -> dict[str, str]:
-    """Return ``variety_key -> "Sungold · tomato"`` (raw, untrusted: escape before display)."""
+    """Return ``variety_key -> "Sungold tomato"`` for sentences (raw: escape before display)."""
     pairs = zip(frame["variety_key"], frame["label"], frame["crop"], strict=True)
     return {
-        str(key): variety_name(str(label), crop if isinstance(crop, str) else None)
+        str(key): str(label) if not isinstance(crop, str) else f"{label} {crop}"
         for key, label, crop in pairs
     }
 
 
-def _about_topics(topics: Sequence[str]) -> str:
-    return f" about {' or '.join(topic_title(topic) for topic in topics)}" if topics else ""
+def _topic_words(topics: Sequence[str]) -> str:
+    return " or ".join(topic_label(topic) for topic in topics)
 
 
 def glance_feedback(name: str, topics: Sequence[str]) -> str:
@@ -1755,18 +1817,17 @@ def glance_feedback(name: str, topics: Sequence[str]) -> str:
     Returns
     -------
     str
-        e.g. ``"Showing the reports that mention Sungold · tomato about Flavor below.
-        [Go to the reports ↓](#glance-results)"``.
+        e.g. ``"Showing comments about Sungold tomato and flavor below.
+        [Go to the comments ↓](#glance-results)"``.
     """
-    shown = f"{escape_markdown(name)}{_about_topics(topics)}"
-    return (
-        f"Showing the reports that mention {shown} below. [Go to the reports ↓](#{RESULTS_ANCHOR})"
-    )
+    name = escape_markdown(name)
+    shown = f"about {name} and {_topic_words(topics)}" if topics else f"that mention {name}"
+    return f"Showing comments {shown} below. [Go to the comments ↓](#{RESULTS_ANCHOR})"
 
 
 def variety_filter_note(name: str) -> str:
     """Describe an active variety filter (Markdown; the untrusted name is escaped)."""
-    return f"Showing only reports that mention {escape_markdown(name)} (all spellings)."
+    return f"Showing only comments that mention {escape_markdown(name)} (any spelling)."
 
 
 def variety_table(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1790,8 +1851,8 @@ def setup_table(frame: pd.DataFrame) -> pd.DataFrame:
     conditions = [SETUP_TITLES[str(key)] for key in frame["key"]]
     return pd.DataFrame(
         {
-            "Condition": conditions,
-            "Stated as": list(frame["label"]),
+            "Garden detail": conditions,
+            "Choice": list(frame["label"]),
             "Comments": list(frame["n_comments"]),
         }
     )
@@ -1841,18 +1902,18 @@ def map_colorbar(counts: RegionCounts) -> dict[str, Any]:
         "thickness": 10,
         "len": 0.7,
         "dtick": colorbar_dtick(max_count),
-        "title": {"text": "Reports", "side": "top"},
+        "title": {"text": "Comments", "side": "top"},
     }
 
 
 def map_notes(counts: RegionCounts) -> tuple[str, ...]:
     """Return the counts the map cannot show, always including the not-reported count."""
     notes = [
-        f"Region not reported: {counts.not_reported}",
-        f"Outside the U.S.: {counts.outside_us}",
+        f"Comments with no place named, or one not recognized: {counts.not_reported}",
+        f"Comments from outside the U.S.: {counts.outside_us}",
     ]
     if counts.us_state_not_reported:
-        notes.append(f"In the U.S., state not reported: {counts.us_state_not_reported}")
+        notes.append(f"Comments in the U.S. with no state named: {counts.us_state_not_reported}")
     return tuple(notes)
 
 
@@ -1868,7 +1929,7 @@ def state_choices(counts: RegionCounts, current: str | None) -> dict[str | None,
         for row in rows
     }
     if current is not None and current not in labels:
-        labels[current] = f"{REGION_NAMES[current]} (no reports with the current filters)"
+        labels[current] = f"{REGION_NAMES[current]} (no comments with the current filters)"
     ordered = sorted(labels, key=REGION_NAMES.__getitem__)
     return {None: ALL_STATES, **{code: labels[code] for code in ordered}}
 

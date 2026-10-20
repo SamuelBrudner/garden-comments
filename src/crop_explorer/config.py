@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Literal, Self
 from urllib.parse import urlsplit
 
@@ -33,6 +35,26 @@ OutsideLabel = Literal[
 ``"community report"`` marks outside gardeners' own ratings (not this channel's comments);
 ``"reported conditions"`` describes this channel's comments only and is never allowed here.
 """
+
+LABEL_TEXT: Final[Mapping[ContextLabel, str]] = MappingProxyType(
+    {
+        "community report": "comment",
+        "reported conditions": "from the comment",
+        "regional climate reference": "climate data",
+        "published external trial": "university trial",
+    }
+)
+"""What a viewer reads for each label inside the app. The label keys stay stable (config,
+packaged data and code use them); only these display words are shown."""
+OUTSIDE_LABEL_TEXT: Final[Mapping[OutsideLabel, str]] = MappingProxyType(
+    {
+        "regional climate reference": "climate data",
+        "published external trial": "university trial",
+        "community report": "other gardeners' ratings",
+    }
+)
+"""What a viewer reads for an outside link's label: each kind of site keeps its own words, and
+outside gardeners' ratings never read like this video's comments."""
 
 
 class DatabaseConfig(BaseModel):

@@ -389,10 +389,10 @@ def test_region_counts_rejects_negative_bucket_counts() -> None:
 @pytest.mark.parametrize(
     ("n", "suppressed", "k", "expected"),
     [
-        (1, False, 1, "1 report"),
-        (3, False, 3, "3 reports"),
-        (0, True, 3, "fewer than 3 reports"),
-        (0, True, 2, "fewer than 2 reports"),
+        (1, False, 1, "1 comment"),
+        (3, False, 3, "3 comments"),
+        (0, True, 3, "fewer than 3 comments"),
+        (0, True, 2, "fewer than 2 comments"),
     ],
 )
 def test_count_label(n: int, suppressed: bool, k: int, expected: str) -> None:
@@ -431,7 +431,7 @@ def test_choropleth_has_a_single_usa_states_choropleth_trace() -> None:
 def test_choropleth_hover_shows_counts_and_hides_suppressed_values() -> None:
     trace = choropleth(mixed_counts()).data[0]
 
-    assert list(trace.text) == ["Connecticut: 3 reports", "Maine: fewer than 2 reports"]
+    assert list(trace.text) == ["Connecticut: 3 comments", "Maine: fewer than 2 comments"]
     assert "%{text}" in trace.hovertemplate
     assert "%{z}" not in trace.hovertemplate
 

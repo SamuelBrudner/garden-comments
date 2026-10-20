@@ -184,8 +184,8 @@ def test_cornell_gardener_ratings_are_a_community_report_not_a_trial() -> None:
     nebraska = links["Nebraska Vegetable Variety Navigator"]
 
     assert cornell.label == "community report"
-    assert "outside" in cornell.note.lower()
-    assert "not this channel" in cornell.note.lower()
+    assert "from other home gardeners" in cornell.note.lower()
+    assert "not the comments shown on this page" in cornell.note.lower()
     assert nebraska.label == "published external trial"
 
 

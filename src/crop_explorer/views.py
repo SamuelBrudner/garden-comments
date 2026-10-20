@@ -35,11 +35,11 @@ TIER_ORDER: Final = MappingProxyType({"match": 0, "partial": 1, "not_stated": 2,
 
 GROUP_TITLES: Final = MappingProxyType(
     {
-        "all": "Reports",
-        "match": "Matching reported conditions",
-        "partial": "Partially matching conditions",
-        "not_stated": "Conditions not stated or not comparable",
-        "different": "Different reported conditions",
+        "all": "Comments",
+        "match": "Matching your garden",
+        "partial": "Partly matching your garden",
+        "not_stated": "Not found or can't be compared",
+        "different": "Different from your garden",
     }
 )
 

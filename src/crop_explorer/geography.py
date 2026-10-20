@@ -173,8 +173,8 @@ def count_label(n_comments: int, *, suppressed: bool, min_cell_count: int) -> st
         ``"1 report"``, ``"3 reports"`` or ``"fewer than 3 reports"``.
     """
     if suppressed:
-        return f"fewer than {min_cell_count} reports"
-    return f"{n_comments} report" if n_comments == 1 else f"{n_comments} reports"
+        return f"fewer than {min_cell_count} comments"
+    return f"{n_comments} comment" if n_comments == 1 else f"{n_comments} comments"
 
 
 def choropleth(counts: RegionCounts) -> go.Figure:
@@ -282,5 +282,5 @@ def _trace(table: pd.DataFrame, hover: list[str]) -> go.Choropleth:
         hovertemplate="%{text}<extra></extra>",
         colorscale=[list(stop) for stop in _SEQUENTIAL_BLUE],
         marker={"line": {"color": "white", "width": 0.5}},
-        colorbar={"title": {"text": "Reports"}},
+        colorbar={"title": {"text": "Comments"}},
     )

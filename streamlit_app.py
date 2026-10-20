@@ -53,7 +53,7 @@ from crop_explorer.schemas import utc_now_iso  # noqa: E402
 _TEMP_PREFIX: Final = "crop-explorer-demo-"
 
 
-@st.cache_resource(show_spinner="Preparing the demo comments...")
+@st.cache_resource(show_spinner="Preparing the made-up example comments...")
 def _hosted_demo() -> HostedDemo:
     """Build the demo in a fresh temporary directory, once per server process."""
     directory = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX))
