@@ -198,3 +198,68 @@ def test_viewer_limits_are_required(tmp_path: Path, key: str) -> None:
 
     with pytest.raises(ValidationError, match=key):
         load_config(write_config(tmp_path, raw))
+
+
+# --------------------------------------------------------------------------- youtube
+
+
+def test_youtube_settings_are_configured() -> None:
+    youtube = load_config().youtube
+
+    assert youtube.api_base_url == "https://www.googleapis.com/youtube/v3"
+    assert youtube.page_size == 100
+    assert youtube.timeout_s > 0
+    assert youtube.max_pages >= 1
+    assert youtube.retention_days == 30
+    assert youtube.api_key_env == "YOUTUBE_API_KEY"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("api_base_url", "http://www.googleapis.com/youtube/v3"),
+        ("api_base_url", "www.googleapis.com/youtube/v3"),
+        ("api_base_url", "https://www.googleapis.com/youtube/v3/"),
+        ("api_base_url", "https://www.googleapis.com/youtube/v3?key=x"),
+        ("api_base_url", "https://user@www.googleapis.com/youtube/v3"),
+        ("page_size", 0),
+        ("page_size", 101),
+        ("timeout_s", 0),
+        ("timeout_s", -1),
+        ("timeout_s", float("inf")),
+        ("max_pages", 0),
+        ("retention_days", 0),
+        ("retention_days", 31),
+        ("api_key_env", ""),
+        ("api_key_env", "YOUTUBE API KEY"),
+        ("api_key_env", "1KEY"),
+    ],
+)
+def test_invalid_youtube_settings_are_rejected(tmp_path: Path, key: str, value: object) -> None:
+    raw = raw_config()
+    raw["youtube"][key] = value
+
+    with pytest.raises(ValidationError, match=key):
+        load_config(write_config(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    "key", ["api_base_url", "page_size", "timeout_s", "max_pages", "retention_days", "api_key_env"]
+)
+def test_every_youtube_setting_is_required(tmp_path: Path, key: str) -> None:
+    raw = raw_config()
+    del raw["youtube"][key]
+
+    with pytest.raises(ValidationError, match=key):
+        load_config(write_config(tmp_path, raw))
+
+
+def test_the_youtube_section_is_required_and_strict(tmp_path: Path) -> None:
+    raw = raw_config()
+    raw["youtube"]["api_key"] = "never put a key in the config"
+    with pytest.raises(ValidationError, match="api_key"):
+        load_config(write_config(tmp_path, raw))
+
+    del raw["youtube"]
+    with pytest.raises(ValidationError, match="youtube"):
+        load_config(write_config(tmp_path, raw))

@@ -204,7 +204,7 @@ def test_hosted_config_keeps_every_other_setting(tmp_path: Path, cfg: AppConfig)
     loaded = load_config(prepare_hosted_demo(tmp_path, private_cfg, NOW).config)
 
     assert loaded.viewer.scope == "public"
-    unchanged = ("map", "extraction", "quick_chips", "outside_context")
+    unchanged = ("map", "extraction", "quick_chips", "outside_context", "youtube")
     assert {key: getattr(loaded, key) for key in unchanged} == {
         key: getattr(cfg, key) for key in unchanged
     }

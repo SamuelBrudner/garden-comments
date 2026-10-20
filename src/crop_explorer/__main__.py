@@ -17,6 +17,12 @@ Commands (docs/ARCHITECTURE.md, "CLI"):
 ``demo``
     Ingest the synthetic fixtures (rights ``synthetic``) and load their extractions
     (:func:`crop_explorer.demo.build_demo_database`; any rejection is an error).
+``fetch-youtube VIDEO --out PATH [--key-via-proxy]``
+    Download one video's public comments through the YouTube Data API v3 into JSONL that
+    ``ingest`` reads, and print the private, expiring ``ingest`` command for it
+    (:mod:`crop_explorer.youtube`). The key comes from the environment variable named by
+    ``youtube.api_key_env``; with ``--key-via-proxy`` no key is read or sent, because the
+    network proxy attaches it (a network secret).
 
 ``--config`` and ``--db`` may be given before or after the command. On success exactly one line
 of JSON (ids and counts only) goes to stdout and the exit status is 0. On invalid input
@@ -24,11 +30,13 @@ of JSON (ids and counts only) goes to stdout and the exit status is 0. On invali
 configuration YAML (``yaml.YAMLError``) or a database that SQLite cannot use
 (``sqlite3.Error``, e.g. a file that is not a database), one ``error: ...`` line goes to stderr
 and the exit status is 2. Comment text is never printed or
-logged; only ``export-for-extraction`` writes it, to an owner-only file.
+logged; only ``export-for-extraction`` and ``fetch-youtube`` write it, to owner-only files.
 
 Output files (``--out``, ``--rejections-out``) are checked and opened before any work: a
 directory, a symlink, the database (or its ``-wal``/``-journal``/``-shm`` files) and the
-command's own input are refused; another regular file is overwritten.
+command's own input are refused; another regular file is overwritten. ``fetch-youtube``
+checks its output before the first API request but opens it only once every page has been
+fetched, so a failed fetch leaves an existing file untouched.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sqlite3
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -47,7 +56,7 @@ from typing import Any, Final, TextIO, get_args
 
 import yaml
 
-from crop_explorer import db
+from crop_explorer import db, youtube, youtube_http
 from crop_explorer.config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from crop_explorer.demo import (
     DEMO_COMMENTS,
@@ -76,6 +85,7 @@ __all__ = [
     "DEMO_SOURCE_ID",
     "EXIT_ERROR",
     "EXIT_OK",
+    "INGEST_PROGRAM",
     "build_parser",
     "main",
 ]
@@ -85,11 +95,17 @@ EXIT_ERROR: Final = 2
 """Exit status for invalid input (the same status argparse uses for usage errors)."""
 
 DEFAULT_KIND: Final = "comments_export"
+INGEST_PROGRAM: Final = ("uv", "run", "python", "-m", "crop_explorer")
+"""How the README runs this CLI; the start of the ``ingest`` command ``fetch-youtube`` prints."""
 
 _HANDLED_ERRORS: Final = (ValueError, KeyError, OSError, yaml.YAMLError, sqlite3.Error)
 _OWNER_ONLY: Final = 0o600
 _DEFAULT_FILE_MODE: Final = 0o666
 """Mode of other new output files before the umask applies (as for ``open()``)."""
+_KEY_VIA_PROXY_HELP: Final = (
+    "send no API key and do not read the key variable: the network proxy attaches it (a "
+    f"network secret for www.googleapis.com with header {youtube.API_KEY_HEADER})"
+)
 _OUTPUT_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
 _DATABASE_FILE_SUFFIXES: Final = ("", "-wal", "-journal", "-shm")
 _REPLACE_HELP: Final = (
@@ -261,6 +277,12 @@ def _summary_arguments(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _fetch_youtube_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("video", help="video id, or a youtube.com/watch?v=ID or youtu.be/ID URL")
+    sub.add_argument("--out", type=Path, required=True, help="output JSONL for ingest (mode 600)")
+    sub.add_argument(youtube.KEY_VIA_PROXY_FLAG, action="store_true", help=_KEY_VIA_PROXY_HELP)
+
+
 def _no_arguments(sub: argparse.ArgumentParser) -> None:
     del sub
 
@@ -365,6 +387,55 @@ def _demo(cfg: AppConfig, args: argparse.Namespace) -> Payload:
     return {"import": built.stats.model_dump(), "extraction": _report_payload(built.report)}
 
 
+def _fetch_youtube(cfg: AppConfig, args: argparse.Namespace) -> Payload:
+    video_id = youtube.parse_video_id(args.video)
+    api_key = youtube.resolve_api_key(
+        os.environ, cfg.youtube.api_key_env, via_proxy=args.key_via_proxy
+    )
+    protected = _database_files(cfg)
+    _prepare_output(args.out, protected)  # before the first request spends quota
+    fetched_at = utc_now_iso()
+    fetch_json = youtube_http.urllib_transport(cfg.youtube.timeout_s)
+    result = youtube.fetch_comments(video_id, api_key, cfg.youtube, fetch_json)
+    with _open_output(args.out, protected, owner_only=True) as out:
+        _write_rows(out, (row._asdict() for row in result.comments))
+    return _fetch_payload(result, args.out, fetched_at, cfg.youtube.retention_days)
+
+
+def _fetch_payload(
+    result: youtube.FetchResult, out: Path, fetched_at: str, retention_days: int
+) -> Payload:
+    """Return counts, times and the ``ingest`` command (expiry counted from the fetch start)."""
+    expires_at = youtube.retention_expiry(fetched_at, retention_days)
+    return {
+        "video_id": result.video_id,
+        "threads": result.threads,
+        "replies": result.replies,
+        "rows": len(result.comments),
+        "api_pages": result.pages,
+        "out": str(out),
+        "fetched_at": fetched_at,
+        "expires_at": expires_at,
+        "ingest_command": _private_ingest_command(out, result.video_id, expires_at),
+    }
+
+
+def _private_ingest_command(out: Path, video_id: str, expires_at: str) -> str:
+    """Return the shell command that imports ``out`` privately, expiring at ``expires_at``."""
+    return shlex.join(
+        [
+            *INGEST_PROGRAM,
+            "ingest",
+            str(out),
+            *("--scope", "private"),
+            *("--source-id", youtube.source_id(video_id)),
+            *("--kind", youtube.SOURCE_KIND),
+            *("--source-url", youtube.watch_url(video_id)),
+            *("--expires-at", expires_at),
+        ]
+    )
+
+
 @dataclass(frozen=True)
 class _CommandSpec:
     name: str
@@ -397,6 +468,12 @@ _COMMANDS: Final = (
     _CommandSpec("summary", _summary, "Count what a viewer can see.", _summary_arguments),
     _CommandSpec(
         "demo", _demo, "Load the synthetic demo fixtures and their extractions.", _no_arguments
+    ),
+    _CommandSpec(
+        "fetch-youtube",
+        _fetch_youtube,
+        "Download one YouTube video's public comments as JSONL for ingest (private data).",
+        _fetch_youtube_arguments,
     ),
 )
 
@@ -432,8 +509,7 @@ def _open_output(path: Path, protected: Sequence[Path], *, owner_only: bool) -> 
     side files, the command's input) or a symlink (``O_NOFOLLOW``). With ``owner_only`` the
     file is mode 0600 before any data is written, because it holds private comment text.
     """
-    _refuse_unsafe_output(path, protected)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_output(path, protected)
     descriptor = os.open(path, _OUTPUT_FLAGS, _OWNER_ONLY if owner_only else _DEFAULT_FILE_MODE)
     with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
         if owner_only:
@@ -441,9 +517,17 @@ def _open_output(path: Path, protected: Sequence[Path], *, owner_only: bool) -> 
         yield handle
 
 
+def _prepare_output(path: Path, protected: Sequence[Path]) -> None:
+    """Refuse an unsafe output path, then create its parent directories."""
+    _refuse_unsafe_output(path, protected)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 def _refuse_unsafe_output(path: Path, protected: Sequence[Path]) -> None:
     if path.is_dir():
         raise ValueError(f"output path {path} is a directory")
+    if path.is_symlink():  # also refused by O_NOFOLLOW when opened; this says so up front
+        raise ValueError(f"output path {path} is a symlink")
     for other in protected:
         if _same_file(path, other):
             raise ValueError(f"refusing to overwrite {other} with the output file {path}")

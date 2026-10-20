@@ -10,7 +10,7 @@ rules so modules can be built and tested independently. Shared types live in:
 | `vocab.py` | `ComparableKey`, `COMPARABLE_KEYS`, `SELF_DESCRIBED_KEYS`, `DESCRIBED_AS`, `CATEGORICAL_VALUES`, `ZONE_PATTERN`, `YEAR_PATTERN`, `VIEWER_VALUES`, `PROMINENT_KEYS`, `KEY_LABELS`, `VALUE_LABELS`, `is_valid_normalized`, `value_label` |
 | `regions.py` | `US_STATES`, `CA_PROVINCES`, `COUNTRIES`, `REGION_NAMES`, `is_us_state`, `us_postal`, `region_name` |
 | `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus` (incl. `described_differently`), `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` (titles: Search rule 5) |
-| `config.py` | `AppConfig` and sub-models (incl. `OverviewConfig(top_varieties, heatmap_varieties)`, `heatmap_varieties <= top_varieties`), `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
+| `config.py` | `AppConfig` and sub-models (incl. `OverviewConfig(top_varieties, heatmap_varieties)`, `heatmap_varieties <= top_varieties`; `YouTubeConfig(api_base_url, page_size, timeout_s, max_pages, retention_days, api_key_env)`: https base URL without query or final slash, `1 <= page_size <= 100`, finite `timeout_s > 0`, `max_pages >= 1`, `1 <= retention_days <= 30`, an environment-variable name), `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
 | `logging_setup.py` | `configure_logging(cfg)` |
 
 ## Engineering rules (all modules)
@@ -50,6 +50,8 @@ rules so modules can be built and tested independently. Shared types live in:
 ## Data flow
 
 ```
+YouTube Data API v3 --CLI fetch-youtube (youtube.fetch_comments over youtube_http)--> {comment_id, text, permalink, created_at} JSONL (0600)
+   --> printed `ingest --scope private --expires-at fetched_at+retention_days` command
 CSV/JSONL export --ingest.read_comments--> CommentRecord[] --db.sync_source_comments--> SQLite
                                                                      |
 db.iter_comments_for_extraction --CLI export-for-extraction--> {comment_id, text, text_hash} JSONL (0600)
@@ -990,6 +992,70 @@ def prepare_hosted_demo(directory: Path, cfg: AppConfig, now: str) -> HostedDemo
 - `.streamlit/config.toml` sets no `[server]` address or port (Cloud chooses both); the private
   view stays local through the viewer's loopback guard (see Viewer).
 
+## YouTube fetch (`youtube.py`, no I/O; `youtube_http.py`, transport)
+
+```python
+FetchJson = Callable[[str, Mapping[str, str]], Mapping[str, object]]   # fetch_json(url, headers)
+class YouTubeError(ValueError)
+class YouTubeComment(NamedTuple): comment_id: str; text: str; permalink: str; created_at: str
+@dataclass(frozen=True) class FetchResult: video_id; comments: tuple[YouTubeComment, ...]; threads; replies; pages
+API_KEY_HEADER = "X-Goog-Api-Key"; KEY_VIA_PROXY_FLAG = "--key-via-proxy"; SOURCE_KIND = "youtube_comments"
+def parse_video_id(reference: str) -> str
+def api_key_from_env(environ: Mapping[str, str], name: str) -> str
+def resolve_api_key(environ: Mapping[str, str], name: str, *, via_proxy: bool) -> str | None
+def fetch_comments(video_id: str, api_key: str | None, cfg: YouTubeConfig, fetch_json: FetchJson) -> FetchResult
+def api_error(status: int, body: bytes) -> YouTubeError
+def decode_json(body: bytes) -> dict[str, object]
+def source_id(video_id) -> str; def watch_url(video_id) -> str; def permalink(video_id, comment_id) -> str
+def retention_expiry(fetched_at: str, retention_days: int) -> str      # canonical UTC in and out
+# youtube_http.py
+def urllib_transport(timeout_s: float, *handlers: urllib.request.BaseHandler) -> FetchJson
+```
+
+- Video reference: an 11-character id (`[A-Za-z0-9_-]`), or a printable-ASCII http(s) URL on
+  `youtube.com` / `www.youtube.com` / `m.youtube.com` with path `/watch` and exactly one `v`, or
+  on `youtu.be` with path `/ID` (scheme and host case-insensitive, no userinfo or port). Anything
+  else → `YouTubeError`, which never echoes the input (it may be a mistakenly pasted key).
+- API key, two explicit modes chosen by `resolve_api_key` (never a fallback between them):
+  - default: the environment variable named by `youtube.api_key_env`; missing or empty →
+    `YouTubeError` naming the variable and the `--key-via-proxy` alternative (never a value),
+    before any request; anything but printable ASCII without spaces is refused too
+    (http.client would quote an invalid header value in its own error). Sent only as the
+    `X-Goog-Api-Key` header: never in a URL, a log, an error, argv or output.
+  - `via_proxy` (`--key-via-proxy`): the environment is not read and `api_key` is `None`, so no
+    key header is sent; the cloud environment's network proxy attaches `X-Goog-Api-Key` to
+    requests for `www.googleapis.com` (a network secret). Without that secret the API answers
+    403 `forbidden` "unregistered callers", which `api_error` explains as a missing secret.
+- Requests: `GET {api_base_url}/commentThreads?part=snippet,replies&videoId&maxResults=page_size
+  &textFormat=plainText[&pageToken]`, following `nextPageToken` until it is absent. A thread
+  whose `snippet.totalReplyCount` exceeds its inline `replies.comments` is paged through
+  `GET {api_base_url}/comments?part=snippet&parentId=<top-level id>&maxResults&textFormat=plainText`.
+  Every request counts towards `max_pages`; the request after the last allowed one is never
+  made: `YouTubeError` (fail loud, never a truncated result).
+- Records: `comment_id` (validated `[A-Za-z0-9_.-]+`), `text` = `snippet.textDisplay` exactly
+  (missing, non-string, blank or holding a lone surrogate → `YouTubeError`), `permalink` =
+  `https://www.youtube.com/watch?v={video}&lc={comment_id}`, `created_at` =
+  `snippet.publishedAt` as sent (must parse as ISO-8601). Nothing else. Order: API thread
+  order; after each top-level comment its inline replies, then its paged replies;
+  de-duplicated by `comment_id`, first seen wins. `threads`/`replies` count distinct rows of
+  each kind; `pages` counts requests (quota units).
+- Malformed pages (missing `items`, `snippet`, `topLevelComment`, `totalReplyCount`, a
+  non-token `nextPageToken`, wrong JSON types) → `YouTubeError` naming the thread number and
+  comment id, never text. Only `Fetched N threads and M replies (P API pages) for video ID` is
+  logged.
+- `api_error`: `YouTube Data API error (HTTP <status>[, <reason>]): <explanation>`, where
+  `reason` is `error.errors[0].reason` when it is a short token (`commentsDisabled`,
+  `videoNotFound`, `quotaExceeded`, `keyInvalid`, `forbidden`, `badRequest`, ... have fixed
+  explanations). An `error.message` containing "unregistered callers" (a request that carried
+  no key) is explained as a missing network secret for `--key-via-proxy`; that message is only
+  matched, never shown. The API's own message text and all headers are never included.
+- `urllib_transport`: one `urllib.request` GET per call (honours `HTTPS_PROXY`, verifies
+  certificates) with the configured timeout; redirects are refused (urllib would resend the key
+  header to the new address); `HTTPError` → `api_error(status, body)`; other `OSError` /
+  `http.client.HTTPException` → `YouTubeError("cannot reach the YouTube Data API: ...")`; a body
+  that is not a JSON object → `YouTubeError`. All re-raised `from None`. Tests pass an
+  in-process `HTTPSHandler` and never open a socket.
+
 ## CLI (`__main__.py`) — `uv run python -m crop_explorer ...`
 
 ```python
@@ -1013,6 +1079,7 @@ delete-source SOURCE_ID
 purge-expired
 summary [--scope {public,private}]               # default: viewer.scope from the config
 demo                                             # ingest fixtures as synthetic + load extractions
+fetch-youtube VIDEO --out PATH [--key-via-proxy] # one video's comments as ingest JSONL; private
 ```
 
 - `ingest`: without `--expires-at` the stored expiry is kept; `--clear-expiry` removes it
@@ -1027,7 +1094,9 @@ demo                                             # ingest fixtures as synthetic 
   `load-extractions` → the report counts with `rejections` as a number; `export-for-extraction`
   → `{"exported", "out"}`; `delete-source` → `{"source_id", "comments_deleted"}`;
   `purge-expired` → `{"purged_sources": [...]}`; `summary` → `{"scope", ...SUMMARY_KEYS}`;
-  `demo` → `{"import": ImportStats, "extraction": report counts}`.
+  `demo` → `{"import": ImportStats, "extraction": report counts}`; `fetch-youtube` →
+  `{"video_id", "threads", "replies", "rows", "api_pages", "out", "fetched_at", "expires_at",
+  "ingest_command"}`.
 - Errors: `IngestError`/`ValueError`/`KeyError`, `OSError` (missing config, unwritable output),
   `yaml.YAMLError` (malformed config) and `sqlite3.Error` (a file that is not a database) print
   exactly one `error: <message>` line to stderr and exit 2; argparse usage errors also exit 2.
@@ -1038,11 +1107,23 @@ demo                                             # ingest fixtures as synthetic 
   touched, so a bad path exits 2 with nothing loaded. Refused: an existing directory (no mode
   change), a symlink (`O_NOFOLLOW`), the database file or its `-wal`/`-journal`/`-shm` files,
   and (for `--rejections-out`) the command's input file; another regular file is overwritten.
-  Files are opened with `os.open(O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW)`.
+  A symlink is named as such before anything is opened. Files are opened with
+  `os.open(O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW)`.
 - `export-for-extraction` makes the output owner-only (mode 0600, `fchmod`) before writing,
   writes `{comment_id, text, text_hash}` lines (`text_hash` = sha256 of the UTF-8 text, as
   stored) as `ensure_ascii=False` JSON with U+0085/U+2028/U+2029 escaped (one record per
   physical line for any splitter), and skips soft-deleted comments and expired sources.
+- `fetch-youtube` parses the video and resolves the key (`youtube.resolve_api_key(os.environ,
+  cfg.youtube.api_key_env, via_proxy=args.key_via_proxy)`; both before any request), checks `--out`
+  and creates its parent directory (the same refusals as above, before the first request),
+  fetches every page (`youtube_http.urllib_transport(cfg.youtube.timeout_s)`), and only then
+  opens `--out` owner-only (0600, as `export-for-extraction`) and writes the
+  `YouTubeComment` rows; a failed fetch leaves an existing file untouched. `fetched_at` is taken
+  before the first request; `expires_at = youtube.retention_expiry(fetched_at,
+  cfg.youtube.retention_days)`. `ingest_command` is `shlex.join` of `INGEST_PROGRAM` (`uv run
+  python -m crop_explorer`) + `ingest OUT --scope private --source-id youtube-<id> --kind
+  youtube_comments --source-url https://www.youtube.com/watch?v=<id> --expires-at <expires_at>`.
+  There is no option that takes the key; `--key-via-proxy` only switches to the network secret.
 - `demo` runs `demo.build_demo_database(cfg.database.path, cfg, now)`: it ingests
   `fixtures/synthetic_comments.jsonl` as source `synthetic-demo` (kind `synthetic_fixture`,
   rights `synthetic`, no expiry) and loads `fixtures/synthetic_extractions.jsonl`; re-running

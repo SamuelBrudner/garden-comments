@@ -8,6 +8,8 @@
   directory (log level ``WARNING`` / ``INFO``); never touches the repository's ``data/``.
 * ``add_private_source`` / ``source_importer``: import extra comments (``private_unverified``
   by default) and their extractions through the real ingest and extraction code.
+* ``no_network``: any real socket connection or DNS lookup fails the test (for the YouTube
+  fetch tests, which must use their injected fake transport).
 
 No fixture here is autouse, so other test modules are unaffected.
 """
@@ -17,13 +19,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import socket
 import sqlite3
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 import yaml
@@ -270,3 +273,18 @@ def add_private_source(tmp_path: Path) -> SourceImporter:
         return import_source(conn, tmp_path / "extra-sources", **kwargs)
 
     return add
+
+
+# --------------------------------------------------------------------------- network guard
+
+
+def _refuse_network(*args: object, **kwargs: object) -> NoReturn:
+    raise AssertionError("tests must never touch the network; inject a fake transport")
+
+
+@pytest.fixture
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test on any real socket connection or DNS lookup."""
+    monkeypatch.setattr(socket.socket, "connect", _refuse_network)
+    monkeypatch.setattr(socket, "create_connection", _refuse_network)
+    monkeypatch.setattr(socket, "getaddrinfo", _refuse_network)

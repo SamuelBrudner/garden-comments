@@ -159,6 +159,34 @@ class OutsideLink(BaseModel):
         return self
 
 
+YOUTUBE_MAX_RESULTS: Final = 100
+"""Largest ``maxResults`` the YouTube Data API accepts for comment threads and comments."""
+YOUTUBE_MAX_RETENTION_DAYS: Final = 30
+"""YouTube Developer Policies: API data that is not refreshed may be stored at most 30 days."""
+_HTTPS_BASE_URL: Final = r"^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*$"
+"""An https URL with a host and optional path: no credentials, query, fragment or final slash."""
+_ENV_VAR_NAME: Final = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
+
+class YouTubeConfig(BaseModel):
+    """Settings of ``fetch-youtube`` (the official YouTube Data API v3; README, "YouTube").
+
+    ``api_base_url`` is the API root (https only); ``page_size`` is ``maxResults`` per page;
+    ``timeout_s`` bounds each request; ``max_pages`` bounds the API pages fetched for one video
+    (needing more is an error, never a silent truncation); ``retention_days`` is how long the
+    fetched comments may be kept (the suggested ingest expiry is the fetch time plus this);
+    ``api_key_env`` names the environment variable holding the API key (never the key itself).
+    """
+
+    model_config = _STRICT
+    api_base_url: str = Field(pattern=_HTTPS_BASE_URL)
+    page_size: int = Field(ge=1, le=YOUTUBE_MAX_RESULTS)
+    timeout_s: float = Field(gt=0, allow_inf_nan=False)
+    max_pages: int = Field(ge=1)
+    retention_days: int = Field(ge=1, le=YOUTUBE_MAX_RETENTION_DAYS)
+    api_key_env: str = Field(pattern=_ENV_VAR_NAME)
+
+
 class LoggingConfig(BaseModel):
     """Loguru sinks."""
 
@@ -178,6 +206,7 @@ class AppConfig(BaseModel):
     extraction: ExtractionConfig
     quick_chips: tuple[QuickChip, ...]
     outside_context: tuple[OutsideLink, ...]
+    youtube: YouTubeConfig
     logging: LoggingConfig
 
 
