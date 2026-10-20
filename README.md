@@ -50,7 +50,9 @@ uv run streamlit run app.py                # open the public-safe demo viewer
 
 The demo loads 69 fictional comments (`fixtures/synthetic_comments.jsonl`) and their
 extractions, imported with rights status `synthetic`; the viewer labels them as demo data. See
-[`fixtures/SCENARIOS.md`](fixtures/SCENARIOS.md) for what each one exercises.
+[`fixtures/SCENARIOS.md`](fixtures/SCENARIOS.md) for what each one exercises. None of them is a
+real comment: to explore the real, current comments of a video, import them with
+`fetch-youtube` into a database without the demo (see "Importing a YouTube video's comments").
 
 To browse your own private imports on this computer only (never for publication):
 
@@ -168,6 +170,8 @@ the app.
 #    Map others with --id-col and --text-col; --permalink-col / --date-col name an optional
 #    column that must then exist (a typo is an error, never a silent "no links / no dates").
 #    --expires-at sets a rights expiry (see "Rights and the publication gate").
+#    For a YouTube video, fetch-youtube writes this file (see "Importing a YouTube video's
+#    comments").
 uv run python -m crop_explorer ingest data/comments.csv --scope private --source-id my-export
 
 # 2. Export what still needs extraction: an owner-only (0600) JSONL file of
@@ -246,10 +250,13 @@ uv run python -m crop_explorer --help
 
 Every command prints one line of JSON with ids and counts and exits 0; invalid input prints one
 `error: ...` line to stderr and exits 2. Comment text is never printed or logged; only
-`export-for-extraction` writes it, to an owner-only file. `--out` and `--rejections-out` are
-checked before anything is read or loaded: they refuse a directory, a symlink, the database
+`export-for-extraction` and `fetch-youtube` write it, to owner-only files. `--out` and
+`--rejections-out` are checked before anything is read, loaded or fetched: they refuse a
+directory, a symlink, the database
 (and its `-wal`/`-journal`/`-shm` files) and, for `--rejections-out`, the input file.
-`--db PATH` and `--config PATH` work with every command.
+`--db PATH` and `--config PATH` work with every command. Options must be spelled out in full
+(an abbreviation such as `--only` is refused), and a usage error names an unrecognized option
+but never repeats a value given with it.
 
 The database holds comment text verbatim: a new database file is created owner-only (0600), in
 a directory created owner-only (0700) when missing. Deleting or purging a source also removes
@@ -262,6 +269,131 @@ and variety grouping keys are normalised at load time, so re-loading extractions
 them (since this version a variety key ignores spaces and hyphens, so "Sun Gold" and "Sungold"
 group together and a search for either finds both; the viewer always shows the name as
 written).
+
+## Importing a YouTube video's comments
+
+`fetch-youtube` downloads every public comment and reply under one video through the official
+[YouTube Data API v3](https://developers.google.com/youtube/v3/docs/commentThreads/list) and
+writes a JSONL file that `ingest` reads unchanged. It needs an API key of your own. In the
+[Google Cloud console](https://console.cloud.google.com/), create or pick a project, enable
+**YouTube Data API v3**, create an **API key** (APIs & Services, Credentials) and set its
+restrictions: **API restrictions**: restrict the key to YouTube Data API v3; **Application
+restrictions**: **None** (or **IP addresses**). A key restricted to websites (HTTP referrers),
+Android apps or iOS apps is refused for a command-line tool, which sends none of those. **Never
+paste the key into a chat (an AI assistant included), an issue, a config file, a command line
+or a commit.** If it leaks, delete it in the console and create a new one. Then give the key to
+the command in one of two explicit ways (there is no fallback from one to the other):
+
+1. **Environment variable (the default).** Put the key in the variable named by
+   `youtube.api_key_env` (default `YOUTUBE_API_KEY`), in your own terminal. If it is missing
+   or empty the command stops before any request with an error naming the variable (and the
+   `--key-via-proxy` alternative), never its value.
+
+   ```bash
+   read -rs YOUTUBE_API_KEY && export YOUTUBE_API_KEY   # paste the key: not echoed, not in shell history
+   uv run python -m crop_explorer fetch-youtube 'https://www.youtube.com/watch?v=GUmvL7s6b2w' \
+       --out data/youtube-GUmvL7s6b2w.jsonl
+   ```
+
+2. **Network secret (`--key-via-proxy`).** In a cloud environment whose network proxy can
+   attach secrets to outgoing requests (for example Claude Code on the web: the environment's
+   settings, **Network secrets**), add a secret for the host `www.googleapis.com` with the
+   header `X-Goog-Api-Key` and the key as its value; a new session picks it up. Run the command
+   with `--key-via-proxy`: it reads no variable and sends no key, and the proxy adds the header
+   on the way out, so the key never enters the session at all. If the secret is missing, the
+   API answers 403 "unregistered callers" and the command says so: `error: YouTube Data API
+   error (HTTP 403, forbidden): the request reached the API without an API key ("unregistered
+   callers"): with --key-via-proxy this means the network proxy has no network secret ...`.
+
+   ```bash
+   uv run python -m crop_explorer fetch-youtube GUmvL7s6b2w --key-via-proxy \
+       --out data/youtube-GUmvL7s6b2w.jsonl
+   ```
+
+Keep `--out` under `data/`, which git ignores: **never commit fetched comments.** The video may
+be given as its 11-character id, a `youtube.com/watch?v=ID` URL or a
+`youtu.be/ID` URL; anything else is refused. The command prints one line of JSON: `threads` and
+`replies` (distinct top-level comments and replies written), `rows` (their sum, the lines in the
+file), `api_pages` (requests made, i.e. quota units spent), `out`, `fetched_at`, `expires_at` and
+`ingest_command`, the exact next step. Run that command as printed; it looks like this:
+
+```bash
+uv run python -m crop_explorer ingest data/youtube-GUmvL7s6b2w.jsonl --scope private \
+    --source-id youtube-GUmvL7s6b2w --kind youtube_comments \
+    --source-url 'https://www.youtube.com/watch?v=GUmvL7s6b2w' --expires-at 2026-11-19T12:00:00Z \
+    --replace
+```
+
+`--config PATH` (unless it is the default) and `--db PATH` given to `fetch-youtube` are
+repeated in the printed command, so the comments land in the database you named, the one your
+`purge-expired --db PATH` cleans. `--replace` is there because the source id is the video's:
+a re-fetch is always the same dataset, even when none of the comments stored before is still on
+the video. A video without public comments is an error (`video ... has no public comments:
+nothing to import`, exit 2): no file is written and no command printed.
+
+**Real comments only.** The `demo` database holds 69 made-up comments. To explore only the
+video's real comments, import them into a database of their own, then browse it privately:
+
+```bash
+uv run python -m crop_explorer --db data/youtube.sqlite fetch-youtube GUmvL7s6b2w \
+    --out data/youtube-GUmvL7s6b2w.jsonl      # prints the ingest command, with --db data/youtube.sqlite
+# run the printed ingest command, then:
+uv run streamlit run app.py --server.address localhost -- --scope private --db data/youtube.sqlite
+```
+
+(Or remove the demo from the default database first: `uv run python -m crop_explorer
+delete-source synthetic-demo`.) Then continue with step 2 of the round trip above
+(`export-for-extraction`, with the same `--db`) so the viewer can group the comments by variety
+and conditions; until then it lists them as not yet analysed for growing conditions.
+
+- **What is written.** One row per comment with exactly `comment_id`, `text` (the API's
+  plain-text `textDisplay`, kept exactly), `permalink`
+  (`https://www.youtube.com/watch?v=<video>&lc=<comment id>`) and `created_at` (`publishedAt`).
+  Replies are rows of their own, right after their thread, in the API's order; a comment id
+  seen twice is written once (the first copy). No author names, channel ids, avatars, like
+  counts or other metrics are written. The file is owner-only (0600) and as private as the
+  database: it holds comment text verbatim.
+- **Private only.** Import with `--scope private`, as the printed command does:
+  `private_unverified` comments never reach a public viewer. Being able to fetch comments does
+  not clear them for publication (see "Rights and the publication gate").
+- **30 days at most.** The [YouTube Developer
+  Policies](https://developers.google.com/youtube/terms/developer-policies) allow API data
+  that is not refreshed to be stored for at most 30 days. The printed command sets
+  `--expires-at` to the fetch time plus `youtube.retention_days` (1-30, default 30). After that
+  the source disappears from every view and `purge-expired` deletes it: run `purge-expired`
+  regularly (for example daily, with the same `--db`). It cleans the database only. Every
+  **file** made from the fetch holds API data too and must be deleted by `expires_at` as well:
+  the fetched JSONL (`data/youtube-<video>.jsonl`), the `export-for-extraction` file
+  (`data/to_extract.jsonl`, the comment text verbatim), the model's output
+  (`data/parsed_comments.jsonl`, quotes from it) and `data/rejections.jsonl` (comment ids). To
+  keep a video longer, fetch it again before it expires and run the new `ingest` command: that
+  refreshes the stored comments (comments removed from the video are removed here too) and
+  moves the expiry. An expired source must be purged before it can be imported again.
+- **Quota.** Every API page costs one unit of the key's daily quota (10,000 units by default,
+  reset at midnight Pacific Time). A page holds up to `youtube.page_size` (100) threads; a
+  thread with more replies than the few the API includes inline costs at least one more page.
+  `youtube.max_pages` (default 1000) caps one fetch: a video that needs more fails with an
+  error instead of being cut short.
+- **Errors.** An API error prints one line with the HTTP status and reason, e.g. `error: YouTube
+  Data API error (HTTP 403, commentsDisabled): comments are turned off for this video` (also
+  `videoNotFound`, `quotaExceeded`, `keyInvalid`, `forbidden`, ...), and exits 2. Key problems
+  that Google reports in the error's details are named and explained too: `API_KEY_INVALID`
+  (check the variable or the network secret), `API_KEY_HTTP_REFERRER_BLOCKED` and the other
+  application-restriction refusals (set **Application restrictions** to None or IP addresses),
+  `API_KEY_SERVICE_BLOCKED` (the key's API restrictions leave out YouTube Data API v3) and
+  `SERVICE_DISABLED` (the API is not enabled in the project). A failed fetch writes nothing:
+  `--out` is checked before the first request (a directory, a symlink and the database are
+  refused) and opened only after the last page, so an earlier file stays as it was.
+- **The key stays out of everything.** Read from the environment, it is sent only in the
+  `X-Goog-Api-Key` request header, and only to Google's API hosts: `youtube.api_base_url` must
+  be on `www.googleapis.com` or `youtube.googleapis.com` (no other host or port is accepted).
+  It never appears in a URL, a log line, an error message, the output file or the printed
+  command, and there is no option to pass it on the command line (`fetch-youtube --help` names
+  the variable; a mistyped `--key=...` is refused without repeating the value). A configuration
+  error never repeats the value of the setting either, in case a key was pasted into the wrong
+  place. With `--key-via-proxy` the command never holds the key. Redirects are refused, so the
+  header is never forwarded to another address. Requests use the standard library (`urllib`,
+  which honours `HTTPS_PROXY`). Logs carry counts only, never comment text.
 
 ## Rights and the publication gate
 
@@ -312,6 +444,7 @@ config file):
 | `extraction.hypothetical_markers` | Phrases that make a sentence advice, a plan or a wish; facts quoted from such sentences (and from questions) are rejected. A marker starting with `^` (`^maybe`) counts only at the start of a sentence. Keep the list in `docs/EXTRACTION_PROMPT.md` Part 2 in step (a test checks it). |
 | `quick_chips` | Label plus the garden conditions each chip sets. |
 | `outside_context` | Opt-in outbound links, each badged with its evidence type: `regional climate reference` (USDA zone map, NOAA normals, NASA climatology), `published external trial` (university variety trials) or `community report` (outside gardeners' own ratings, e.g. Cornell's Vegetable Varieties for Gardeners; never this channel's comments). `reported conditions` is not allowed here, and a government host (`*.gov`, `*.mil`, `*.gov.au`, `*.gc.ca`, ...) can never be labelled `community report`. Optional `overlay: zones` or `overlay: normals` marks a regional climate reference whose kind of data is also a map overlay (its row then says "Also available as a map overlay"); only a `regional climate reference` may have one. |
+| `youtube.api_base_url`, `youtube.page_size`, `youtube.timeout_s`, `youtube.max_pages`, `youtube.retention_days`, `youtube.api_key_env` | `fetch-youtube`: the API root (https only, on `www.googleapis.com` or `youtube.googleapis.com`, no port), comments per API page (1-100), seconds each request may take, the most API pages one video may need (more is an error, never a truncation), the days fetched comments may be kept (1-30; the printed `--expires-at`), and the name of the environment variable holding the API key (upper case, never the key itself; not read with `--key-via-proxy`). |
 | `logging.level`, `logging.json_path` | Loguru level and optional JSON-lines log file (never receives comment text). |
 
 ## Testing and quality
@@ -356,7 +489,9 @@ region and never on a card. The browser test is
 marked `browser`, takes about 40 seconds and needs Playwright's Chromium (`uv run playwright
 install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
 `tests/test_code_standards.py` fails for any function in `src/`, `app.py` or `streamlit_app.py`
-with more than 15 code lines. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in
+with more than 15 code lines. The `fetch-youtube` tests serve invented API pages
+(`tests/synthetic_youtube.py`) through an injected transport and fail on any real network
+connection. `tests/test_prompt_consistency.py` keeps Part 2 of `docs/EXTRACTION_PROMPT.md` in
 step with the code: its marker list, rejection codes, region codes and aliases, documented
 phrasings, look-alikes and crop synonyms must match what the loader reads, and its worked
 example must load with zero rejections. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
@@ -489,6 +624,8 @@ uv run pytest tests/test_overlays.py tests/test_overlay_charts.py -q
 │   ├── views.py                  # read-side types (garden, views, match and search results)
 │   ├── config.py, logging_setup.py # validated config.yaml (labels, limits); loguru sinks
 │   ├── ingest.py                 # CSV/JSONL import
+│   ├── youtube.py                # fetch-youtube: video ids, API pagination, records (no I/O)
+│   ├── youtube_http.py           # its thin urllib transport (key header only, no redirects)
 │   ├── extraction.py             # extractor-output validator and loader
 │   ├── normalization.py          # small deterministic synonym tables
 │   ├── environment_match.py      # pure, explainable matching and tiers

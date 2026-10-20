@@ -12,19 +12,37 @@ import csv
 import hashlib
 import json
 import os
+import shlex
 import sqlite3
 import stat
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import yaml
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from crop_explorer import db, demo
+import crop_explorer.__main__ as cli_module
+from conftest import invoke_cli
+from crop_explorer import db, demo, youtube_http
+from crop_explorer.config import load_config
+from crop_explorer.youtube import FetchJson
+from synthetic_youtube import (
+    API_KEY,
+    AUTHOR,
+    UNREGISTERED_CALLERS,
+    VIDEO,
+    FakeApi,
+    comment,
+    error_body,
+    reply,
+    thread,
+)
 
 if TYPE_CHECKING:
     from conftest import CliEnv, CliRun
@@ -42,6 +60,7 @@ COMMANDS = (
     "purge-expired",
     "summary",
     "demo",
+    "fetch-youtube",
 )
 STATS_KEYS = [
     "source_id",
@@ -212,6 +231,8 @@ def test_missing_command_is_a_usage_error(cli_env: CliEnv) -> None:
         ["summary", "--scope", "synthetic"],  # not a viewer scope
         ["export-for-extraction"],  # --out is required
         ["delete-source"],
+        ["fetch-youtube"],
+        ["fetch-youtube", "GUmvL7s6b2w"],  # --out is required
     ],
 )
 def test_invalid_arguments_exit_2_with_usage(cli_env: CliEnv, argv: list[str]) -> None:
@@ -999,3 +1020,500 @@ def test_warning_level_config_keeps_stderr_quiet(cli_env: CliEnv) -> None:
     assert run.code == 0
     assert run.err == ""
     assert "Read 69 comments" not in cli_env.log_text()
+
+
+# --------------------------------------------------------------------------- fetch-youtube
+
+YT_THREADS = {
+    "UgSynA": "Synthetic: Sungold in grow bags on a sunny balcony, zone 7a, fruit until frost.",
+    "UgSynB": "Synthetic: Cherokee Purple split after every storm in our clay soil.",
+    "UgSynC": "Synthetic: Juliet kept producing through a hot, humid August in zone 8b.",
+}
+YT_REPLIES = {
+    "UgSynA.R1": "Synthetic reply: same here with Sungold in containers.",
+    "UgSynA.R2": "Synthetic reply: mine cracked in grow bags after rain.",
+}
+YT_TEXTS = {**YT_THREADS, **YT_REPLIES}
+YT_ORDER = ["UgSynA", "UgSynA.R1", "UgSynA.R2", "UgSynB", "UgSynC"]
+FETCHED_AT = "2026-10-20T12:00:00Z"
+YT_EXPIRES = "2026-11-19T12:00:00Z"
+PROGRAM = ["uv", "run", "python", "-m", "crop_explorer"]
+"""How the printed ``ingest`` command runs the CLI; ``argv[len(PROGRAM):]`` goes to ``main``."""
+
+
+def yt_comment(comment_id: str) -> dict[str, Any]:
+    if "." in comment_id:
+        parent, suffix = comment_id.split(".")
+        return reply(parent, suffix, YT_TEXTS[comment_id])
+    return comment(comment_id, YT_TEXTS[comment_id])
+
+
+@pytest.fixture
+def youtube_api(monkeypatch: pytest.MonkeyPatch, no_network: None) -> FakeApi:
+    """Synthetic API pages behind the real urllib transport, and a key in the environment.
+
+    Three threads on two pages; the first has two replies, one inline, so its replies are
+    paged too: 3 threads + 2 replies = 5 rows from 3 API pages.
+    """
+    api = FakeApi(
+        thread_pages=[
+            [
+                thread(yt_comment("UgSynA"), yt_comment("UgSynA.R1"), total=2),
+                thread(yt_comment("UgSynB")),
+            ],
+            [thread(yt_comment("UgSynC"))],
+        ],
+        reply_pages={"UgSynA": [[yt_comment("UgSynA.R1"), yt_comment("UgSynA.R2")]]},
+    )
+    real_transport = youtube_http.urllib_transport
+
+    def transport(timeout_s: float) -> FetchJson:
+        return real_transport(timeout_s, api.https_handler())
+
+    monkeypatch.setattr(youtube_http, "urllib_transport", transport)
+    monkeypatch.setenv("YOUTUBE_API_KEY", API_KEY)
+    return api
+
+
+def expected_ingest_command(out: Path, *global_options: str | Path) -> str:
+    """The printed command: ``fetch-youtube``'s own ``--config``/``--db``, then ``ingest``."""
+    return shlex.join(
+        [
+            *PROGRAM,
+            *(str(option) for option in global_options),
+            "ingest",
+            str(out),
+            "--scope",
+            "private",
+            "--source-id",
+            f"youtube-{VIDEO}",
+            "--kind",
+            "youtube_comments",
+            "--source-url",
+            f"https://www.youtube.com/watch?v={VIDEO}",
+            "--expires-at",
+            YT_EXPIRES,
+            "--replace",
+        ]
+    )
+
+
+def run_printed(command: str) -> CliRun:
+    """Run a printed ``uv run python -m crop_explorer ...`` command exactly as printed."""
+    argv = shlex.split(command)
+    assert argv[: len(PROGRAM)] == PROGRAM
+    return invoke_cli(argv[len(PROGRAM) :])
+
+
+def test_fetch_youtube_writes_an_owner_only_jsonl_and_prints_counts(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli_module, "utc_now_iso", lambda: FETCHED_AT)
+    out = tmp_path / "youtube" / "comments.jsonl"
+
+    payload = ok(cli_env.run("fetch-youtube", f"https://youtu.be/{VIDEO}?si=Syn", "--out", out))
+
+    assert payload == {
+        "video_id": VIDEO,
+        "threads": 3,
+        "replies": 2,
+        "rows": 5,
+        "api_pages": 3,
+        "out": str(out),
+        "fetched_at": FETCHED_AT,
+        "expires_at": YT_EXPIRES,
+        "ingest_command": expected_ingest_command(out, "--config", cli_env.config),
+    }
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    rows = read_export(out)
+    assert rows == [
+        {
+            "comment_id": cid,
+            "text": YT_TEXTS[cid],
+            "permalink": f"https://www.youtube.com/watch?v={VIDEO}&lc={cid}",
+            "created_at": "2026-09-01T10:00:00Z",
+        }
+        for cid in YT_ORDER
+    ]
+    assert AUTHOR not in out.read_text(encoding="utf-8")
+
+
+def to_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+KEY_MODES = {"environment": (), "proxy": ("--key-via-proxy",)}
+"""Extra ``fetch-youtube`` arguments of each key mode (the variable is set in both)."""
+
+
+def sent_keys(api: FakeApi) -> list[str | None]:
+    """The ``X-Goog-Api-Key`` header of every request (``None`` when absent)."""
+    return [request.headers.get("x-goog-api-key") for request in api.requests]
+
+
+@pytest.mark.parametrize("mode", list(KEY_MODES))
+def test_fetch_then_ingest_privately_end_to_end(
+    verbose_cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, mode: str
+) -> None:
+    """Fake API -> fetch-youtube -> the printed ingest command -> private rows in the database."""
+    env = verbose_cli_env
+    out = tmp_path / "yt.jsonl"
+    watch = f"https://www.youtube.com/watch?v={VIDEO}"
+
+    fetch_run = env.run("fetch-youtube", watch, "--out", out, *KEY_MODES[mode])
+    fetched = ok(fetch_run)
+    assert sent_keys(youtube_api) == [API_KEY if mode == "environment" else None] * 3
+    assert [url for url in youtube_api.urls if API_KEY in url or "key=" in url] == []
+    argv = shlex.split(fetched["ingest_command"])
+    assert argv[len(PROGRAM) : len(PROGRAM) + 3] == ["--config", str(env.config), "ingest"]
+    ingest_run = run_printed(fetched["ingest_command"])  # as printed: no --config added here
+    imported = ok(ingest_run)
+
+    source = f"youtube-{VIDEO}"
+    assert imported == {
+        "source_id": source,
+        "inserted": 5,
+        "updated": 0,
+        "unchanged": 0,
+        "deleted": 0,
+        "rights_status": "private_unverified",
+        "expires_at": fetched["expires_at"],
+    }
+    lifetime = to_datetime(fetched["expires_at"]) - to_datetime(fetched["fetched_at"])
+    assert lifetime == timedelta(days=30)
+    row = source_row(env, source)
+    assert (row["kind"], row["rights_status"]) == ("youtube_comments", "private_unverified")
+    assert row["source_url"] == f"https://www.youtube.com/watch?v={VIDEO}"
+    conn = env.connect()
+    try:
+        views = db.load_comment_views(conn, "private", NOW, None)
+    finally:
+        conn.close()
+    assert [(v.comment_id, v.text, v.permalink, v.created_at) for v in views] == [
+        (
+            cid,
+            YT_TEXTS[cid],
+            f"https://www.youtube.com/watch?v={VIDEO}&lc={cid}",
+            "2026-09-01T10:00:00Z",
+        )
+        for cid in YT_ORDER
+    ]
+    assert summary(env)["comments"] == 0  # private_unverified never reaches a public viewer
+    assert summary(env, "private")["comments"] == 5
+    log = env.log_text()
+    assert "3 threads" in log  # INFO logging carries counts ...
+    emitted = "\n".join([fetch_run.out, fetch_run.err, ingest_run.out, ingest_run.err, log])
+    assert [text for text in YT_TEXTS.values() if text in emitted] == []  # ... never text
+    assert API_KEY not in emitted
+    assert API_KEY not in out.read_text(encoding="utf-8")
+    assert API_KEY.encode() not in env.db_path.read_bytes()
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_fetch_youtube_without_a_key_fails_before_any_request(
+    cli_env: CliEnv,
+    youtube_api: FakeApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("YOUTUBE_API_KEY")
+    else:
+        monkeypatch.setenv("YOUTUBE_API_KEY", value)
+    out = tmp_path / "yt.jsonl"
+
+    line = failed(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+
+    assert "YOUTUBE_API_KEY" in line
+    assert "--key-via-proxy" in line  # the explicit alternative, never a silent fallback
+    assert youtube_api.requests == []
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("value", [None, "", "not one key"])
+def test_fetch_youtube_key_via_proxy_never_reads_the_variable(
+    cli_env: CliEnv,
+    youtube_api: FakeApi,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+) -> None:
+    if value is None:
+        monkeypatch.delenv("YOUTUBE_API_KEY")
+    else:
+        monkeypatch.setenv("YOUTUBE_API_KEY", value)  # would be refused without the flag
+    out = tmp_path / "yt.jsonl"
+
+    payload = ok(cli_env.run("fetch-youtube", VIDEO, "--out", out, "--key-via-proxy"))
+
+    assert payload["rows"] == len(YT_ORDER)
+    assert sent_keys(youtube_api) == [None] * 3
+    assert "--key-via-proxy" not in payload["ingest_command"]  # ingest needs no key
+
+
+def test_fetch_youtube_key_via_proxy_without_a_network_secret_says_so(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    youtube_api.failure = (403, error_body(403, "forbidden", UNREGISTERED_CALLERS))
+    out = tmp_path / "yt.jsonl"
+
+    line = failed(cli_env.run("fetch-youtube", VIDEO, "--out", out, "--key-via-proxy"))
+
+    assert "HTTP 403, forbidden" in line
+    assert "network secret" in line and "X-Goog-Api-Key" in line
+    assert len(youtube_api.requests) == 1
+    assert not out.exists()
+
+
+def test_fetch_youtube_reads_the_key_from_the_configured_variable(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    edit_config(cli_env, youtube={"api_key_env": "SYNTHETIC_YT_KEY"})
+    monkeypatch.setenv("SYNTHETIC_YT_KEY", API_KEY)
+    monkeypatch.delenv("YOUTUBE_API_KEY")
+
+    ok(cli_env.run("fetch-youtube", VIDEO, "--out", tmp_path / "yt.jsonl"))
+
+    assert {request.headers["x-goog-api-key"] for request in youtube_api.requests} == {API_KEY}
+
+
+TYPED_KEY = "SYNTHETIC-typed-key-value"
+"""A value someone typed after a guessed key option: it must never reach stderr."""
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--api-key", TYPED_KEY],
+        [f"--api-key={TYPED_KEY}"],
+        ["--key", TYPED_KEY],
+        [f"--key={TYPED_KEY}"],  # argparse would expand --key to --key-via-proxy
+        [f"--key-via-proxy={TYPED_KEY}"],
+        ["--key-via-proxy", TYPED_KEY],
+        ["--key"],  # an abbreviation never selects the proxy mode
+        ["--k"],
+    ],
+)
+def test_fetch_youtube_takes_no_key_on_the_command_line_and_never_echoes_one(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, extra: list[str]
+) -> None:
+    run = cli_env.run("fetch-youtube", VIDEO, "--out", tmp_path / "yt.jsonl", *extra)
+
+    assert (run.code, run.out) == (2, "")
+    assert "usage" in run.err
+    assert TYPED_KEY not in run.err
+    assert run.err_lines[-1].startswith("python -m crop_explorer")
+    assert ": error: " in run.err_lines[-1]
+    assert youtube_api.requests == []
+    assert not (tmp_path / "yt.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "named"),
+    [
+        (["summary", "--sc", "private"], "--sc"),  # abbreviations are refused everywhere
+        (["summary", "--scope", "private", "extra-word"], "unrecognized arguments"),
+    ],
+)
+def test_unrecognized_arguments_name_options_but_never_values(
+    cli_env: CliEnv, argv: list[str], named: str
+) -> None:
+    run = cli_env.run(*argv)
+
+    assert (run.code, run.out) == (2, "")
+    assert named in run.err_lines[-1]
+    assert "private" not in run.err_lines[-1] and "extra-word" not in run.err
+
+
+def test_fetch_youtube_help_names_the_key_variable_of_the_default_mode() -> None:
+    run = invoke_cli(["fetch-youtube", "--help"])
+
+    assert run.code == 0
+    unwrapped = "".join(run.out.split())  # argparse may wrap at hyphens
+    for name in (load_config().youtube.api_key_env, "youtube.api_key_env", "X-Goog-Api-Key"):
+        assert name in unwrapped
+    assert "--key-via-proxy" in unwrapped
+
+
+@pytest.mark.parametrize(
+    "video",
+    [
+        "not a video",
+        f"https://example.org/watch?v={VIDEO}",
+        f"https://www.youtube.com/shorts/{VIDEO}",
+    ],
+)
+def test_fetch_youtube_rejects_a_bad_video_before_any_request(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, video: str
+) -> None:
+    line = failed(cli_env.run("fetch-youtube", video, "--out", tmp_path / "yt.jsonl"))
+
+    assert "video id" in line
+    assert youtube_api.requests == []
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (403, "commentsDisabled"),
+        (404, "videoNotFound"),
+        (403, "quotaExceeded"),
+        (400, "keyInvalid"),
+        (403, "forbidden"),
+    ],
+)
+def test_fetch_youtube_api_errors_leave_an_existing_output_untouched(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, status: int, reason: str
+) -> None:
+    youtube_api.failure = (status, error_body(status, reason))
+    out = tmp_path / "yt.jsonl"
+    out.write_text("previous fetch\n", encoding="utf-8")
+
+    line = failed(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+
+    assert f"HTTP {status}, {reason}" in line
+    assert API_KEY not in line
+    assert out.read_text(encoding="utf-8") == "previous fetch\n"
+
+
+def test_fetch_youtube_past_max_pages_fails_and_writes_nothing(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    edit_config(cli_env, youtube={"max_pages": 2})
+    out = tmp_path / "yt.jsonl"
+
+    line = failed(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+
+    assert "max_pages" in line
+    assert len(youtube_api.requests) == 2
+    assert not out.exists()
+
+
+def test_fetch_youtube_of_a_video_without_comments_fails_and_keeps_an_earlier_file(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    """``ingest`` refuses an empty file, so an empty fetch must not print a doomed command."""
+    youtube_api.thread_pages, youtube_api.reply_pages = [[]], {}
+    out = tmp_path / "yt.jsonl"
+    out.write_text("previous fetch\n", encoding="utf-8")
+
+    line = failed(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+
+    assert f"video {VIDEO} has no public comments: nothing to import" in line
+    assert f"delete-source youtube-{VIDEO}" in line
+    assert len(youtube_api.requests) == 1
+    assert out.read_text(encoding="utf-8") == "previous fetch\n"
+
+
+def test_fetch_youtube_uses_the_configured_timeout_for_every_request(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    edit_config(cli_env, youtube={"timeout_s": 7.5})
+
+    ok(cli_env.run("fetch-youtube", VIDEO, "--out", tmp_path / "yt.jsonl"))
+
+    assert youtube_api.timeouts == [7.5] * 3
+
+
+def test_the_printed_ingest_command_imports_into_the_database_given_to_fetch(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    """``--db`` (and ``--config``) given to fetch-youtube are part of the printed command."""
+    private_db = tmp_path / "private" / "real.sqlite"
+    out = tmp_path / "yt.jsonl"
+
+    fetched = ok(cli_env.run("--db", private_db, "fetch-youtube", VIDEO, "--out", out))
+    imported = ok(run_printed(fetched["ingest_command"]))
+
+    options = shlex.split(fetched["ingest_command"])[len(PROGRAM) : len(PROGRAM) + 5]
+    assert options == ["--config", str(cli_env.config), "--db", str(private_db), "ingest"]
+    assert imported["inserted"] == len(YT_ORDER)
+    assert summary(cli_env, "private", "--db", str(private_db))["comments"] == len(YT_ORDER)
+    assert not cli_env.db_path.exists()  # the configured database was never touched
+
+
+def test_the_printed_ingest_command_names_no_default_config(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", cli_env.config)
+    out = tmp_path / "yt.jsonl"
+
+    fetched = ok(invoke_cli(["fetch-youtube", VIDEO, "--out", str(out)]))
+
+    assert shlex.split(fetched["ingest_command"])[len(PROGRAM)] == "ingest"
+    assert "--config" not in fetched["ingest_command"]
+    assert "--db" not in fetched["ingest_command"]
+
+
+def test_a_refetch_sharing_no_comment_id_with_the_stored_copy_imports_as_printed(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    """Every old comment was removed and a new one posted: the refresh still goes through."""
+    out = tmp_path / "yt.jsonl"
+    ok(run_printed(ok(cli_env.run("fetch-youtube", VIDEO, "--out", out))["ingest_command"]))
+    fresh = comment("UgSynD", "Synthetic: a new comment after the old ones were removed.")
+    youtube_api.thread_pages, youtube_api.reply_pages = [[thread(fresh)]], {}
+
+    refetched = ok(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+    imported = ok(run_printed(refetched["ingest_command"]))
+
+    assert (imported["inserted"], imported["deleted"]) == (1, len(YT_ORDER))
+    assert imported["rights_status"] == "private_unverified"
+    assert summary(cli_env, "private")["comments"] == 1
+
+
+def test_a_key_put_in_the_config_by_mistake_is_never_echoed_by_any_command(
+    cli_env: CliEnv,
+) -> None:
+    edit_config(cli_env, youtube={"api_key_env": "AIzaSy-synthetic-not-a-real-key"})
+
+    line = failed(cli_env.run("summary"))
+
+    assert "api_key_env" in line
+    assert "synthetic" not in line
+
+
+def test_fetch_youtube_overwrites_a_regular_file_as_owner_only(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    out = tmp_path / "yt.jsonl"
+    out.write_text("stale", encoding="utf-8")
+    out.chmod(0o644)
+
+    ok(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    assert [row["comment_id"] for row in read_export(out)] == YT_ORDER
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "database", "under-a-file"])
+def test_fetch_youtube_refuses_unsafe_outputs_before_any_request(
+    demo_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, kind: str
+) -> None:
+    if kind == "directory":
+        target = tmp_path / "data"
+        target.mkdir()
+    elif kind == "under-a-file":
+        (tmp_path / "plain-file").write_text("x", encoding="utf-8")
+        target = tmp_path / "plain-file" / "yt.jsonl"
+    elif kind == "symlink":
+        (tmp_path / "elsewhere.txt").write_text("keep me", encoding="utf-8")
+        target = tmp_path / "yt.jsonl"
+        target.symlink_to(tmp_path / "elsewhere.txt")
+    else:
+        target = demo_env.db_path
+    before = target.read_bytes() if target.is_file() else None
+
+    failed(demo_env.run("fetch-youtube", VIDEO, "--out", target))
+
+    assert youtube_api.requests == []
+    assert (target.read_bytes() if target.is_file() else None) == before
+
+
+def edit_config(env: CliEnv, **sections: dict[str, Any]) -> None:
+    """Update keys of the environment's config file, section by section."""
+    raw = yaml.safe_load(env.config.read_text(encoding="utf-8"))
+    for name, values in sections.items():
+        raw[name].update(values)
+    env.config.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")

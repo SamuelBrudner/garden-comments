@@ -9,7 +9,7 @@ from typing import Final, Literal, Self
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from crop_explorer.views import GardenContext, ViewerScope
 
@@ -206,6 +206,50 @@ class OutsideLink(BaseModel):
         return self
 
 
+YOUTUBE_MAX_RESULTS: Final = 100
+"""Largest ``maxResults`` the YouTube Data API accepts for comment threads and comments."""
+YOUTUBE_MAX_RETENTION_DAYS: Final = 30
+"""YouTube Developer Policies: API data that is not refreshed may be stored at most 30 days."""
+YOUTUBE_API_HOSTS: Final = frozenset({"www.googleapis.com", "youtube.googleapis.com"})
+"""The only hosts ``youtube.api_base_url`` may name: the API key header is sent to them."""
+_HTTPS_BASE_URL: Final = r"^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*$"
+"""An https URL with a host and optional path: no credentials, query, fragment or final slash."""
+_ENV_VAR_NAME: Final = r"^[A-Z_][A-Z0-9_]*$"
+"""A conventional (upper-case) variable name: a Google API key mixes cases, so it never is one."""
+
+
+class YouTubeConfig(BaseModel):
+    """Settings of ``fetch-youtube`` (the official YouTube Data API v3; README, "YouTube").
+
+    ``api_base_url`` is the API root (https only, on one of :data:`YOUTUBE_API_HOSTS`, without
+    a port, because the API key header goes there); ``page_size`` is ``maxResults`` per page;
+    ``timeout_s`` bounds each request; ``max_pages`` bounds the API pages fetched for one video
+    (needing more is an error, never a silent truncation); ``retention_days`` is how long the
+    fetched comments may be kept (the suggested ingest expiry is the fetch time plus this);
+    ``api_key_env`` names the environment variable holding the API key (never the key itself;
+    upper case, so a key put there by mistake is refused).
+    """
+
+    model_config = _STRICT
+    api_base_url: str = Field(pattern=_HTTPS_BASE_URL)
+    page_size: int = Field(ge=1, le=YOUTUBE_MAX_RESULTS)
+    timeout_s: float = Field(gt=0, allow_inf_nan=False)
+    max_pages: int = Field(ge=1)
+    retention_days: int = Field(ge=1, le=YOUTUBE_MAX_RETENTION_DAYS)
+    api_key_env: str = Field(pattern=_ENV_VAR_NAME)
+
+    @field_validator("api_base_url")
+    @classmethod
+    def _google_api_host(cls, url: str) -> str:
+        """Refuse any host but Google's API hosts (the message never repeats the URL)."""
+        if urlsplit(url).netloc.lower() not in YOUTUBE_API_HOSTS:
+            raise ValueError(
+                f"the host must be one of {', '.join(sorted(YOUTUBE_API_HOSTS))}, without a "
+                "port: the API key header is sent to it"
+            )
+        return url
+
+
 class LoggingConfig(BaseModel):
     """Loguru sinks."""
 
@@ -215,9 +259,14 @@ class LoggingConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """Root configuration object."""
+    """Root configuration object.
 
-    model_config = _STRICT
+    Validation errors name the setting and the rule but never the value given
+    (``hide_input_in_errors``, which only takes effect on this root model): they reach stderr
+    and the viewer page, and a value may be an API key pasted into the wrong setting.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     database: DatabaseConfig
     viewer: ViewerConfig
     map: MapConfig
@@ -225,6 +274,7 @@ class AppConfig(BaseModel):
     extraction: ExtractionConfig
     quick_chips: tuple[QuickChip, ...]
     outside_context: tuple[OutsideLink, ...]
+    youtube: YouTubeConfig
     logging: LoggingConfig
 
 
