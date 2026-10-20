@@ -393,7 +393,7 @@ def _coverage(
     )
 
 
-_HIDDEN_BY_STRICT: Final = 'hidden by "Only show matching comments"'
+_HIDDEN_BY_STRICT: Final = 'hidden by "Only show comments that match your garden"'
 _ONE_NOT_ANALYSED: Final = (
     "The 1 comment found has not been read for garden details yet, so it can't be compared "
     "with your garden."
@@ -436,10 +436,10 @@ def _where_shown(coverage: _Coverage) -> str:
     if n_hidden == 0:
         return "It is shown below." if n == 1 else "All are shown below."
     if n == 1:
-        return f"It is {_HIDDEN_BY_STRICT}. Untick the box to see it."
+        return f"It is {_HIDDEN_BY_STRICT}. Uncheck the box to see it."
     who = f"All {n} are" if n_hidden == n else _count(n_hidden, "of them is", "of them are")
     pronoun = "it" if n_hidden == 1 else "them"
-    return f"{who} {_HIDDEN_BY_STRICT}. Untick the box to see {pronoun}."
+    return f"{who} {_HIDDEN_BY_STRICT}. Uncheck the box to see {pronoun}."
 
 
 def _limitation_message(coverage: _Coverage) -> str | None:

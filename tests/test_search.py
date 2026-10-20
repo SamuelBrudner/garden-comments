@@ -769,7 +769,7 @@ class TestSelfDescribedConditions:
     """Summer heat, humidity, rainfall and season length are the gardener's own, uncalibrated
     words (``vocab.SELF_DESCRIBED_KEYS``): one unlike the viewer's is never "different"."""
 
-    NOT_COMPARABLE_TITLE = "Not mentioned or can't be compared"
+    NOT_COMPARABLE_TITLE = "Not found or can't be compared"
 
     def test_a_description_unlike_yours_is_not_comparable_rather_than_different(self) -> None:
         result = build_result([reporting("humid", HUMID)], ask(humidity="dry_air"))
@@ -1082,7 +1082,7 @@ class TestNotYetAnalysed:
 class TestStrictAwareLimitation:
     """F30: with reports hidden by strict mode the message never says they are shown below."""
 
-    HIDDEN = 'hidden by "Only show matching comments"'
+    HIDDEN = 'hidden by "Only show comments that match your garden"'
 
     def test_every_report_hidden(self) -> None:
         views = [reporting("c0"), reporting("c1", order=1)]
@@ -1090,7 +1090,7 @@ class TestStrictAwareLimitation:
         assert result.groups == ()
         assert result.limitation_message == (
             "None of these 2 comments mention garden details that can be compared with yours. "
-            f"All 2 are {self.HIDDEN}. Untick the box to see them."
+            f"All 2 are {self.HIDDEN}. Uncheck the box to see them."
         )
 
     def test_the_only_report_hidden(self) -> None:
@@ -1098,7 +1098,7 @@ class TestStrictAwareLimitation:
         result = build_result([unanalysed], ask(method="container", only_stated=True))
         assert result.limitation_message == (
             "The 1 comment found has not been read for garden details yet, so it can't be "
-            f"compared with your garden. It is {self.HIDDEN}. Untick the box to see it."
+            f"compared with your garden. It is {self.HIDDEN}. Uncheck the box to see it."
         )
 
     def test_strict_mode_without_a_selection_still_shows_everything(self) -> None:

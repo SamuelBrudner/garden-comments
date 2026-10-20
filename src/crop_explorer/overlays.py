@@ -62,12 +62,14 @@ ZONE_SOURCE: Final = (
 )
 ZONE_PERIOD: Final = "1991-2020 average annual extreme minimum winter temperature"
 """The zone data's period as recorded in the provenance files (``sources.yaml``, NOTICE)."""
-ZONE_PERIOD_TEXT: Final = "1991-2020 average of each year's coldest winter night"
+ZONE_PERIOD_TEXT: Final = "1991-2020 average of each year's lowest winter temperature"
 """:data:`ZONE_PERIOD` in the words the viewer shows under the zone map."""
 ZONE_COVERAGE: Final = "Contiguous U.S., Alaska and Hawaii (Puerto Rico not included)"
 NORMALS_SOURCE: Final = (
     "NOAA NCEI Climate at a Glance: Statewide Time Series, 1991-2020 average (nClimDiv)"
 )
+NORMALS_SOURCE_TEXT: Final = "NOAA NCEI Climate at a Glance, statewide averages for 1991-2020"
+""":data:`NORMALS_SOURCE` in the words the viewer shows under a NOAA map."""
 NORMALS_PERIOD: Final = "1991-2020"
 NORMALS_FIRST_YEAR: Final = 1991
 NORMALS_LAST_YEAR: Final = 2020

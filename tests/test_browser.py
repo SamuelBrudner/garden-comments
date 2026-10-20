@@ -300,8 +300,7 @@ def test_desktop_smoke(browser: Browser, viewer_url: str) -> None:
     page.get_by_role("tab", name="Map").click()
     map_panel = page.get_by_role("tabpanel", name="Map")
     expect(combobox(map_panel, "Filter by state")).to_be_visible()
-    expect(map_panel.get_by_text("comments", exact=True)).to_be_visible()
-    expect(map_panel.get_by_text("places named in comments", exact=True)).to_be_visible()
+    expect(map_panel.get_by_text("from the comments", exact=True)).to_be_visible()
     assert_no_exception(page)
 
 
@@ -384,10 +383,10 @@ def hover_texts(page: Page) -> list[str]:
     return texts
 
 
-def feedback(page: Page, tab: str, name: str) -> Locator:
+def feedback(page: Page, tab: str, shown: str) -> Locator:
     """The line above the chart in ``tab`` naming what a click is showing."""
     panel = page.get_by_role("tabpanel", name=tab)
-    return panel.get_by_text(f"Showing the comments that mention {name}")
+    return panel.get_by_text(f"Showing comments {shown} below.")
 
 
 def test_clicking_a_bar_shows_exactly_its_reports_and_says_so(
@@ -404,9 +403,9 @@ def test_clicking_a_bar_shows_exactly_its_reports_and_says_so(
     page.mouse.click(grid["x"] + grid["width"] - 20, row_y)
     expect(heading(page, "Comments (5)")).to_be_visible()  # exactly the bar's count
     expect(page.get_by_label(SEARCH_LABEL)).to_have_value("")
-    shown = feedback(page, GLANCE_TABS[0], "Juliet · tomato")
+    shown = feedback(page, GLANCE_TABS[0], "that mention Juliet tomato")
     expect(shown).to_be_in_viewport()  # right above the chart that was clicked
-    expect(page.get_by_text("Showing only comments that mention Juliet · tomato")).to_be_attached()
+    expect(page.get_by_text("Showing only comments that mention Juliet tomato")).to_be_attached()
 
     page.get_by_role("link", name="Go to the comments ↓").first.click()
     page.wait_for_function(  # the empty anchor div scrolls to the top of the window
@@ -433,7 +432,8 @@ def test_clicking_a_topic_cell_shows_exactly_its_reports(
     page.mouse.click(grid["x"] + 10, grid["y"] + 8)  # top-left cell
     expect(heading(page, f"Comments ({count})")).to_be_visible()
     expect(page.get_by_test_id("stMultiSelect")).to_contain_text(topic)  # same label as the grid
-    expect(feedback(page, GLANCE_TABS[1], f"{variety} · tomato about {topic}")).to_be_in_viewport()
+    about = f"about {variety} tomato and {topic.lower()}"
+    expect(feedback(page, GLANCE_TABS[1], about)).to_be_in_viewport()
     assert_no_exception(page)
 
 
@@ -452,7 +452,7 @@ def test_on_a_touch_screen_two_taps_on_a_bar_show_its_reports(
     assert hover_texts(page) == ["Juliet · tomato: 5 comments"]
     page.touchscreen.tap(*point)
     expect(heading(page, "Comments (5)")).to_be_visible()
-    expect(feedback(page, GLANCE_TABS[0], "Juliet · tomato")).to_be_attached()
+    expect(feedback(page, GLANCE_TABS[0], "that mention Juliet tomato")).to_be_attached()
     assert_no_horizontal_overflow(page)
     assert_no_exception(page)
 

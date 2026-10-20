@@ -38,7 +38,7 @@ GROUP_TITLES: Final = MappingProxyType(
         "all": "Comments",
         "match": "Matching your garden",
         "partial": "Partly matching your garden",
-        "not_stated": "Not mentioned or can't be compared",
+        "not_stated": "Not found or can't be compared",
         "different": "Different from your garden",
     }
 )

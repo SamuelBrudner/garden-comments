@@ -44,7 +44,7 @@ from crop_explorer.environment_match import match_context, values_with
 from crop_explorer.geography import RegionCounts, count_label
 from crop_explorer.overlay_charts import OVERLAY_KEYS, OVERLAY_LABELS, OverlayKey
 from crop_explorer.overview import Headline
-from crop_explorer.overview_charts import SETUP_TITLES, TOPIC_TITLES, ChartTheme, variety_name
+from crop_explorer.overview_charts import SETUP_TITLES, TOPIC_TITLES, ChartTheme
 from crop_explorer.regions import CA_PROVINCES, COUNTRIES, REGION_NAMES, US_STATES
 from crop_explorer.schemas import TOPICS, Basis, EnvKey, RightsStatus
 from crop_explorer.search import FilterOptions
@@ -101,6 +101,7 @@ __all__ = [
     "RESULTS_ANCHOR",
     "RESULTS_ANCHOR_HTML",
     "STRICT_KEY",
+    "STRICT_LABEL",
     "SYNTHETIC_NOTE",
     "TABLE_LABEL",
     "TEXT_KEY",
@@ -210,14 +211,12 @@ PRIVATE_BANNER: Final = (
 SYNTHETIC_NOTE: Final = "Made-up example comment"
 """Shown on every synthetic card: fiction is always marked and never links out."""
 NO_LINK_NOTE: Final = "No link to the original comment"
-NOT_STATED_LINE: Final = "No garden details mentioned"
+NOT_STATED_LINE: Final = "No garden details found"
 NOT_ANALYSED_LINE: Final = "Not yet read for garden details"
 """Shown for a comment that has never been through extraction (``parse_status is None``)."""
 WRITTEN_LABEL: Final = "Mentioned, but can't be compared"
 """Leads the line of display-only phrases (facts without a normalized value)."""
-NO_RESULTS: Final = (
-    "No comments to show. Try a different search, or remove a filter or a garden detail."
-)
+NO_RESULTS: Final = "No comments to show. Try a different search or remove a filter."
 ALL_STATES: Final = "All states"
 MISSING_DB_COMMAND: Final = "uv run python -m crop_explorer demo"
 PRIVATE_COMMAND: Final = (
@@ -228,7 +227,9 @@ WORD_JOINER: Final = "\u2060"
 
 _NOT_SET: Final = "Not set"
 _MORE_CONDITIONS: Final = "More garden details"
-_STRICT_CHECKBOX: Final = '"Only show matching comments"'
+STRICT_LABEL: Final = "Only show comments that match your garden"
+"""The strict checkbox's label, quoted wherever a message names the checkbox."""
+_STRICT_CHECKBOX: Final = f'"{STRICT_LABEL}"'
 _HIDDEN_CONDITIONS: Final = "where no garden detail matches yours, or where one is different"
 """What strict mode hides: the "not stated or not comparable" and "different" groups."""
 _STRICT_NEEDS_CONDITION: Final = (
@@ -245,6 +246,8 @@ _ITEM_SEPARATOR: Final = " · "
 _BASIS_LABELS: Final[Mapping[Basis, str]] = MappingProxyType(
     {"observed_experience": "seen that season", "reported_garden_context": "about their garden"}
 )
+_MADE_UP_SOURCE: Final = "Made-up examples"
+"""How the About panel names a source of made-up examples (never its id)."""
 _RIGHTS_LABELS: Final[Mapping[RightsStatus, str]] = MappingProxyType(
     {
         "synthetic": "made-up examples",
@@ -256,7 +259,7 @@ _TIER_WORDS: Final = MappingProxyType(
     {
         "match": "matching",
         "partial": "partly matching",
-        "not_stated": "not mentioned or can't be compared",
+        "not_stated": "not found or can't be compared",
         "different": "different",
     }
 )
@@ -703,12 +706,13 @@ def chip_help(chip: QuickChip, support: ChipSupport) -> str:
     Returns
     -------
     str
-        ``"Set this condition (8 reports state it)"`` for one condition; for several, both
-        counts, e.g. ``"6 reports mention containers or greenhouse / tunnel; 2 mention both"``.
-        A chip with a self-described condition (``vocab.SELF_DESCRIBED_KEYS``) counts reports
-        that describe it in their own, uncalibrated words, and says so: ``"6 reports describe
-        hot summers or humid conditions in their own words; 2 describe both"``, ``"Set this
-        condition (4 reports describe it in their own words)"``.
+        ``"Sets this garden detail (8 comments mention it)"`` for one condition; for several,
+        both counts, e.g. ``"Sets these garden details (6 comments mention containers or
+        greenhouse / tunnel; 2 mention both)"``. A chip with a self-described condition
+        (``vocab.SELF_DESCRIBED_KEYS``) counts reports that describe it in their own,
+        uncalibrated words, and says so: ``"Sets these garden details (6 comments describe hot
+        summers or humid weather in their own words; 2 describe both)"``, ``"Sets this garden
+        detail (4 comments describe it in their own words)"``.
 
     Raises
     ------
@@ -725,8 +729,9 @@ def chip_help(chip: QuickChip, support: ChipSupport) -> str:
         return f"Sets this garden detail ({counted})"
     every = "both" if len(labels) == 2 else "all of them"
     return (
-        f"{_plural(n_any, 'comment')} {_verb(n_any, singular, plural)} {_or_join(labels)}"
-        f"{suffix}; {n_all} {_verb(n_all, singular, plural)} {every}"
+        f"Sets these garden details ({_plural(n_any, 'comment')} "
+        f"{_verb(n_any, singular, plural)} {_or_join(labels)}{suffix}; "
+        f"{n_all} {_verb(n_all, singular, plural)} {every})"
     )
 
 
@@ -791,7 +796,8 @@ def strict_note(result: SearchResult, query: SearchQuery) -> str | None:
         hidden = _plural(result.n_hidden_by_strict, "comment")
         return f"Hidden: {hidden} {_HIDDEN_CONDITIONS}."
     n_hideable = result.tier_counts["not_stated"] + result.tier_counts["different"]
-    return f"Ticking this would hide {_plural(n_hideable, 'comment')} {_HIDDEN_CONDITIONS}."
+    n_comments = _plural(n_hideable, "comment")
+    return f"Checking this box would hide {n_comments} {_HIDDEN_CONDITIONS}."
 
 
 def region_filter_note(code: str) -> str:
@@ -826,8 +832,10 @@ def empty_state(result: SearchResult) -> str | None:
     if result.n_with_conditions == 0 and result.limitation_message is not None:
         return None
     if n_hidden == 1:
-        return f"The 1 comment found is hidden by {_STRICT_CHECKBOX}. Untick the box to see it."
-    return f"All {n_hidden} comments are hidden by {_STRICT_CHECKBOX}. Untick the box to see them."
+        return f"The 1 comment found is hidden by {_STRICT_CHECKBOX}. Uncheck the box to see it."
+    return (
+        f"All {n_hidden} comments are hidden by {_STRICT_CHECKBOX}. Uncheck the box to see them."
+    )
 
 
 # --------------------------------------------------------------------------- paging
@@ -919,7 +927,7 @@ def _best(matches: Sequence[MentionMatch]) -> MentionMatch | None:
 
 
 _RELEVANT: Final = "Matches"
-_NOT_STATED: Final = "Not mentioned"
+_NOT_STATED: Final = "Not found"
 _DIFFERENT: Final = "Different"
 _OWN_WORDS: Final = "In their own words"
 _COUNTED: Final = "own words, counted"
@@ -1013,10 +1021,13 @@ def _own_words_quotes(dimension: DimensionMatch) -> str:
 
 
 def _own_words_reading(dimension: DimensionMatch) -> str:
-    """Say how the words were read: counted as the viewer's value, or their label beside it."""
+    """Say how the words were read: as the viewer's value, close to it, or as something else."""
+    viewer, read = _viewer_label(dimension), _labels(dimension, dimension.status)
     if dimension.status == "match":
-        return f"counted as {_viewer_label(dimension)}"
-    return f"read as {_labels(dimension, dimension.status)}; you chose {_viewer_label(dimension)}"
+        return f"counted as {viewer}"
+    if dimension.status == "imprecise":
+        return f"read as {read}, a partial match for your {viewer}"
+    return f"read as {read}; you chose {viewer}"
 
 
 def _own_words_region(facts: Iterable[FactView]) -> str:
@@ -1084,10 +1095,28 @@ def _tier_line(match: MatchResult, facts: Iterable[FactView]) -> str:
     return parts[part][0]
 
 
+_OTHER_MENTION_LEADS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        _RELEVANT: "{name} matches",
+        _NOT_STATED: "Not found for {name}",
+        WRITTEN_LABEL: "Mentioned for {name}, but can't be compared",
+        _DIFFERENT: "{name} is different",
+        _OWN_WORDS: "{name}, in their own words",
+    }
+)
+"""A tier line's lead rewritten to name another mention ("Jalapeño is different: ...")."""
+
+
+def _other_mention_line(name: str, line: str) -> str:
+    """Name the mention inside the tier line's lead, so two colons never follow each other."""
+    lead, items = line.split(": ", 1)
+    return f"{_OTHER_MENTION_LEADS[lead].format(name=name)}: {items}"
+
+
 def _other_mention_lines(matches: Sequence[MentionMatch], best: MatchResult) -> tuple[str, ...]:
     """State the tier line of every other relevant mention whose tier differs from the best."""
     return tuple(
-        f"{_mention_label(m.mention)}: {_tier_line(m.match, m.facts)}"
+        _other_mention_line(_mention_label(m.mention), _tier_line(m.match, m.facts))
         for m in matches
         if m.match is not None and m.match.tier != best.tier
     )
@@ -1185,7 +1214,7 @@ def condition_lines(result: CommentResult, garden: GardenContext) -> tuple[str, 
         return _reported_lines(matches)
     if best is None or len(matches) == 1:
         return _match_lines(match, best.facts if best is not None else ())
-    n_varieties = f"1 of {len(matches)} varieties in this comment"
+    n_varieties = f"1 of {len(matches)} crops or varieties"
     lead = f"Details for {_mention_label(best.mention)} ({n_varieties})"
     return (lead, *_match_lines(match, best.facts), *_other_mention_lines(matches, match))
 
@@ -1398,8 +1427,14 @@ def source_rows(views: Sequence[CommentView]) -> tuple[SourceRow, ...]:
 
 
 def source_line(row: SourceRow) -> str:
-    """Return a source's line in the About panel, e.g. ``"demo: 3 comments shown · ..."``."""
-    return f"{row.source_id}: {_plural(row.n_comments, 'comment')} shown · {row.rights}"
+    """Return a source's line in the About panel, e.g. ``"demo: 3 comments shown · ..."``.
+
+    A source of made-up examples is named "Made-up examples" (its id stays in the data).
+    """
+    shown = f"{_plural(row.n_comments, 'comment')} shown"
+    if row.rights == _RIGHTS_LABELS["synthetic"]:
+        return f"{_MADE_UP_SOURCE}: {shown}"
+    return f"{row.source_id}: {shown} · {row.rights}"
 
 
 def summary_line(counts: Mapping[str, int]) -> str:
@@ -1407,8 +1442,8 @@ def summary_line(counts: Mapping[str, int]) -> str:
     parts = (
         f"{_plural(counts['comments'], 'comment')} from {_plural(counts['sources'], 'source')}",
         f"{counts['parsed_comments']} read for garden details",
-        _plural(counts["mentions"], "variety mention"),
-        _plural(counts["facts"], "quoted detail"),
+        f"varieties named {_plural(counts['mentions'], 'time')}",
+        _plural(counts["facts"], "quote"),
     )
     return _ITEM_SEPARATOR.join(parts)
 
@@ -1429,11 +1464,11 @@ def outside_link_markdown(link: OutsideLink) -> str:
 _OVERLAY_NOTES: Final = MappingProxyType(
     {
         "zones": (
-            "The Map tab can also shade states by "
+            "The Map tab can also show "
             f"\u201c{OVERLAY_LABELS['zones']}\u201d (simplified data, not the official map)."
         ),
         "normals": (
-            "The Map tab can also shade states by the three NOAA 1991-2020 choices. Those are "
+            "The Map tab can also color states by the three NOAA 1991-2020 choices. Those are "
             "whole-state averages from NOAA's Climate at a Glance, not the weather-station "
             "Climate Normals at this link."
         ),
@@ -1485,7 +1520,7 @@ _CONVERSATION_NOT_QUALITY: Final = (
     "one."
 )
 _TOPIC_NOT_OUTCOME: Final = (
-    "A comment can mention several topics. A topic says what was talked about, not whether it "
+    "A comment can mention several topics. A topic is what was talked about, not whether it "
     "went well."
 )
 _HINTS: Final = MappingProxyType(
@@ -1495,8 +1530,8 @@ _HINTS: Final = MappingProxyType(
             "Tap a bar once to see its count, then tap it again to show its comments below.",
         ),
         "cell": (
-            "Click a cell to show those comments below.",
-            "Tap a cell once to see its count, then tap it again to show those comments below.",
+            "Click a square to show those comments.",
+            "Tap a square once to see its count, then again to show those comments.",
         ),
     }
 )
@@ -1623,10 +1658,7 @@ def _ties(n_tied_off: int, n_comments: int) -> str:
     more = (
         "1 more variety also has" if n_tied_off == 1 else f"{n_tied_off} more varieties also have"
     )
-    return (
-        f" {more} {_plural(n_comments, 'comment')} and did not fit. Varieties with the same count "
-        "are listed in alphabetical order."
-    )
+    return f" {more} {_plural(n_comments, 'comment')} but did not fit (ties are in A to Z order)."
 
 
 def _caption_html(lead: str, sentence: str, ties: str, mark: str) -> str:
@@ -1671,11 +1703,8 @@ def varieties_caption_html(
 def topics_caption(n_rows: int) -> str:
     """Say in one short sentence what the topic grid counts."""
     if n_rows == 1:
-        return "Comments about each topic, for the most-discussed variety."
-    return (
-        f"Comments about each topic, for the {n_rows} most-discussed varieties (same order as "
-        "the Varieties chart)."
-    )
+        return "Comments about each topic for the most-discussed variety."
+    return f"Comments about each topic for the {n_rows} most-discussed varieties."
 
 
 def topics_caption_html(n_rows: int, n_tied_off: int, last_count: int) -> str:
@@ -1763,16 +1792,16 @@ def glance_key(chart: str, state: Mapping[str, Any]) -> str:
 
 
 def variety_names(frame: pd.DataFrame) -> dict[str, str]:
-    """Return ``variety_key -> "Sungold · tomato"`` (raw, untrusted: escape before display)."""
+    """Return ``variety_key -> "Sungold tomato"`` for sentences (raw: escape before display)."""
     pairs = zip(frame["variety_key"], frame["label"], frame["crop"], strict=True)
     return {
-        str(key): variety_name(str(label), crop if isinstance(crop, str) else None)
+        str(key): str(label) if not isinstance(crop, str) else f"{label} {crop}"
         for key, label, crop in pairs
     }
 
 
-def _about_topics(topics: Sequence[str]) -> str:
-    return f" about {' or '.join(topic_title(topic) for topic in topics)}" if topics else ""
+def _topic_words(topics: Sequence[str]) -> str:
+    return " or ".join(topic_label(topic) for topic in topics)
 
 
 def glance_feedback(name: str, topics: Sequence[str]) -> str:
@@ -1788,14 +1817,12 @@ def glance_feedback(name: str, topics: Sequence[str]) -> str:
     Returns
     -------
     str
-        e.g. ``"Showing the reports that mention Sungold · tomato about Flavor below.
-        [Go to the reports ↓](#glance-results)"``.
+        e.g. ``"Showing comments about Sungold tomato and flavor below.
+        [Go to the comments ↓](#glance-results)"``.
     """
-    shown = f"{escape_markdown(name)}{_about_topics(topics)}"
-    return (
-        f"Showing the comments that mention {shown} below. "
-        f"[Go to the comments ↓](#{RESULTS_ANCHOR})"
-    )
+    name = escape_markdown(name)
+    shown = f"about {name} and {_topic_words(topics)}" if topics else f"that mention {name}"
+    return f"Showing comments {shown} below. [Go to the comments ↓](#{RESULTS_ANCHOR})"
 
 
 def variety_filter_note(name: str) -> str:
@@ -1825,7 +1852,7 @@ def setup_table(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "Garden detail": conditions,
-            "Mentioned as": list(frame["label"]),
+            "Choice": list(frame["label"]),
             "Comments": list(frame["n_comments"]),
         }
     )
@@ -1882,11 +1909,11 @@ def map_colorbar(counts: RegionCounts) -> dict[str, Any]:
 def map_notes(counts: RegionCounts) -> tuple[str, ...]:
     """Return the counts the map cannot show, always including the not-reported count."""
     notes = [
-        f"Region not mentioned: {counts.not_reported}",
-        f"Outside the U.S.: {counts.outside_us}",
+        f"Comments with no place named, or one not recognized: {counts.not_reported}",
+        f"Comments from outside the U.S.: {counts.outside_us}",
     ]
     if counts.us_state_not_reported:
-        notes.append(f"In the U.S., state not mentioned: {counts.us_state_not_reported}")
+        notes.append(f"Comments in the U.S. with no state named: {counts.us_state_not_reported}")
     return tuple(notes)
 
 

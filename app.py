@@ -70,8 +70,8 @@ from crop_explorer.vocab import ComparableKey
 
 _TITLE: Final = "Garden variety"
 _SUBTITLE: Final = (
-    "Gardeners' comments about the varieties they grew. Choose details about your garden to "
-    "see comments from similar gardens first."
+    "Comments about crop varieties and the gardens they were grown in. Choose details about "
+    "your garden to see comments from similar gardens first."
 )
 _ZONE_HELP: Final = (
     "A USDA hardiness zone is based only on the coldest winter temperatures. It says nothing "
@@ -83,8 +83,8 @@ details **they mention** match yours. The groups are not a rating. A crop that f
 garden like yours is grouped the same way as one that did well.
 
 Each garden detail on a card comes from the exact words of that comment (open **Quotes** to
-see them). If a comment does not mention one of your garden details, the card says
-*Not mentioned*. That is never counted as a match or a difference. Summer heat, humidity,
+see them). If no clear mention of one of your garden details was found, the card says
+*Not found*. That never counts as a match or a difference. Summer heat, humidity,
 rainfall and season length are the gardener's own description, not a measurement. Words that
 don't fit one of the choices are shown as written. Comments not yet read for garden details say
 so. Region only puts comments from your area first; nearby gardens can still have different
@@ -100,10 +100,7 @@ _OUTSIDE_INTRO: Final = (
     "These sites have climate data, university variety trials and other gardeners' ratings. "
     "They describe regions, trials or other gardens, not the gardens in these comments."
 )
-_MAP_BADGES: Final = (
-    f"{ui.label_badge('community report', 'comments')} "
-    f"{ui.label_badge('reported conditions', 'places named in comments')}"
-)
+_MAP_BADGES: Final = ui.label_badge("reported conditions", "from the comments")
 _MAP_INTRO: Final = (
     "This map shows the states where gardeners said they grew. Each comment counts once for "
     "each state it names. A comment that gives only a hardiness zone is not on the map. No "
@@ -116,11 +113,11 @@ _MAP_CONFIG: Final = {"displayModeBar": False, "scrollZoom": False, "topojsonURL
 """The report-count map: no mode bar or zoom, and the base map from this app, not the CDN."""
 _OVERLAY_CONFIG: Final = {**overview_charts.CHART_CONFIG, "topojsonURL": ui.BASE_MAP_URL}
 _OVERLAY_HELP: Final = (
-    "The climate choices shade each state by whole-state data and write the number of comments "
-    "on top. That data says nothing about any gardener's garden or any variety."
+    "Climate choices color the map with USDA zones or NOAA state averages. Each state shows its "
+    "number of comments. This data says nothing about any gardener's garden or any variety."
 )
 _OVERLAY_ALT: Final = (
-    "Map of U.S. states shaded by {layer}, with the number of comments that name each state "
+    "Map of the U.S. colored by {layer}, with the number of comments that name each state "
     "written on it."
 )
 _HIGHLIGHT_HELP: Final = (
@@ -132,6 +129,8 @@ _SERVED_ZONES: Final = (
     Path(__file__).resolve().parent / "static" / "overlays" / (overlays.SERVED_ZONES_NAME)
 )
 """The zone layer's copy that browsers fetch (``overlay_charts.ZONE_LAYER_URL``)."""
+_CHIPS_LABEL: Final = "Shortcuts for your garden:"
+"""Above the quick chips: on a phone their tooltips never show."""
 _GLANCE_TITLE: Final = "At a glance"
 _GLANCE_ALTS: Final = {
     "varieties": "Bar chart: how many comments mention each of the most-discussed varieties.",
@@ -414,8 +413,8 @@ def _conditions_panel() -> None:
 def _reference_panel(reference: overlay_charts.RegionalReference) -> None:
     """Show the reference in a compact box: badge and summary, disclaimer, then sources.
 
-    The zone disclaimer is an info box, as prominent as above the zone map; then what "main
-    zones" means and the sources, as a caption.
+    The zone disclaimer is an info box, as prominent as above the zone map; then which zones
+    are listed and the sources, as a caption.
     """
     with st.container(border=True, key="regional-reference"):
         st.markdown(f"{ui.label_badge(OVERLAY_LABEL)} {reference.summary}")
@@ -457,6 +456,7 @@ def _chips(ctx: _Context) -> None:
     if not shown:
         return
     state = _state()
+    st.caption(_CHIPS_LABEL)
     with st.container(horizontal=True, gap="small"):
         for index, chip in enumerate(ctx.cfg.quick_chips):
             if chip in shown:
@@ -522,7 +522,7 @@ def _filters(ctx: _Context, options: FilterOptions) -> None:
     _search_box(ctx.cfg.viewer.max_query_chars)
     _filter_row(options)
     st.checkbox(
-        "Only show matching comments",
+        ui.STRICT_LABEL,
         key=ui.STRICT_KEY,
         help="Hides comments where no garden detail matches yours, or where one is different.",
     )
@@ -662,7 +662,7 @@ def _state_selector(counts: RegionCounts, region_filter: str | None) -> None:
 
 def _overlay_picker() -> None:
     st.radio(
-        "Shade states by",
+        "Color the map by",
         overlay_charts.OVERLAY_KEYS,
         format_func=overlay_charts.OVERLAY_LABELS.__getitem__,
         key=ui.OVERLAY_KEY,

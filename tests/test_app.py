@@ -39,7 +39,7 @@ from crop_explorer.config import DEFAULT_CONFIG_PATH, load_config
 from crop_explorer.extraction import load_extractions
 from crop_explorer.ingest import build_source, import_file
 from crop_explorer.overlays import (
-    NORMALS_SOURCE,
+    NORMALS_SOURCE_TEXT,
     OVERLAY_LABEL,
     ZONE_DISCLAIMER,
     ZONE_PERIOD_TEXT,
@@ -334,8 +334,8 @@ class TestBrowseScreen:
         assert not at.exception
         assert [t.value for t in at.title] == ["Garden variety"]
         assert (
-            "Gardeners' comments about the varieties they grew. Choose details about your garden "
-            "to see comments from similar gardens first." in texts_of(at)
+            "Comments about crop varieties and the gardens they were grown in. Choose details "
+            "about your garden to see comments from similar gardens first." in texts_of(at)
         )
         assert ui.DEMO_BANNER in [info.value for info in at.info]
         assert subheaders(at)[-1] == "Comments (70)"
@@ -373,7 +373,7 @@ class TestBrowseScreen:
             "Filter by state",
         } <= labels
         assert at.multiselect(key=ui.TOPICS_KEY).label == "Topics"
-        assert at.checkbox(key=ui.STRICT_KEY).label == "Only show matching comments"
+        assert at.checkbox(key=ui.STRICT_KEY).label == "Only show comments that match your garden"
         assert [tab.label for tab in at.tabs] == [*ui.GLANCE_TABS, "Comments", "Map"]
         assert {"About and sources", "More garden details", "Links to other websites"} <= {
             e.label for e in at.expander
@@ -464,7 +464,7 @@ class TestGrouping:
         heads = subheaders(at)
         assert "Matching your garden (3)" in heads
         assert "Partly matching your garden (4)" in heads
-        assert any(h.startswith("Not mentioned or can't be compared (") for h in heads)
+        assert any(h.startswith("Not found or can't be compared (") for h in heads)
         assert not has_group(at, "all")
         assert shown_ids(group(at, "match"), app_env) == set(FULL_MATCHES)
         assert shown_ids(group(at, "partial"), app_env) == {
@@ -506,7 +506,7 @@ class TestGrouping:
         assert ui.escape_markdown(ui.SYNTHETIC_NOTE) in match
         assert ui.EVIDENCE_LABEL in match
         partial = "\n".join(texts_of(group(at, "partial")))
-        assert ui.escape_markdown("Not mentioned: hardiness zone") in partial
+        assert ui.escape_markdown("Not found: hardiness zone") in partial
         imprecise = "Matches: zone 6, a or b not given (you chose zone 6b) · containers"
         assert ui.escape_markdown(imprecise) in partial
 
@@ -516,7 +516,7 @@ class TestGrouping:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         summary = [t for t in texts_of(at) if t.startswith("70 comments ·")]
         assert summary == [
-            "70 comments · 3 matching · 4 partly matching · 55 not mentioned or can't be "
+            "70 comments · 3 matching · 4 partly matching · 55 not found or can't be "
             "compared · 8 different"
         ]
 
@@ -525,8 +525,8 @@ class TestGrouping:
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         assert (
-            "Ticking this would hide 63 comments where no garden detail matches yours, or where "
-            "one is different." in texts_of(at)
+            "Checking this box would hide 63 comments where no garden detail matches yours, or "
+            "where one is different." in texts_of(at)
         )
         assert at.checkbox(key=ui.STRICT_KEY).help == (
             "Hides comments where no garden detail matches yours, or where one is different."
@@ -549,7 +549,8 @@ class TestGrouping:
             "Sets this garden detail (8 comments mention it)"
         )
         assert at.button(key="chip_1").proto.help == (
-            "6 comments describe hot summers or humid weather in their own words; 2 describe both"
+            "Sets these garden details (6 comments describe hot summers or humid weather in their "
+            "own words; 2 describe both)"
         )
         assert at.button(key="chip_2").proto.help == (
             "Sets this garden detail (4 comments describe it in their own words)"
@@ -571,7 +572,7 @@ class TestGrouping:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), humidity="dry_air")
-        assert "Not mentioned or can't be compared (" in "\n".join(subheaders(at))
+        assert "Not found or can't be compared (" in "\n".join(subheaders(at))
         assert not has_group(at, "different")
         assert shown_ids(group(at, "match"), app_env) == {"syn-0019"}
         not_stated = group(at, "not_stated")
@@ -603,6 +604,8 @@ class TestGrouping:
         at = run_app(monkeypatch, app_env)
         labels = [b.label for b in at.button if b.key and b.key.startswith("chip_")]
         assert labels == ["Containers", "Hot & humid", "Short season", "Greenhouse"]
+        # Tooltips never show on a phone, so a label says what the buttons are for.
+        assert "Shortcuts for your garden:" in [c.value for c in at.caption]
         at.button(key="chip_1").click().run()
         assert at.selectbox(key=ui.CONDITION_KEYS["summer_heat"]).value == "hot"
         assert at.selectbox(key=ui.CONDITION_KEYS["humidity"]).value == "humid"
@@ -682,8 +685,8 @@ class TestFiltersAndEmptyStates:
         messages = infos(at)
         assert ui.NO_RESULTS not in messages
         assert (
-            'The 1 comment found is hidden by "Only show matching comments". Untick the box to '
-            "see it." in messages
+            'The 1 comment found is hidden by "Only show comments that match your garden". '
+            "Uncheck the box to see it." in messages
         )
 
     def test_strict_hiding_is_explained_once(
@@ -696,9 +699,9 @@ class TestFiltersAndEmptyStates:
         at.checkbox(key=ui.STRICT_KEY).check().run()
         messages = infos(at)
         assert ui.NO_RESULTS not in messages
-        hiding = [m for m in messages if '"Only show matching comments"' in m]
+        hiding = [m for m in messages if '"Only show comments that match your garden"' in m]
         assert len(hiding) == 1
-        assert hiding[0].endswith("Untick the box to see them.")
+        assert hiding[0].endswith("Uncheck the box to see them.")
 
     def test_plain_empty_state(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
@@ -769,7 +772,7 @@ class TestProvenanceLabels:
         at.text_input(key=ui.TEXT_KEY).input("visiting relatives").run()
         assert shown_ids(group(at, "not_stated"), app_env) == {"syn-0008"}
         captions = [c.value for c in group(at, "not_stated").caption if "Region" in c.value]
-        assert captions == [ui.escape_markdown("Not mentioned: hardiness zone\nRegion: Maine")]
+        assert captions == [ui.escape_markdown("Not found: hardiness zone\nRegion: Maine")]
         assert (
             "The 1 comment found does not mention any garden details that can be compared with "
             "yours. It is shown below."
@@ -778,7 +781,7 @@ class TestProvenanceLabels:
     def test_map_tab_is_labelled(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
         (map_tab,) = [tab for tab in at.tabs if tab.label == "Map"]
-        badges = ":green-badge[comments] :green-badge[places named in comments]"
+        badges = ":green-badge[from the comments]"
         assert badges in [m.value for m in map_tab.markdown]
 
 
@@ -801,8 +804,8 @@ class TestMap:
     def test_map_notes_are_shown(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
         captions = texts_of(at)
-        assert "Region not mentioned: 46" in captions
-        assert "Outside the U.S.: 3" in captions
+        assert "Comments with no place named, or one not recognized: 46" in captions
+        assert "Comments from outside the U.S.: 3" in captions
 
     def test_map_respects_other_filters(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -812,7 +815,7 @@ class TestMap:
         options = at.selectbox(key=ui.REGION_FILTER_KEY).options
         # Juliet comments: syn-0006, 0013 and 0063 (Connecticut), 0041 (Georgia), 0044 (none).
         assert options == ["All states", "Connecticut (3 comments)", "Georgia (1 comment)"]
-        assert "Region not mentioned: 1" in texts_of(at)
+        assert "Comments with no place named, or one not recognized: 1" in texts_of(at)
 
     def test_map_is_remounted_without_a_stale_selection_when_the_filter_changes(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1058,8 +1061,8 @@ class TestContext:
         text = "\n".join(texts_of(panel))
         assert "The groups are not a rating." in text
         assert "made-up example comments, which are marked as made up" in " ".join(text.split())
-        assert ui.escape_markdown("made-up examples") in text
-        assert "synthetic\\-demo" in text
+        assert ui.escape_markdown("Made-up examples: 69 comments shown") in text
+        assert "synthetic" not in text.casefold()  # the source id stays in the data
 
 
 # --------------------------------------------------------------------------- at a glance
@@ -1465,7 +1468,7 @@ class TestGlanceClickThrough:
         at = run_app(monkeypatch, app_env)
         assert not [m for tab in glance_tabs(at) for m in tab.markdown]  # nothing clicked yet
         show_variety(at, "sungold", ["flavor"])
-        expected = ui.glance_feedback("Sungold · tomato", ["flavor"])
+        expected = ui.glance_feedback("Sungold tomato", ["flavor"])
         varieties, topics, setups = glance_tabs(at)
         assert [m.value for m in varieties.markdown] == [expected]
         assert [m.value for m in topics.markdown] == [expected]
@@ -1473,7 +1476,7 @@ class TestGlanceClickThrough:
         for tab in (varieties, topics):  # the feedback right above the chart
             kinds = [getattr(node, "type", "") for node in walk(tab)][1:3]
             assert kinds == ["markdown", "plotly_chart"], kinds
-        assert "about Flavor below" in expected
+        assert "Showing comments about Sungold tomato and flavor below." in expected
         assert at.multiselect(key=ui.TOPICS_KEY).value == ["flavor"]
         assert "Flavor" in at.multiselect(key=ui.TOPICS_KEY).options  # one label for a topic
 
@@ -1495,7 +1498,7 @@ class TestGlanceClickThrough:
     ) -> None:
         at = run_app(monkeypatch, app_env)
         show_variety(at, "earlygirl")
-        assert ui.variety_filter_note("Early Girl · tomato") in infos(at)
+        assert ui.variety_filter_note("Early Girl tomato") in infos(at)
         assert "Comments (2)" in subheaders(at)
         at.button(key="clear_variety_filter").click().run()
         assert at.session_state[ui.VARIETY_FILTER_KEY] is None
@@ -1641,7 +1644,7 @@ class TestClimateOverlays:
         at = run_app(monkeypatch, app_env)
         picker = at.radio(key=ui.OVERLAY_KEY)
         assert picker.value == "none"
-        assert picker.label == "Shade states by"
+        assert picker.label == "Color the map by"
         assert picker.options == list(overlay_charts.OVERLAY_LABELS.values())
         figure = map_figure(at)
         assert [trace["type"] for trace in figure["data"]] == ["choropleth"]
@@ -1676,7 +1679,9 @@ class TestClimateOverlays:
         assert [i.value for i in tab.info] == [ZONE_DISCLAIMER, ZONE_DISCLAIMER]
         caption = overlay_charts.overlay_view("zones").caption
         assert caption in [c.value for c in tab.caption]
-        assert ZONE_SOURCE in caption and ZONE_PERIOD_TEXT in caption
+        # The disclaimer above the map names the source; the caption names the period.
+        assert all(part in ZONE_DISCLAIMER for part in ZONE_SOURCE.split(", "))
+        assert ZONE_PERIOD_TEXT in caption
         traces = map_figure(at)["data"]
         assert [t["type"] for t in traces] == ["choropleth", "choropleth", "scattergeo"]
         assert traces[0]["featureidkey"] == "properties.zone"
@@ -1691,12 +1696,12 @@ class TestClimateOverlays:
         (table,) = [e for e in map_tab(at).expander if e.label == ui.TABLE_LABEL]
         assert [i.value for i in table.info] == [ZONE_DISCLAIMER]  # with the data
         states, shares, key = (frame.value for frame in table.dataframe)
-        assert list(states.columns) == ["State", "Main zones", "Largest area"]
+        assert list(states.columns) == ["State", "Zones", "Covers the most ground"]
         assert len(states) == 51
-        assert states.set_index("State").loc["Connecticut", "Main zones"] == "6a-7b"
+        assert states.set_index("State").loc["Connecticut", "Zones"] == "6a-7b"
         assert list(shares.columns) == ["State", "Zone", "Share of the state's area (%)"]
         assert shares["Share of the state's area (%)"].dtype == "float64"
-        assert list(key.columns) == ["Zone", "Average coldest winter night (°F)"]
+        assert list(key.columns) == ["Zone", "Average lowest winter temperature (°F)"]
         assert [c.value for c in table.caption] == [
             title for title, _ in overlay_charts.overlay_tables("zones", overlays.load_overlays())
         ]
@@ -1713,7 +1718,7 @@ class TestClimateOverlays:
         assert view.caption in captions
         note = overlay_charts.scale_note(key, overlays.load_overlays())  # type: ignore[arg-type]
         assert note is not None and note in captions  # who is off the contiguous-state scale
-        assert NORMALS_SOURCE in view.caption
+        assert f"Source: {NORMALS_SOURCE_TEXT}." in view.caption
         assert not tab.info  # no zone disclaimer on a NOAA layer
         assert ZONE_DISCLAIMER not in all_text(at)
         traces = map_figure(at)["data"]
@@ -1889,12 +1894,13 @@ class TestRegionalReference:
         box = regional_box(at)
         (summary,) = [m.value for m in box.markdown]
         assert summary.startswith(
-            f"{ui.label_badge(OVERLAY_LABEL)} Connecticut — main USDA zones by area 6a-7b"
+            f"{ui.label_badge(OVERLAY_LABEL)} Connecticut. USDA hardiness zones (2023): 6a to 7b. "
+            "Zone 6b covers the most ground."
         )
-        assert "July average high 83°F" in summary
+        assert "Average July high 83°F" in summary
         assert [i.value for i in box.info] == [ZONE_DISCLAIMER]  # prominent, not a caption
         (notes,) = [c.value for c in box.caption]
-        assert notes.startswith("Main zones are the half-zones that cover at least 0.1%")
+        assert notes.startswith("Zones listed cover at least 0.1% of the state.")
         assert "look up a ZIP code at planthardiness.ars.usda.gov" in notes
         assert "It is not used to sort or match comments." in notes
 
@@ -1968,7 +1974,8 @@ class TestOutsideContextOverlays:
         assert overlays_by_title["NOAA U.S. Climate Normals (1991-2020)"] == "normals"
         assert overlays_by_title["Cornell Vegetable Varieties for Gardeners"] is None
         assert overlays_by_title["Nebraska Vegetable Variety Navigator"] is None
-        notes = [c for c in captions if c.startswith("The Map tab can also shade states by")]
+        prefixes = ("The Map tab can also show", "The Map tab can also color states by")
+        notes = [c for c in captions if c.startswith(prefixes)]
         assert len(notes) == 2
         for link in cfg.outside_context:
             assert ui.outside_link_markdown(link) in [
