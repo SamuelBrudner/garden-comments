@@ -93,7 +93,7 @@ def subheaders(at: AppTest) -> list[str]:
 def assert_public_demo(at: AppTest) -> None:
     assert not at.exception
     assert not at.error
-    assert [title.value for title in at.title] == ["What Gardeners Are Saying"]
+    assert [title.value for title in at.title] == ["Garden variety"]
     assert ui.DEMO_BANNER in [info.value for info in at.info]
     assert ui.PRIVATE_BANNER not in [warning.value for warning in at.warning]
     assert subheaders(at)[-1] == DEMO_HEADING

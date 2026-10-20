@@ -20,6 +20,12 @@ map:
   # and the state filter still lists the reports, so it is not a privacy control. Only
   # publish comments whose source is cleared.
   public_min_cell_count: 1
+  # Height in pixels of the map, with or without an overlay (its scale legend included).
+  height_px: 340
+  # On the hardiness-zone overlay, how far the other zones fade toward the background when
+  # one zone is highlighted (0: not at all, 1: invisible). Overlays are always off until the
+  # viewer picks one (SPEC §7), so there is no default-overlay setting.
+  zone_mute: 0.72
 
 overview:
   # "At a glance" header. The bar chart lists this many of the most-discussed varieties
@@ -92,10 +98,14 @@ quick_chips:
   - label: Greenhouse
     conditions: {shelter: greenhouse}
 
+# Opt-in outbound links, each badged with its evidence label. `overlay` (zones | normals) marks
+# a regional climate reference whose kind of data is also offered as a map overlay (Map tab);
+# trials and outside gardeners' ratings stay links only.
 outside_context:
   - title: USDA Plant Hardiness Zone Map
     url: https://planthardiness.ars.usda.gov/
     label: regional climate reference
+    overlay: zones
     note: >-
       Zones reflect the average annual extreme minimum winter temperature only. They do not
       describe summer heat, humidity, season length, soil or sunlight.
@@ -106,6 +116,7 @@ outside_context:
   - title: NOAA U.S. Climate Normals (1991-2020)
     url: https://www.ncei.noaa.gov/products/land-based-station/us-climate-normals
     label: regional climate reference
+    overlay: normals
     note: >-
       30-year statistical averages for a place, not the weather any gardener experienced in
       a particular season.

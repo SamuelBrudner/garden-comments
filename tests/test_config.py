@@ -7,6 +7,8 @@ address nor the port (Streamlit Community Cloud chooses both).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tomllib
 from pathlib import Path
 from typing import Any, get_args
@@ -15,6 +17,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from crop_explorer import ui
 from crop_explorer.config import (
     DEFAULT_CONFIG_PATH,
     OutsideLabel,
@@ -60,6 +63,21 @@ def test_streamlit_config_pins_neither_address_nor_port() -> None:
 
     assert "address" not in server
     assert "port" not in server
+
+
+def test_streamlit_serves_the_apps_own_base_map() -> None:
+    """Maps load Plotly's U.S. base map from ./static, never from cdn.plot.ly."""
+    assert streamlit_settings()["server"]["enableStaticServing"] is True
+    base_map = REPO_ROOT / "static" / "topojson" / "usa_110m.json"
+    data = base_map.read_bytes()
+    notice = (base_map.parent / "NOTICE.md").read_text(encoding="utf-8")
+    assert hashlib.sha256(data).hexdigest() in notice
+    assert f"{len(data):,} bytes" in notice
+    assert "MIT License" in notice
+    topology = json.loads(data)
+    assert topology["type"] == "Topology"
+    assert len(topology["objects"]["subunits"]["geometries"]) == 51  # 50 states and DC
+    assert ui.BASE_MAP_URL == "app/static/topojson/"
 
 
 def test_streamlit_theme_follows_the_visitors_light_or_dark_setting() -> None:
@@ -197,6 +215,78 @@ def test_viewer_limits_are_required(tmp_path: Path, key: str) -> None:
     del raw["viewer"][key]
 
     with pytest.raises(ValidationError, match=key):
+        load_config(write_config(tmp_path, raw))
+
+
+# --------------------------------------------------------------------------- overlay links
+
+
+@pytest.mark.parametrize("overlay", ["zones", "normals"])
+def test_only_a_climate_reference_can_name_a_map_overlay(overlay: str) -> None:
+    raw = {**outside_link("regional climate reference"), "overlay": overlay}
+    assert OutsideLink.model_validate(raw).overlay == overlay
+    for label in ("published external trial", "community report"):
+        with pytest.raises(ValidationError, match="map overlay"):
+            OutsideLink.model_validate({**outside_link(label), "overlay": overlay})
+
+
+def test_an_unknown_overlay_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        OutsideLink.model_validate(
+            {**outside_link("regional climate reference"), "overlay": "rain"}
+        )
+
+
+def test_the_shipped_config_links_the_usda_and_noaa_rows_to_overlays() -> None:
+    links = {link.title: link.overlay for link in load_config().outside_context}
+    assert links["USDA Plant Hardiness Zone Map"] == "zones"
+    assert links["NOAA U.S. Climate Normals (1991-2020)"] == "normals"
+    assert [title for title, overlay in links.items() if overlay is not None] == [
+        "USDA Plant Hardiness Zone Map",
+        "NOAA U.S. Climate Normals (1991-2020)",
+    ]
+
+
+# --------------------------------------------------------------------------- map drawing
+
+
+def test_map_drawing_tunables_are_configured() -> None:
+    """The map's height (both maps) and the zone highlight's fade come from config.yaml."""
+    cfg = load_config().map
+    assert cfg.height_px == 340
+    assert cfg.zone_mute == 0.72
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("height_px", 199),
+        ("height_px", 1201),
+        ("zone_mute", 0),
+        ("zone_mute", 1),
+        ("zone_mute", -0.1),
+    ],
+)
+def test_map_drawing_tunables_are_bounded(tmp_path: Path, key: str, value: float) -> None:
+    raw = raw_config()
+    raw["map"][key] = value
+    with pytest.raises(ValidationError, match=key):
+        load_config(write_config(tmp_path, raw))
+
+
+@pytest.mark.parametrize("key", ["height_px", "zone_mute"])
+def test_map_drawing_tunables_are_required(tmp_path: Path, key: str) -> None:
+    raw = raw_config()
+    del raw["map"][key]
+    with pytest.raises(ValidationError, match=key):
+        load_config(write_config(tmp_path, raw))
+
+
+def test_no_overlay_can_be_switched_on_by_default(tmp_path: Path) -> None:
+    """SPEC §7: overlays stay opt-in, so the default overlay is not a setting."""
+    raw = raw_config()
+    raw["map"]["default_overlay"] = "zones"
+    with pytest.raises(ValidationError, match="default_overlay"):
         load_config(write_config(tmp_path, raw))
 
 

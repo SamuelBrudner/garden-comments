@@ -221,6 +221,9 @@ __marimo__/
 
 # crop_explorer local data (private imports, SQLite DBs, logs, diagnostics)
 data/
+# ... but the packaged, attributed climate-reference overlays are source files (built offline
+# by scripts/build_overlays.py) and must ship in git and in the wheel.
+!src/crop_explorer/data/
 *.sqlite
 *.sqlite-journal
 .venv/
