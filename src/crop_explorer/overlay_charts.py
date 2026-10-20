@@ -40,6 +40,7 @@ from typing import Any, Final, Literal, get_args
 import pandas as pd
 import plotly.graph_objects as go
 
+from crop_explorer.config import MapConfig
 from crop_explorer.geography import RegionCounts, count_label
 from crop_explorer.overlays import (
     HALF_ZONES,
@@ -244,6 +245,8 @@ _SHORT: Final[Mapping[NormalElement, str]] = MappingProxyType(
         "annual_precip_in": "annual precipitation",
     }
 )
+_NON_CONTIGUOUS: Final = frozenset({"US-AK", "US-HI"})
+"""States outside the NOAA colour scale's span (it covers the 48 contiguous states)."""
 _ZONE_SCALE_TITLE: Final = "USDA hardiness zone (2023): colder ← → warmer"
 _ZONES_NOTE: Final = (
     "Zones describe the coldest winter nights only (not summer heat, humidity, season length, "
@@ -314,9 +317,13 @@ class OverlayView:
 
     @property
     def caption(self) -> str:
-        """The caption under the map: label, source, period, the note and the counts note."""
-        lead = f"{OVERLAY_LABEL.capitalize()} · {self.source} · {self.period}."
-        return f"{lead} {self.note} {_COUNTS_NOTE}"
+        """The caption under the map: label, source, period, the note and the counts note.
+
+        The period is left out when the source already names it (the NOAA citation does).
+        """
+        parts = [OVERLAY_LABEL.capitalize(), self.source]
+        parts += [] if self.period in self.source else [self.period]
+        return f"{' · '.join(parts)}. {self.note} {_COUNTS_NOTE}"
 
 
 def emphasis_zones(zone: str | None) -> tuple[str, ...]:
@@ -372,26 +379,29 @@ class RegionalReference:
     Attributes
     ----------
     summary : str
-        One line of trusted text: zones and the three statewide averages, or what is missing.
+        One line of trusted text: main zones and the three statewide averages, or what is
+        missing.
     sources : str
-        The NOAA source (when averages are shown) and what the numbers are not ("" when nothing
-        is shown). The zones' source is named by the disclaimer.
+        What "main zones" means (and where to look up an exact zone), the NOAA source when
+        averages are shown, and what the numbers are not ("" when nothing is shown). The zones'
+        source is named by the disclaimer.
     disclaimer : str or None
-        :data:`~crop_explorer.overlays.ZONE_DISCLAIMER` whenever a zone range is shown.
-
-    The viewer shows ``disclaimer`` and ``sources`` together as :attr:`notes`.
+        :data:`~crop_explorer.overlays.ZONE_DISCLAIMER` whenever a zone range is shown; the
+        viewer shows it on its own, as prominently as the summary.
     """
 
     summary: str
     sources: str
     disclaimer: str | None
 
-    @property
-    def notes(self) -> str:
-        """The caption under the summary: the disclaimer first, then the sources."""
-        return " ".join(part for part in (self.disclaimer, self.sources) if part)
 
-
+_SHARE_PERCENT: Final = f"{MIN_STATE_ZONE_SHARE:.1%}"
+"""The smallest share of a state's area a listed half-zone covers ("0.1%")."""
+_ZONE_SCOPE: Final = (
+    f"Main zones: the half-zones covering at least {_SHARE_PERCENT} of the state's area, so a "
+    "few places can be in a zone not listed; for an exact zone, look up a ZIP code at "
+    "planthardiness.ars.usda.gov."
+)
 _REFERENCE_SCOPE: Final = (
     "Background for the region you chose, not a reading from any report's garden; never used "
     "to sort or match reports."
@@ -415,9 +425,9 @@ def regional_reference(code: str | None, refs: Overlays) -> RegionalReference | 
     Returns
     -------
     RegionalReference or None
-        ``None`` without a region. For a U.S. state: "Connecticut — USDA zones 6a-7b (2023,
-        simplified; largest area 6b); July average high 83°F, January average low 18°F,
-        annual precipitation 49 in (NOAA 1991-2020 statewide averages)", saying what is
+        ``None`` without a region. For a U.S. state: "Connecticut — main USDA zones by area
+        6a-7b (2023, simplified; largest area 6b); July average high 83°F, January average low
+        18°F, annual precipitation 49 in (NOAA 1991-2020 statewide averages)", saying what is
         missing (DC has no NOAA statewide series). Elsewhere: a line saying no reference is
         available there.
     """
@@ -430,7 +440,8 @@ def regional_reference(code: str | None, refs: Overlays) -> RegionalReference | 
     zones = _state_zone_phrase(refs.state_zones, code)
     climate = _state_normals_phrase(refs.normals, code, name)
     has_averages = not _state_rows(refs.normals, code).empty
-    sources = f"{_REFERENCE_AVERAGES} {_REFERENCE_SCOPE}" if has_averages else _REFERENCE_SCOPE
+    averages = [_REFERENCE_AVERAGES] if has_averages else []
+    sources = " ".join([_ZONE_SCOPE, *averages, _REFERENCE_SCOPE])
     return RegionalReference(f"{name} — {zones}{climate}", sources, ZONE_DISCLAIMER)
 
 
@@ -452,7 +463,7 @@ def _largest_zone(rows: pd.DataFrame) -> str:
 def _state_zone_phrase(state_zones: pd.DataFrame, code: str) -> str:
     rows = _state_rows(state_zones, code)
     span, largest = _zone_span(rows), _largest_zone(rows)
-    return f"USDA zones {span} (2023, simplified; largest area {largest})"
+    return f"main USDA zones by area {span} (2023, simplified; largest area {largest})"
 
 
 def _whole(value: float) -> int:
@@ -480,17 +491,17 @@ def _elements() -> tuple[NormalElement, ...]:
 # --------------------------------------------------------------------------- tables
 
 
-def _percent(share: float) -> str:
-    return "<1%" if share < 0.005 else f"{round(share * 100)}%"
-
-
-def _zone_shares(rows: pd.DataFrame) -> str:
-    pairs = zip(rows["zone"], rows["area_share"], strict=True)
-    return " · ".join(f"{zone} {_percent(float(share))}" for zone, share in pairs)
+_RANGE_COLUMNS: Final = ("State", "Main zones", "Largest area")
+_SHARE_COLUMNS: Final = ("State", "Zone", "Share of the state's area (%)")
+_RANGE_TITLE: Final = (
+    f"Main zones by area: the half-zones covering at least {_SHARE_PERCENT} of each state "
+    "(2023, simplified)"
+)
+_SHARE_TITLE: Final = "Share of each state's area by half-zone (2023, simplified)"
 
 
 def zone_range_table(state_zones: pd.DataFrame) -> pd.DataFrame:
-    """Return the zone layer's table twin: each state's half-zones, by state name.
+    """Return each state's main zones by area, by state name (the zone hover's twin).
 
     Parameters
     ----------
@@ -500,16 +511,33 @@ def zone_range_table(state_zones: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        Columns "State", "Zones" ("6a-7b"), "Largest area" and "Share of the state's area"
-        ("6a 19% · 6b 65% · 7a 16% · 7b <1%"), one row per state and DC.
+        Columns "State", "Main zones" ("6a-7b": the coldest to the warmest half-zone
+        covering at least :data:`~crop_explorer.overlays.MIN_STATE_ZONE_SHARE` of the state)
+        and "Largest area" ("6b"), one row per state and DC.
     """
     rows = [
-        (REGION_NAMES[str(code)], _zone_span(group), _largest_zone(group), _zone_shares(group))
+        (REGION_NAMES[str(code)], _zone_span(group), _largest_zone(group))
         for code, group in state_zones.groupby("region_code", sort=False)
     ]
-    columns = ["State", "Zones", "Largest area", "Share of the state's area"]
-    frame = pd.DataFrame(sorted(rows), columns=columns)
-    return frame.reset_index(drop=True)
+    return pd.DataFrame(sorted(rows), columns=list(_RANGE_COLUMNS))
+
+
+def zone_share_table(state_zones: pd.DataFrame) -> pd.DataFrame:
+    """Return the tidy share table: one row per (state, half-zone), the share as a number.
+
+    Rows are sorted by state name, then cold to warm; "Share of the state's area (%)" is a float
+    rounded to one decimal (at least 0.1, the smallest share listed).
+    """
+    frame = pd.DataFrame(
+        {
+            "State": [REGION_NAMES[str(code)] for code in state_zones["region_code"]],
+            "Zone": list(state_zones["zone"]),
+            "rank": [zone_rank(str(zone)) for zone in state_zones["zone"]],
+            _SHARE_COLUMNS[2]: [round(float(x) * 100, 1) for x in state_zones["area_share"]],
+        }
+    )
+    frame = frame.sort_values(["State", "rank"], kind="stable")
+    return frame[list(_SHARE_COLUMNS)].reset_index(drop=True)
 
 
 def zone_key_table(zones: ZoneLayer) -> pd.DataFrame:
@@ -537,8 +565,9 @@ def normals_table(normals: pd.DataFrame, element: NormalElement) -> pd.DataFrame
 def overlay_tables(key: OverlayKey, refs: Overlays) -> tuple[tuple[str, pd.DataFrame], ...]:
     """Return an overlay's table twin as titled tables (every value without hovering).
 
-    The zone layer: the half-zones of each state, then the zone key (each half-zone's
-    temperature band). A NOAA layer: each state's 1991-2020 average.
+    The zone layer: each state's main zones by area, each state's share per half-zone (tidy),
+    then the zone key (each half-zone's temperature band); the viewer shows them under the
+    zone disclaimer. A NOAA layer: each state's 1991-2020 average.
 
     Raises
     ------
@@ -548,8 +577,9 @@ def overlay_tables(key: OverlayKey, refs: Overlays) -> tuple[tuple[str, pd.DataF
     if key == "none":
         raise ValueError("The report-count map has no overlay")
     if key == "zones":
-        states = ("Zones by state (2023, simplified)", zone_range_table(refs.state_zones))
-        return (states, ("Zone key", zone_key_table(refs.zones)))
+        states = (_RANGE_TITLE, zone_range_table(refs.state_zones))
+        shares = (_SHARE_TITLE, zone_share_table(refs.state_zones))
+        return (states, shares, ("Zone key", zone_key_table(refs.zones)))
     title = f"{_SCALE_TITLES[key]}: statewide {NORMALS_PERIOD} averages (NOAA)"
     return ((title, normals_table(refs.normals, key)),)
 
@@ -562,9 +592,15 @@ def overlay_figure(
     refs: Overlays,
     counts: RegionCounts,
     theme: ChartTheme,
+    cfg: MapConfig,
+    *,
     zone: str | None = None,
 ) -> go.Figure:
     """Draw one overlay with the report counts as labels (dispatches on ``key``).
+
+    ``zone`` is the zone to emphasise on the zone layer (the viewer's, or one picked with
+    "Highlight a zone"); the height and the emphasis fade come from ``cfg`` (``config.yaml``
+    ``map.height_px`` and ``map.zone_mute``).
 
     Raises
     ------
@@ -574,76 +610,145 @@ def overlay_figure(
     if key == "none":
         raise ValueError("The report-count map has no overlay")
     if key == "zones":
-        return zone_figure(refs, counts, theme, emphasis=emphasis_zones(zone))
-    return normals_figure(refs.normals, key, counts, theme)
+        return zone_figure(refs, counts, theme, cfg, emphasis=emphasis_zones(zone))
+    return normals_figure(refs.normals, key, counts, theme, cfg)
 
 
 def zone_figure(
-    refs: Overlays, counts: RegionCounts, theme: ChartTheme, *, emphasis: Sequence[str] = ()
+    refs: Overlays,
+    counts: RegionCounts,
+    theme: ChartTheme,
+    cfg: MapConfig,
+    *,
+    emphasis: Sequence[str] = (),
 ) -> go.Figure:
     """Draw the half-zone layer under the state outlines, with report counts as labels.
 
     Parameters
     ----------
     refs : Overlays
-        The loaded references (zone polygons and per-state zone ranges).
+        The loaded references (zone table and per-state zone ranges).
     counts : RegionCounts
         Shown reports per state; only states with reports get a label.
     theme : ChartTheme
         Light or dark tokens.
+    cfg : MapConfig
+        ``height_px`` (the figure, scale legend included) and ``zone_mute``.
     emphasis : Sequence[str]
         Half-zones to emphasise (:func:`emphasis_zones`): they keep their colour while every
-        other zone is blended toward the surface, on the map and in the scale legend alike,
-        whose tick for the emphasised zone is bold ("6b").
+        other zone is blended ``cfg.zone_mute`` of the way toward the surface, on the map and
+        in the scale legend alike, whose tick for the emphasised zone is bold ("6b").
 
     Returns
     -------
     plotly.graph_objects.Figure
-        Three traces: the zone ``Choropleth`` (the GeoJSON as loaded, ``featureidkey
-        "properties.zone"``, a stepped semantic-heat colour scale with a horizontal scale
-        legend, no hover), a transparent ``USA-states`` ``Choropleth`` drawing the outlines and
-        carrying each state's hover text and click target, and the count labels.
+        Three traces: the zone ``Choropleth`` (``geojson`` = :data:`ZONE_LAYER_URL`,
+        ``featureidkey "properties.zone"``, a stepped semantic-heat colour scale with a
+        horizontal scale legend, no hover), a transparent ``USA-states`` ``Choropleth`` drawing
+        the outlines and carrying each state's hover text and click target, and the count
+        labels.
     """
     ranges = refs.state_zones
     states = sorted(set(ranges["region_code"]))
     hover = [_zone_hover(code, ranges, counts) for code in states]
     traces = [
-        _zone_trace(refs.zones, theme, tuple(emphasis)),
+        _zone_trace(refs.zones, theme, tuple(emphasis), cfg.zone_mute),
         _state_layer(states, hover, theme),
         _count_labels(counts, theme),
     ]
     figure = go.Figure(traces)
-    figure.update_layout(**_layout(theme))
+    figure.update_layout(**_layout(theme, cfg.height_px))
     return figure
 
 
 def normals_figure(
-    normals: pd.DataFrame, element: NormalElement, counts: RegionCounts, theme: ChartTheme
+    normals: pd.DataFrame,
+    element: NormalElement,
+    counts: RegionCounts,
+    theme: ChartTheme,
+    cfg: MapConfig,
 ) -> go.Figure:
     """Draw one NOAA statewide average per state on the orange ramp, with report counts.
+
+    The colour scale spans the 48 contiguous states, so they use the whole ramp; Alaska and
+    Hawaii take its end colours when outside it (:func:`scale_note` says so).
 
     Returns
     -------
     plotly.graph_objects.Figure
         A ``USA-states`` ``Choropleth`` (the fill, the outlines, hover and the click target)
         with a horizontal scale legend titled e.g. "July average high (°F)", then the count
-        labels.
+        labels; ``cfg.height_px`` pixels tall.
 
     Raises
     ------
     ValueError
         If ``element`` is not one of the three averages.
     """
-    if element not in _SCALE_TITLES:
-        raise ValueError(f"Unknown NOAA statewide average: {element!r}")
-    rows = normals[normals["element"] == element]
+    rows = _element_rows(normals, element)
     codes = [str(code) for code in rows["region_code"]]
     values = [float(value) for value in rows["value"]]
     hover = [_normals_hover(c, element, v, counts) for c, v in zip(codes, values, strict=True)]
     fill = _normals_trace(codes, values, hover, element, theme)
     figure = go.Figure([fill, _count_labels(counts, theme)])
-    figure.update_layout(**_layout(theme))
+    figure.update_layout(**_layout(theme, cfg.height_px))
     return figure
+
+
+def scale_note(key: OverlayKey, refs: Overlays) -> str | None:
+    """Say what a NOAA layer's colour scale spans and which states fall outside it.
+
+    E.g. "The colour scale spans the 48 contiguous states (77.2°F to 95.2°F); Alaska (62.3°F)
+    and Hawaii (76.3°F) are below it and drawn in its lowest colour." ``None`` for the zone
+    layer (its scale is every half-zone).
+
+    Raises
+    ------
+    ValueError
+        For ``"none"``, which has no overlay.
+    """
+    if key == "none":
+        raise ValueError("The report-count map has no overlay")
+    if key == "zones":
+        return None
+    rows = _element_rows(refs.normals, key)
+    low, high = _contiguous_range(rows)
+    span = f"The colour scale spans the 48 contiguous states ({_value(key, low)} to "
+    span += f"{_value(key, high)})"
+    outside = _outside_scale(rows, key, low, high)
+    return f"{span}; {outside}." if outside else f"{span}."
+
+
+def _element_rows(normals: pd.DataFrame, element: NormalElement) -> pd.DataFrame:
+    if element not in _SCALE_TITLES:
+        raise ValueError(f"Unknown NOAA statewide average: {element!r}")
+    return normals[normals["element"] == element]
+
+
+def _contiguous_range(rows: pd.DataFrame) -> tuple[float, float]:
+    """Return the lowest and highest value of the 48 contiguous states."""
+    values = rows.loc[~rows["region_code"].isin(_NON_CONTIGUOUS), "value"]
+    return float(values.min()), float(values.max())
+
+
+def _value(element: NormalElement, value: float) -> str:
+    return f"{value:.1f}{_UNITS[element]}"
+
+
+def _outside_scale(rows: pd.DataFrame, element: NormalElement, low: float, high: float) -> str:
+    """Name the states below and above the scale: "Alaska (62.3°F) is below it and ..."."""
+    sides = ((rows["value"] < low, "below", "lowest"), (rows["value"] > high, "above", "highest"))
+    clauses = [_side_clause(rows[mask], element, side, end) for mask, side, end in sides]
+    return "; ".join(clause for clause in clauses if clause)
+
+
+def _side_clause(found: pd.DataFrame, element: NormalElement, side: str, end: str) -> str:
+    pairs = sorted(zip(found["region_code"], found["value"], strict=True))
+    names = [f"{US_STATES[str(code)]} ({_value(element, float(value))})" for code, value in pairs]
+    if not names:
+        return ""
+    verb = "is" if len(names) == 1 else "are"
+    return f"{' and '.join(names)} {verb} {side} it and drawn in its {end} colour"
 
 
 # --------------------------------------------------------------------------- figure helpers
@@ -689,7 +794,7 @@ def _mix(color: str, surface: str, weight: float) -> str:
     return "#" + "".join(f"{round(c + (s - c) * weight):02x}" for c, s in pairs)
 
 
-def _zone_colors(theme: ChartTheme, emphasis: Sequence[str]) -> list[str]:
+def _zone_colors(theme: ChartTheme, emphasis: Sequence[str], mute: float) -> list[str]:
     """One colour per half-zone; with an emphasis, every other zone is muted toward the surface.
 
     Muting lives in the colour scale itself, so the scale legend shows the same emphasis as
@@ -699,20 +804,23 @@ def _zone_colors(theme: ChartTheme, emphasis: Sequence[str]) -> list[str]:
     if not emphasis:
         return list(ramp)
     return [
-        color if zone in emphasis else _mix(color, theme.surface, _MUTE)
+        color if zone in emphasis else _mix(color, theme.surface, mute)
         for zone, color in zip(HALF_ZONES, ramp, strict=True)
     ]
 
 
-def _zone_trace(zones: ZoneLayer, theme: ChartTheme, emphasis: tuple[str, ...]) -> go.Choropleth:
+def _zone_trace(
+    zones: ZoneLayer, theme: ChartTheme, emphasis: tuple[str, ...], mute: float
+) -> go.Choropleth:
     """Return the half-zone fill: a stepped colour scale, each zone outlined in its own colour.
 
-    The same-colour outline closes the anti-aliasing seams between neighbouring zones.
+    The polygons are fetched by the browser from :data:`ZONE_LAYER_URL`; ``zones.table`` gives
+    the locations. The same-colour outline closes the anti-aliasing seams between zones.
     """
     order = [str(zone) for zone in zones.table["zone"]]
-    colors = _zone_colors(theme, emphasis)
+    colors = _zone_colors(theme, emphasis, mute)
     return go.Choropleth(
-        geojson=zones.geojson,
+        geojson=ZONE_LAYER_URL,
         featureidkey="properties.zone",
         locations=order,
         z=[zone_rank(zone) for zone in order],
@@ -750,13 +858,19 @@ def _state_layer(codes: Sequence[str], hover: Sequence[str], theme: ChartTheme) 
     )
 
 
-def _reports(code: str, counts: RegionCounts) -> str:
+def _reports(code: str, counts: RegionCounts, not_attached: str) -> str:
+    """Return the hover's own reports line, saying the layer's value is not attached to them.
+
+    "Reports naming this state: 4 (zones are not assigned to reports)"; a suppressed cell
+    shows "fewer than 3", never its count; a state without shown reports "none shown".
+    """
     rows = counts.table[counts.table["region_code"] == code]
-    if rows.empty:
-        return "no shown reports naming this state"
-    n, suppressed = int(rows["n_comments"].iloc[0]), bool(rows["suppressed"].iloc[0])
-    label = count_label(n, suppressed=suppressed, min_cell_count=counts.min_cell_count)
-    return f"{label} naming this state"
+    shown = "none shown"
+    if not rows.empty:
+        n, suppressed = int(rows["n_comments"].iloc[0]), bool(rows["suppressed"].iloc[0])
+        label = count_label(n, suppressed=suppressed, min_cell_count=counts.min_cell_count)
+        shown = label.removesuffix(" reports").removesuffix(" report")
+    return f"Reports naming this state: {shown} ({not_attached})"
 
 
 def _lines(*lines: str) -> str:
@@ -765,14 +879,16 @@ def _lines(*lines: str) -> str:
 
 
 def _zone_hover(code: str, ranges: pd.DataFrame, counts: RegionCounts) -> str:
-    zones = f"USDA zones {_zone_span(_state_rows(ranges, code))} (2023, simplified)"
-    return _lines(US_STATES[code], zones, _reports(code, counts))
+    zones = f"Main USDA zones by area: {_zone_span(_state_rows(ranges, code))} (2023, simplified)"
+    reports = _reports(code, counts, "zones are not assigned to reports")
+    return _lines(US_STATES[code], zones, reports)
 
 
 def _normals_hover(code: str, element: NormalElement, value: float, counts: RegionCounts) -> str:
-    average = f"{_SHORT[element].capitalize()}: {value:.1f}{_UNITS[element]}"
+    average = f"{_SHORT[element].capitalize()}: {_value(element, value)}"
     period = "statewide 1991-2020 average (NOAA)"
-    return _lines(US_STATES[code], average, period, _reports(code, counts))
+    reports = _reports(code, counts, "the average is not attached to reports")
+    return _lines(US_STATES[code], average, period, reports)
 
 
 def _normals_trace(
@@ -782,12 +898,14 @@ def _normals_trace(
     element: NormalElement,
     theme: ChartTheme,
 ) -> go.Choropleth:
+    """Return the state fill; its scale spans the contiguous states (others take its ends)."""
+    scale = _contiguous_range(pd.DataFrame({"region_code": codes, "value": values}))
     return go.Choropleth(
         locationmode="USA-states",
         locations=[us_postal(code) for code in codes],
         z=list(values),
-        zmin=min(values),
-        zmax=max(values),
+        zmin=scale[0],
+        zmax=scale[1],
         colorscale=_smooth(_NORMALS_RAMPS[theme.name]),
         colorbar=_colorbar(theme, _SCALE_TITLES[element], 0.7),
         marker=_outline(theme),
@@ -825,11 +943,11 @@ def _count_labels(counts: RegionCounts, theme: ChartTheme) -> go.Scattergeo:
     )
 
 
-def _layout(theme: ChartTheme) -> dict[str, Any]:
+def _layout(theme: ChartTheme, height: int) -> dict[str, Any]:
     """Return static, transparent chrome: the U.S. only, no zoom or drag, themed text."""
     font = {"family": FONT_FAMILY, "size": _FONT_PX, "color": theme.text_secondary}
     return {
-        "height": MAP_HEIGHT,
+        "height": height,
         "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
         "geo": dict(_GEO),
         "paper_bgcolor": _TRANSPARENT,

@@ -57,10 +57,18 @@ class ViewerConfig(BaseModel):
 
 
 class MapConfig(BaseModel):
-    """Privacy controls for the coarse region map."""
+    """The coarse region map: its privacy control and how it is drawn.
+
+    ``height_px`` is the height of the map (the report-count map and every overlay, the scale
+    legend included); ``zone_mute`` is how far the other half-zones fade toward the background
+    when one zone is emphasised on the zone overlay (0: not at all, 1: invisible). Overlays are
+    always off until the viewer picks one (SPEC §7), so the default overlay is not a setting.
+    """
 
     model_config = _STRICT
     public_min_cell_count: int = Field(ge=1)
+    height_px: int = Field(ge=200, le=1200)
+    zone_mute: float = Field(gt=0, lt=1)
 
 
 class OverviewConfig(BaseModel):

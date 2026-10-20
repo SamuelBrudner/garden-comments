@@ -468,7 +468,7 @@ def test_phone_width_zone_overlay_shows_the_map_and_the_disclaimer(
     page.get_by_role("tab", name="Map", exact=True).click()
     panel = page.get_by_role("tabpanel", name="Map")
     panel.get_by_text("USDA hardiness zones (2023)", exact=True).click()
-    disclaimer = panel.get_by_text(ZONE_DISCLAIMER)
+    disclaimer = panel.get_by_text(ZONE_DISCLAIMER).first  # above the map (again in the table)
     disclaimer.scroll_into_view_if_needed()
     expect(disclaimer).to_be_in_viewport()
     plot = panel.locator(".js-plotly-plot")

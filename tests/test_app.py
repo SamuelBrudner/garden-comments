@@ -1680,9 +1680,9 @@ class TestClimateOverlays:
         (table,) = [e for e in map_tab(at).expander if e.label == ui.TABLE_LABEL]
         assert [i.value for i in table.info] == [ZONE_DISCLAIMER]  # with the data
         states, shares, key = (frame.value for frame in table.dataframe)
-        assert list(states.columns) == ["State", "Main zones by area", "Largest area"]
+        assert list(states.columns) == ["State", "Main zones", "Largest area"]
         assert len(states) == 51
-        assert states.set_index("State").loc["Connecticut", "Main zones by area"] == "6a-7b"
+        assert states.set_index("State").loc["Connecticut", "Main zones"] == "6a-7b"
         assert list(shares.columns) == ["State", "Zone", "Share of the state's area (%)"]
         assert shares["Share of the state's area (%)"].dtype == "float64"
         assert list(key.columns) == ["Zone", "Average coldest winter night (°F)"]

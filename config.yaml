@@ -20,6 +20,12 @@ map:
   # and the state filter still lists the reports, so it is not a privacy control. Only
   # publish comments whose source is cleared.
   public_min_cell_count: 1
+  # Height in pixels of the map, with or without an overlay (its scale legend included).
+  height_px: 340
+  # On the hardiness-zone overlay, how far the other zones fade toward the background when
+  # one zone is highlighted (0: not at all, 1: invisible). Overlays are always off until the
+  # viewer picks one (SPEC §7), so there is no default-overlay setting.
+  zone_mute: 0.72
 
 overview:
   # "At a glance" header. The bar chart lists this many of the most-discussed varieties

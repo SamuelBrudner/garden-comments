@@ -9,8 +9,9 @@
 
 [server]
 # Serve ./static: Plotly's own U.S. base map (static/topojson/, see its NOTICE.md), so the maps
-# never depend on cdn.plot.ly (Plotly draws nothing on a map until it has loaded). Still no
-# address or port (see above).
+# never depend on cdn.plot.ly (Plotly draws nothing on a map until it has loaded), and the zone
+# overlay's polygons (static/overlays/, a checked copy of the packaged layer) that browsers
+# fetch once and cache. Still no address or port (see above).
 enableStaticServing = true
 
 [browser]

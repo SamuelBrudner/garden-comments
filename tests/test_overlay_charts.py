@@ -29,8 +29,8 @@ from crop_explorer.overlays import (
     NORMAL_ELEMENTS,
     NORMALS_PERIOD,
     NORMALS_SOURCE,
-    SERVED_ZONES_NAME,
     OVERLAY_LABEL,
+    SERVED_ZONES_NAME,
     ZONE_DISCLAIMER,
     ZONE_PERIOD,
     ZONE_SOURCE,
@@ -48,10 +48,8 @@ NOAA_STATES = sorted(set(US_STATES) - {"US-DC"})
 CONTIGUOUS = sorted(set(NOAA_STATES) - {"US-AK", "US-HI"})
 TRANSPARENT = "rgba(0,0,0,0)"
 MAP_CFG = load_config().map
-HEIGHT = MAP_CFG.height_px
-MUTE = MAP_CFG.zone_mute
-SIZE: dict[str, Any] = {"height": HEIGHT, "mute": MUTE}
 """The configured map height and zone fade (``config.yaml`` ``map``)."""
+HEIGHT = MAP_CFG.height_px
 
 
 @pytest.fixture(scope="module")
@@ -118,7 +116,7 @@ def label_trace(figure: go.Figure) -> go.Scattergeo:
 
 def all_overlays(refs: Overlays, theme: ChartTheme) -> Iterator[tuple[str, go.Figure]]:
     for key in oc.OVERLAY_KEYS[1:]:
-        yield key, oc.overlay_figure(key, refs, SOME, theme, **SIZE)
+        yield key, oc.overlay_figure(key, refs, SOME, theme, MAP_CFG)
 
 
 def figure_strings(figure: go.Figure) -> list[str]:
@@ -150,7 +148,7 @@ def test_none_has_no_overlay(refs: Overlays) -> None:
     with pytest.raises(ValueError, match="no overlay"):
         oc.overlay_view("none")
     with pytest.raises(ValueError, match="no overlay"):
-        oc.overlay_figure("none", refs, SOME, LIGHT, **SIZE)
+        oc.overlay_figure("none", refs, SOME, LIGHT, MAP_CFG)
 
 
 def test_zone_view_carries_label_source_period_and_the_disclaimer() -> None:
@@ -197,7 +195,7 @@ def test_emphasis_zones() -> None:
 def test_zone_figure_is_one_fill_under_state_outlines_with_count_labels(
     refs: Overlays, theme: ChartTheme
 ) -> None:
-    figure = oc.zone_figure(refs, SOME, theme, **SIZE)
+    figure = oc.zone_figure(refs, SOME, theme, MAP_CFG)
     zones, states, labels = figure.data
     assert isinstance(zones, go.Choropleth)
     assert zones.featureidkey == "properties.zone"
@@ -218,14 +216,14 @@ def test_zone_geojson_is_the_app_served_copy_by_url(refs: Overlays) -> None:
     The browser fetches and caches the app-served copy (byte-identical to the packaged file,
     which is passed as is: Plotly does not rewind rings).
     """
-    figure = oc.zone_figure(refs, SOME, LIGHT, **SIZE)
+    figure = oc.zone_figure(refs, SOME, LIGHT, MAP_CFG)
     assert figure.data[0].geojson == oc.ZONE_LAYER_URL
-    assert oc.ZONE_LAYER_URL == f"app/static/overlays/{SERVED_ZONES_NAME}"
+    assert f"app/static/overlays/{SERVED_ZONES_NAME}" == oc.ZONE_LAYER_URL
     assert len(figure.to_json()) < 50_000
 
 
 def test_zone_figure_hover_is_per_state_with_its_range_and_reports(refs: Overlays) -> None:
-    figure = oc.zone_figure(refs, SOME, LIGHT, **SIZE)
+    figure = oc.zone_figure(refs, SOME, LIGHT, MAP_CFG)
     states = figure.data[1]
     assert sorted(states.locations) == sorted(us_postal(code) for code in US_STATES)
     hover = dict(zip(states.locations, states.text, strict=True))
@@ -233,7 +231,9 @@ def test_zone_figure_hover_is_per_state_with_its_range_and_reports(refs: Overlay
         "Connecticut<br>Main USDA zones by area: 6a-7b (2023, simplified)"
         "<br>Reports naming this state: 4 (zones are not assigned to reports)"
     )
-    assert hover["VT"].endswith("Reports naming this state: none shown (zones are not assigned to reports)")
+    assert hover["VT"].endswith(
+        "Reports naming this state: none shown (zones are not assigned to reports)"
+    )
     assert states.hovertemplate == "%{text}<extra></extra>"
 
 
@@ -241,7 +241,7 @@ def test_zone_figure_hover_is_per_state_with_its_range_and_reports(refs: Overlay
 def test_zone_scale_legend_runs_cold_to_warm_with_one_tick_per_zone(
     refs: Overlays, theme: ChartTheme
 ) -> None:
-    zones = oc.zone_figure(refs, SOME, theme, **SIZE).data[0]
+    zones = oc.zone_figure(refs, SOME, theme, MAP_CFG).data[0]
     bar = zones.colorbar
     assert bar.orientation == "h"
     assert "colder" in bar.title.text and "warmer" in bar.title.text
@@ -255,7 +255,7 @@ def test_zone_scale_legend_runs_cold_to_warm_with_one_tick_per_zone(
 
 
 def test_zone_outlines_match_each_fill_so_no_seams_show(refs: Overlays) -> None:
-    zones = oc.zone_figure(refs, SOME, LIGHT, **SIZE).data[0]
+    zones = oc.zone_figure(refs, SOME, LIGHT, MAP_CFG).data[0]
     assert list(zones.marker.line.color) == [
         oc.ZONE_RAMP_LIGHT[zone_rank(zone)] for zone in zones.locations
     ]
@@ -265,7 +265,7 @@ def test_zone_outlines_match_each_fill_so_no_seams_show(refs: Overlays) -> None:
 def test_viewer_zone_is_emphasised_on_the_map_and_in_the_legend(
     refs: Overlays, theme: ChartTheme
 ) -> None:
-    zones = oc.zone_figure(refs, SOME, theme, emphasis=("6b",), **SIZE).data[0]
+    zones = oc.zone_figure(refs, SOME, theme, MAP_CFG, emphasis=("6b",)).data[0]
     ramp = oc.ZONE_RAMP_LIGHT if theme is LIGHT else oc.ZONE_RAMP_DARK
     bands = [color for _, color in zones.colorscale][::2]
     kept = [
@@ -278,15 +278,18 @@ def test_viewer_zone_is_emphasised_on_the_map_and_in_the_legend(
         == "<b>6b</b>"
     )
     assert "6" not in zones.colorbar.ticktext  # 6b's tick replaces zone 6's
-    assert fill_traces(oc.zone_figure(refs, SOME, theme, emphasis=("6b",), **SIZE)) == [
-        oc.zone_figure(refs, SOME, theme, emphasis=("6b",), **SIZE).data[0]
+    assert fill_traces(oc.zone_figure(refs, SOME, theme, MAP_CFG, emphasis=("6b",))) == [
+        oc.zone_figure(refs, SOME, theme, MAP_CFG, emphasis=("6b",)).data[0]
     ]
 
 
 def test_muted_zones_blend_toward_the_surface(refs: Overlays) -> None:
     for theme, ramp in ((LIGHT, oc.ZONE_RAMP_LIGHT), (DARK, oc.ZONE_RAMP_DARK)):
         bands = [
-            c for _, c in oc.zone_figure(refs, SOME, theme, emphasis=("6b",), **SIZE).data[0].colorscale
+            c
+            for _, c in oc.zone_figure(refs, SOME, theme, MAP_CFG, emphasis=("6b",))
+            .data[0]
+            .colorscale
         ][::2]
         surface = oklab_lightness(theme.surface)
         for zone, band, color in zip(HALF_ZONES, bands, ramp, strict=True):
@@ -294,8 +297,31 @@ def test_muted_zones_blend_toward_the_surface(refs: Overlays) -> None:
                 assert abs(oklab_lightness(band) - surface) < abs(oklab_lightness(color) - surface)
 
 
+def test_the_fade_follows_the_configured_weight(refs: Overlays) -> None:
+    def bands(mute: float) -> list[str]:
+        cfg = MAP_CFG.model_copy(update={"zone_mute": mute})
+        figure = oc.zone_figure(refs, SOME, LIGHT, cfg, emphasis=("6b",))
+        return [color for _, color in figure.data[0].colorscale][::2]
+
+    light, strong = bands(0.3), bands(0.9)
+    six_b = zone_rank("6b")
+    assert light[six_b] == strong[six_b] == oc.ZONE_RAMP_LIGHT[six_b]
+    surface = oklab_lightness(LIGHT.surface)
+    for index in (0, 12, 25):
+        weak_gap = abs(oklab_lightness(light[index]) - surface)
+        assert abs(oklab_lightness(strong[index]) - surface) < weak_gap
+
+
+def test_adjacent_half_zones_are_too_close_to_read_by_colour_alone() -> None:
+    """Documented limit: only the anchors pass the ordinal lightness gate, so the map offers
+    the zone emphasis ("Highlight a zone") to show where a zone is."""
+    for ramp in (oc.ZONE_RAMP_LIGHT, oc.ZONE_RAMP_DARK):
+        gaps = [abs(oklab_lightness(a) - oklab_lightness(b)) for a, b in pairwise(ramp)]
+        assert max(gaps) < 0.06
+
+
 def test_a_whole_zone_emphasises_both_halves(refs: Overlays) -> None:
-    figure = oc.overlay_figure("zones", refs, SOME, LIGHT, zone="6", **SIZE)
+    figure = oc.overlay_figure("zones", refs, SOME, LIGHT, MAP_CFG, zone="6")
     zones = figure.data[0]
     bands = [color for _, color in zones.colorscale][::2]
     kept = [z for z, b, c in zip(HALF_ZONES, bands, oc.ZONE_RAMP_LIGHT, strict=True) if b == c]
@@ -318,14 +344,14 @@ def test_count_labels_only_for_states_with_reports_and_no_coordinates(refs: Over
 
 
 def test_no_reports_means_no_labels(refs: Overlays) -> None:
-    figure = oc.overlay_figure("zones", refs, counts({}), LIGHT, **SIZE)
+    figure = oc.overlay_figure("zones", refs, counts({}), LIGHT, MAP_CFG)
     assert list(label_trace(figure).locations) == []
 
 
 def test_suppressed_cells_never_show_their_count(refs: Overlays) -> None:
     small = counts({"US-CT": 4, "US-TX": 0}, suppressed=frozenset({"US-TX"}), min_cell=3)
     for key in oc.OVERLAY_KEYS[1:]:
-        figure = oc.overlay_figure(key, refs, small, LIGHT, **SIZE)
+        figure = oc.overlay_figure(key, refs, small, LIGHT, MAP_CFG)
         labels = dict(zip(label_trace(figure).locations, label_trace(figure).text, strict=True))
         assert labels == {"CT": "4", "TX": "&lt;3"}  # displayed as "<3"
         hover = [
@@ -352,7 +378,7 @@ def test_count_labels_use_text_tokens_with_a_surface_halo(
 def test_noaa_figure_is_one_state_fill_with_a_legend(
     refs: Overlays, theme: ChartTheme, element: str
 ) -> None:
-    figure = oc.normals_figure(refs.normals, element, SOME, theme, height=HEIGHT)  # type: ignore[arg-type]
+    figure = oc.normals_figure(refs.normals, element, SOME, theme, MAP_CFG)  # type: ignore[arg-type]
     fill, labels = figure.data
     assert fill_traces(figure) == [fill]
     assert fill.locationmode == "USA-states"
@@ -374,7 +400,7 @@ def test_noaa_figure_is_one_state_fill_with_a_legend(
 
 
 def test_noaa_hover_names_the_average_and_the_reports(refs: Overlays) -> None:
-    fill = oc.normals_figure(refs.normals, "july_avg_high_f", SOME, LIGHT, height=HEIGHT).data[0]
+    fill = oc.normals_figure(refs.normals, "july_avg_high_f", SOME, LIGHT, MAP_CFG).data[0]
     hover = dict(zip(fill.locations, fill.text, strict=True))
     assert hover["CT"] == (
         "Connecticut<br>July average high: 82.9°F<br>statewide 1991-2020 average (NOAA)"
@@ -400,7 +426,7 @@ def test_noaa_scale_spans_the_contiguous_states_and_says_who_is_off_it(refs: Ove
 
 def test_unknown_noaa_element_is_rejected(refs: Overlays) -> None:
     with pytest.raises(ValueError, match="Unknown NOAA statewide average"):
-        oc.normals_figure(refs.normals, "snowfall", SOME, LIGHT, height=HEIGHT)  # type: ignore[arg-type]
+        oc.normals_figure(refs.normals, "snowfall", SOME, LIGHT, MAP_CFG)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- shared chrome
@@ -455,8 +481,8 @@ def test_orange_ramp_mirrors_the_blue_ramp_and_anchors_are_its_steps() -> None:
     assert oc.SEQUENTIAL_ORANGE[5] == "#eb6834"  # categorical slot 2
     steps = dict(zip(range(100, 701, 50), oc.SEQUENTIAL_ORANGE, strict=True))
     # Sequential (a magnitude): the low end may recede toward the surface, as on the topic grid.
-    assert oc.NORMALS_ANCHORS_LIGHT == tuple(steps[s] for s in (100, 200, 300, 400, 500, 600))
-    assert oc.NORMALS_ANCHORS_DARK == tuple(steps[s] for s in (700, 600, 500, 400, 300, 200))
+    assert tuple(steps[s] for s in (100, 200, 300, 400, 500, 600)) == oc.NORMALS_ANCHORS_LIGHT
+    assert tuple(steps[s] for s in (700, 600, 500, 400, 300, 200)) == oc.NORMALS_ANCHORS_DARK
     light = [oklab_lightness(c) for c in oc.NORMALS_ANCHORS_LIGHT]
     dark = [oklab_lightness(c) for c in oc.NORMALS_ANCHORS_DARK]
     assert light == sorted(light, reverse=True)  # light mode: more is darker
@@ -470,11 +496,11 @@ def test_orange_ramp_mirrors_the_blue_ramp_and_anchors_are_its_steps() -> None:
 
 def test_zone_range_table(refs: Overlays) -> None:
     table = oc.zone_range_table(refs.state_zones)
-    assert list(table.columns) == ["State", "Main zones by area", "Largest area"]
+    assert list(table.columns) == ["State", "Main zones", "Largest area"]
     assert len(table) == len(US_STATES)
     assert list(table["State"]) == sorted(US_STATES.values())
     ct = table[table["State"] == "Connecticut"].iloc[0]
-    assert (ct["Main zones by area"], ct["Largest area"]) == ("6a-7b", "6b")
+    assert (ct["Main zones"], ct["Largest area"]) == ("6a-7b", "6b")
 
 
 def test_zone_share_table_is_tidy_with_numeric_shares(refs: Overlays) -> None:

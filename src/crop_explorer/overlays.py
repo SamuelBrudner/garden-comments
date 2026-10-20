@@ -192,7 +192,9 @@ def check_served_copy(path: Path, packaged: Path = OVERLAY_DIR / ZONES_FILE) -> 
     try:
         served, expected = path.read_bytes(), packaged.read_bytes()
     except OSError as error:
-        raise OverlayDataError(f"The browser copy of the zone layer is missing: {error}") from error
+        raise OverlayDataError(
+            f"The browser copy of the zone layer is missing: {error}"
+        ) from error
     if served != expected:
         raise OverlayDataError(
             f"{path.name} differs from the packaged {packaged.name}: copy it again"

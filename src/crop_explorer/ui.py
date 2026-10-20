@@ -78,6 +78,7 @@ __all__ = [
     "DEMO_BANNER",
     "EVIDENCE_LABEL",
     "GLANCE_TABS",
+    "HIGHLIGHT_ZONE_KEY",
     "MISSING_DB_COMMAND",
     "MORE_KEYS",
     "NOT_ANALYSED_LINE",
@@ -126,6 +127,9 @@ __all__ = [
     "glance_feedback",
     "glance_key",
     "group_heading",
+    "highlight_label",
+    "highlight_options",
+    "highlight_zone",
     "is_loopback_address",
     "key_label",
     "kpi_tiles_html",
@@ -272,6 +276,10 @@ PAGE_QUERY_KEY: Final = "page_query"
 OVERLAY_KEY: Final = "map_overlay"
 """Session key of the map's overlay choice (an ``OverlayKey``; ``"none"`` by default). It is a
 view option, not a condition or filter, so Clear leaves it as it is."""
+HIGHLIGHT_ZONE_KEY: Final = "map_highlight_zone"
+"""Session key of the zone overlay's "Highlight a zone" choice (a zone such as ``"5a"``, or
+``None``). A view option like the overlay: it never sets the viewer's hardiness zone, never
+reaches the query, and Clear leaves it as it is."""
 _GROUP_KEYS: Final[tuple[GroupKey, ...]] = get_args(GroupKey)
 
 ALWAYS_VISIBLE_KEYS: Final[tuple[ComparableKey, ...]] = PROMINENT_KEYS
@@ -1871,6 +1879,35 @@ def _cell_label(row: Mapping[Hashable, Any], counts: RegionCounts) -> str:
         suppressed=bool(row["suppressed"]),
         min_cell_count=counts.min_cell_count,
     )
+
+
+def highlight_options() -> tuple[str | None, ...]:
+    """Return the "Highlight a zone" choices: ``None``, then every zone and half-zone."""
+    return condition_options("zone")
+
+
+def highlight_label(value: str | None, garden_zone: str | None) -> str:
+    """Label a "Highlight a zone" choice; ``None`` names what is emphasised without one.
+
+    ``(None, None)`` -> ``"None"``; ``(None, "6b")`` -> ``"Your zone (6b)"`` (the viewer's
+    hardiness zone is emphasised); ``("5a", ...)`` -> ``"Zone 5a"``.
+    """
+    if value is not None:
+        return option_label("zone", value)
+    return "None" if garden_zone is None else f"Your zone ({garden_zone})"
+
+
+def highlight_zone(state: Mapping[str, Any]) -> str | None:
+    """Return the zone to emphasise on the zone overlay: the map's choice, else the viewer's.
+
+    A value that is not a zone option is ignored. The result only styles the map: it is never
+    written to the viewer's conditions or the query.
+    """
+    options = set(highlight_options()) - {None}
+    for value in (state.get(HIGHLIGHT_ZONE_KEY), state.get(CONDITION_KEYS["zone"])):
+        if value in options:
+            return str(value)
+    return None
 
 
 def overlay_choice(state: Mapping[str, Any]) -> OverlayKey:

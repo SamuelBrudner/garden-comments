@@ -259,7 +259,13 @@ def test_map_drawing_tunables_are_configured() -> None:
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("height_px", 199), ("height_px", 1201), ("zone_mute", 0), ("zone_mute", 1), ("zone_mute", -0.1)],
+    [
+        ("height_px", 199),
+        ("height_px", 1201),
+        ("zone_mute", 0),
+        ("zone_mute", 1),
+        ("zone_mute", -0.1),
+    ],
 )
 def test_map_drawing_tunables_are_bounded(tmp_path: Path, key: str, value: float) -> None:
     raw = raw_config()

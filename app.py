@@ -39,7 +39,14 @@ from crop_explorer import (
     search,
     ui,
 )
-from crop_explorer.config import AppConfig, LoggingConfig, OutsideLink, QuickChip, load_config
+from crop_explorer.config import (
+    AppConfig,
+    LoggingConfig,
+    MapConfig,
+    OutsideLink,
+    QuickChip,
+    load_config,
+)
 from crop_explorer.geography import RegionCounts
 from crop_explorer.logging_setup import configure_logging
 from crop_explorer.overlay_charts import OverlayKey
@@ -75,8 +82,8 @@ reported under conditions like yours is exactly as relevant as a success.
 Every condition on a card comes from an exact quote in that comment (open **Evidence**). A
 condition the commenter did not mention is shown as *not stated*, never as a match or a
 mismatch; words that could not be mapped are shown as written, and comments not yet analysed
-say so. A region is a location preference, not proof of a similar climate, and a zone is never
-placed on the map.
+say so. A region is a location preference, not proof of a similar climate, and a report that
+gives only a hardiness zone is never placed on the map.
 
 Conditions were extracted offline and checked against the comment text; nothing is generated
 when you search. Each source carries a rights status, and the public view shows only sources
@@ -91,10 +98,9 @@ _MAP_BADGES: Final = (
     f"{ui.label_badge('community report')} {ui.label_badge('reported conditions')}"
 )
 _MAP_INTRO: Final = (
-    "Where gardeners explicitly said they grew (one count per comment and state). Zones are "
-    "never mapped, and no point locations are shown."
+    "Where gardeners explicitly said they grew (one count per comment and state). Reports that "
+    "give only a hardiness zone are never placed on the map, and no point locations are shown."
 )
-_MAP_HEIGHT: Final = 340
 _MAP_ALT: Final = (
     "Map of U.S. states shaded by how many reports name each state as where they grew."
 )
@@ -109,7 +115,15 @@ _OVERLAY_ALT: Final = (
     "Map of U.S. states shaded by a regional climate reference ({layer}), with the number of "
     "reports naming each state written on it."
 )
+_HIGHLIGHT_HELP: Final = (
+    "Shows where a zone is on this map. A view option only: it does not set your hardiness "
+    "zone and never changes which reports are shown."
+)
 _REFERENCES_ERROR: Final = "The regional climate references cannot be shown: {reason}"
+_SERVED_ZONES: Final = (
+    Path(__file__).resolve().parent / "static" / "overlays" / (overlays.SERVED_ZONES_NAME)
+)
+"""The zone layer's copy that browsers fetch (``overlay_charts.ZONE_LAYER_URL``)."""
 _GLANCE_TITLE: Final = "At a glance"
 _GLANCE_ALTS: Final = {
     "varieties": "Bar chart: how many comments mention each of the most-discussed varieties.",
@@ -388,11 +402,17 @@ def _conditions_panel() -> None:
 
 
 def _reference_panel(reference: overlay_charts.RegionalReference) -> None:
-    """Show the reference in a compact box: badge and summary, then disclaimer and sources."""
+    """Show the reference in a compact box: badge and summary, disclaimer, then sources.
+
+    The zone disclaimer is an info box, as prominent as above the zone map; then what "main
+    zones" means and the sources, as a caption.
+    """
     with st.container(border=True, key="regional-reference"):
         st.markdown(f"{ui.label_badge(OVERLAY_LABEL)} {reference.summary}")
-        if reference.notes:
-            st.caption(reference.notes)
+        if reference.disclaimer is not None:
+            st.info(reference.disclaimer)
+        if reference.sources:
+            st.caption(reference.sources)
 
 
 def _regional_reference() -> None:
@@ -600,17 +620,17 @@ def _map_counts(ctx: _Context, query: SearchQuery, result: SearchResult) -> Regi
     return geography.region_counts(ui.flatten(result), threshold)
 
 
-def _map_figure(counts: RegionCounts) -> go.Figure:
+def _map_figure(counts: RegionCounts, height: int) -> go.Figure:
     figure = geography.choropleth(counts)
     figure.update_traces(colorbar=ui.map_colorbar(counts))
-    figure.update_layout(height=_MAP_HEIGHT)
+    figure.update_layout(height=height)
     return figure
 
 
-def _map_chart(counts: RegionCounts, region_filter: str | None) -> None:
+def _map_chart(counts: RegionCounts, region_filter: str | None, height: int) -> None:
     widget_key = ui.map_key(region_filter)
     st.plotly_chart(
-        _map_figure(counts),
+        _map_figure(counts, height),
         key=widget_key,
         on_select=partial(_on_map_select, widget_key),
         selection_mode="points",
@@ -659,9 +679,28 @@ def _overlay_chart(figure: go.Figure, region_filter: str | None, overlay: Overla
     )
 
 
-def _overlay_tables(overlay: OverlayKey, refs: Overlays) -> None:
-    """Show the overlay's table twin: every value readable without hovering."""
+def _zone_highlight() -> None:
+    """Offer "Highlight a zone" on the zone layer: a view option, never a condition."""
+    garden_zone = ui.garden_from_state(_state()).zone
+    st.selectbox(
+        "Highlight a zone",
+        ui.highlight_options(),
+        index=None,
+        format_func=lambda value: ui.highlight_label(value, garden_zone),
+        key=ui.HIGHLIGHT_ZONE_KEY,
+        placeholder=ui.highlight_label(None, garden_zone),
+        help=_HIGHLIGHT_HELP,
+    )
+
+
+def _overlay_tables(overlay: OverlayKey, refs: Overlays, disclaimer: str | None) -> None:
+    """Show the overlay's table twin: every value readable without hovering.
+
+    The zone tables sit under the zone disclaimer, so the derived zones never appear without it.
+    """
     with st.expander(ui.TABLE_LABEL):
+        if disclaimer is not None:
+            st.info(disclaimer)
         for title, frame in overlay_charts.overlay_tables(overlay, refs):
             st.caption(title)
             st.dataframe(
@@ -675,24 +714,34 @@ def _one_decimal(frame: pd.DataFrame) -> dict[str, Any]:
     return {str(name): st.column_config.NumberColumn(format="%.1f") for name in numbers}
 
 
+def _overlay_figure(
+    overlay: OverlayKey, refs: Overlays, counts: RegionCounts, zone: str | None, cfg: MapConfig
+) -> go.Figure:
+    return overlay_charts.overlay_figure(overlay, refs, counts, _chart_theme(), cfg, zone=zone)
+
+
 def _overlay_map(
-    refs: Overlays, counts: RegionCounts, query: SearchQuery, overlay: OverlayKey
+    refs: Overlays, counts: RegionCounts, query: SearchQuery, overlay: OverlayKey, cfg: MapConfig
 ) -> None:
     """Draw the overlay as the only fill, the reports as count labels, then say what it is.
 
+    The zone layer first offers "Highlight a zone" (emphasising that zone, else the viewer's).
     Above the map: its title and, for the zone layer, the "not the official map" disclaimer
-    (prominent, as the PHZM terms require for altered data). Below: label, source, period and
-    what the layer does not say, then the table twin.
+    (prominent, as the PHZM terms require for altered data). Below: what a NOAA scale spans,
+    label, source, period and what the layer does not say, then the table twin.
     """
-    zone = query.garden.zone
+    zone = ui.highlight_zone(_state()) if overlay == "zones" else None
+    if overlay == "zones":
+        _zone_highlight()
     view = overlay_charts.overlay_view(overlay, zone)
     st.markdown(f"**{view.title}**")
     if view.disclaimer is not None:
         st.info(view.disclaimer)
-    figure = overlay_charts.overlay_figure(overlay, refs, counts, _chart_theme(), zone)
-    _overlay_chart(figure, query.region_filter, overlay)
-    st.caption(view.caption)
-    _overlay_tables(overlay, refs)
+    _overlay_chart(_overlay_figure(overlay, refs, counts, zone, cfg), query.region_filter, overlay)
+    for note in (overlay_charts.scale_note(overlay, refs), view.caption):
+        if note is not None:
+            st.caption(note)
+    _overlay_tables(overlay, refs, view.disclaimer)
 
 
 def _map_badges(with_overlay: bool) -> str:
@@ -711,9 +760,9 @@ def _map(ctx: _Context, query: SearchQuery, result: SearchResult) -> None:
     st.caption(_MAP_INTRO)
     _overlay_picker()
     if refs is None:
-        _map_chart(counts, query.region_filter)
+        _map_chart(counts, query.region_filter, ctx.cfg.map.height_px)
     else:
-        _overlay_map(refs, counts, query, overlay)
+        _overlay_map(refs, counts, query, overlay, ctx.cfg.map)
     _state_selector(counts, query.region_filter)
 
 
@@ -740,10 +789,13 @@ def _outside_context(cfg: AppConfig) -> None:
 def _references() -> Overlays:
     """Load and validate the packaged regional climate references once per server process.
 
-    They are static, attributed reference files shipped with the package (the zone layer is
-    about 0.9 MB); only they are cached here, never a query result.
+    They are static, attributed reference files shipped with the package; only they are cached
+    here, never a query result. Browsers draw the zone layer from the app's static copy, so that
+    copy must equal the validated file (else the overlay shows an error, not unchecked data).
     """
-    return overlays.load_overlays()
+    refs = overlays.load_overlays()
+    overlays.check_served_copy(_SERVED_ZONES)
+    return refs
 
 
 def _references_or_error() -> Overlays | None:
