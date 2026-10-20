@@ -28,7 +28,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import crop_explorer.__main__ as cli_module
+from conftest import invoke_cli
 from crop_explorer import db, demo, youtube_http
+from crop_explorer.config import load_config
 from crop_explorer.youtube import FetchJson
 from synthetic_youtube import (
     API_KEY,
@@ -36,7 +38,6 @@ from synthetic_youtube import (
     UNREGISTERED_CALLERS,
     VIDEO,
     FakeApi,
-    FakeHttpsHandler,
     comment,
     error_body,
     reply,
@@ -1036,7 +1037,8 @@ YT_TEXTS = {**YT_THREADS, **YT_REPLIES}
 YT_ORDER = ["UgSynA", "UgSynA.R1", "UgSynA.R2", "UgSynB", "UgSynC"]
 FETCHED_AT = "2026-10-20T12:00:00Z"
 YT_EXPIRES = "2026-11-19T12:00:00Z"
-INGEST_PREFIX = ["uv", "run", "python", "-m", "crop_explorer", "ingest"]
+PROGRAM = ["uv", "run", "python", "-m", "crop_explorer"]
+"""How the printed ``ingest`` command runs the CLI; ``argv[len(PROGRAM):]`` goes to ``main``."""
 
 
 def yt_comment(comment_id: str) -> dict[str, Any]:
@@ -1066,17 +1068,20 @@ def youtube_api(monkeypatch: pytest.MonkeyPatch, no_network: None) -> FakeApi:
     real_transport = youtube_http.urllib_transport
 
     def transport(timeout_s: float) -> FetchJson:
-        return real_transport(timeout_s, FakeHttpsHandler(api.respond))
+        return real_transport(timeout_s, api.https_handler())
 
     monkeypatch.setattr(youtube_http, "urllib_transport", transport)
     monkeypatch.setenv("YOUTUBE_API_KEY", API_KEY)
     return api
 
 
-def expected_ingest_command(out: Path) -> str:
+def expected_ingest_command(out: Path, *global_options: str | Path) -> str:
+    """The printed command: ``fetch-youtube``'s own ``--config``/``--db``, then ``ingest``."""
     return shlex.join(
         [
-            *INGEST_PREFIX,
+            *PROGRAM,
+            *(str(option) for option in global_options),
+            "ingest",
             str(out),
             "--scope",
             "private",
@@ -1088,8 +1093,16 @@ def expected_ingest_command(out: Path) -> str:
             f"https://www.youtube.com/watch?v={VIDEO}",
             "--expires-at",
             YT_EXPIRES,
+            "--replace",
         ]
     )
+
+
+def run_printed(command: str) -> CliRun:
+    """Run a printed ``uv run python -m crop_explorer ...`` command exactly as printed."""
+    argv = shlex.split(command)
+    assert argv[: len(PROGRAM)] == PROGRAM
+    return invoke_cli(argv[len(PROGRAM) :])
 
 
 def test_fetch_youtube_writes_an_owner_only_jsonl_and_prints_counts(
@@ -1109,7 +1122,7 @@ def test_fetch_youtube_writes_an_owner_only_jsonl_and_prints_counts(
         "out": str(out),
         "fetched_at": FETCHED_AT,
         "expires_at": YT_EXPIRES,
-        "ingest_command": expected_ingest_command(out),
+        "ingest_command": expected_ingest_command(out, "--config", cli_env.config),
     }
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
     rows = read_export(out)
@@ -1152,8 +1165,8 @@ def test_fetch_then_ingest_privately_end_to_end(
     assert sent_keys(youtube_api) == [API_KEY if mode == "environment" else None] * 3
     assert [url for url in youtube_api.urls if API_KEY in url or "key=" in url] == []
     argv = shlex.split(fetched["ingest_command"])
-    assert argv[:6] == INGEST_PREFIX
-    ingest_run = env.run(*argv[5:])
+    assert argv[len(PROGRAM) : len(PROGRAM) + 3] == ["--config", str(env.config), "ingest"]
+    ingest_run = run_printed(fetched["ingest_command"])  # as printed: no --config added here
     imported = ok(ingest_run)
 
     source = f"youtube-{VIDEO}"
@@ -1265,14 +1278,62 @@ def test_fetch_youtube_reads_the_key_from_the_configured_variable(
     assert {request.headers["x-goog-api-key"] for request in youtube_api.requests} == {API_KEY}
 
 
-def test_fetch_youtube_takes_no_key_on_the_command_line(
-    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+TYPED_KEY = "SYNTHETIC-typed-key-value"
+"""A value someone typed after a guessed key option: it must never reach stderr."""
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--api-key", TYPED_KEY],
+        [f"--api-key={TYPED_KEY}"],
+        ["--key", TYPED_KEY],
+        [f"--key={TYPED_KEY}"],  # argparse would expand --key to --key-via-proxy
+        [f"--key-via-proxy={TYPED_KEY}"],
+        ["--key-via-proxy", TYPED_KEY],
+        ["--key"],  # an abbreviation never selects the proxy mode
+        ["--k"],
+    ],
+)
+def test_fetch_youtube_takes_no_key_on_the_command_line_and_never_echoes_one(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, extra: list[str]
 ) -> None:
-    run = cli_env.run("fetch-youtube", VIDEO, "--out", tmp_path / "yt.jsonl", "--api-key", "k")
+    run = cli_env.run("fetch-youtube", VIDEO, "--out", tmp_path / "yt.jsonl", *extra)
 
     assert (run.code, run.out) == (2, "")
     assert "usage" in run.err
+    assert TYPED_KEY not in run.err
+    assert run.err_lines[-1].startswith("python -m crop_explorer")
+    assert ": error: " in run.err_lines[-1]
     assert youtube_api.requests == []
+    assert not (tmp_path / "yt.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "named"),
+    [
+        (["summary", "--sc", "private"], "--sc"),  # abbreviations are refused everywhere
+        (["summary", "--scope", "private", "extra-word"], "unrecognized arguments"),
+    ],
+)
+def test_unrecognized_arguments_name_options_but_never_values(
+    cli_env: CliEnv, argv: list[str], named: str
+) -> None:
+    run = cli_env.run(*argv)
+
+    assert (run.code, run.out) == (2, "")
+    assert named in run.err_lines[-1]
+    assert "private" not in run.err_lines[-1] and "extra-word" not in run.err
+
+
+def test_fetch_youtube_help_names_the_key_variable_of_the_default_mode() -> None:
+    run = invoke_cli(["fetch-youtube", "--help"])
+
+    assert run.code == 0
+    unwrapped = "".join(run.out.split())  # argparse may wrap at hyphens
+    for name in (load_config().youtube.api_key_env, "youtube.api_key_env", "X-Goog-Api-Key"):
+        assert name in unwrapped
+    assert "--key-via-proxy" in unwrapped
 
 
 @pytest.mark.parametrize(
@@ -1327,6 +1388,90 @@ def test_fetch_youtube_past_max_pages_fails_and_writes_nothing(
     assert "max_pages" in line
     assert len(youtube_api.requests) == 2
     assert not out.exists()
+
+
+def test_fetch_youtube_of_a_video_without_comments_fails_and_keeps_an_earlier_file(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    """``ingest`` refuses an empty file, so an empty fetch must not print a doomed command."""
+    youtube_api.thread_pages, youtube_api.reply_pages = [[]], {}
+    out = tmp_path / "yt.jsonl"
+    out.write_text("previous fetch\n", encoding="utf-8")
+
+    line = failed(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+
+    assert f"video {VIDEO} has no public comments: nothing to import" in line
+    assert f"delete-source youtube-{VIDEO}" in line
+    assert len(youtube_api.requests) == 1
+    assert out.read_text(encoding="utf-8") == "previous fetch\n"
+
+
+def test_fetch_youtube_uses_the_configured_timeout_for_every_request(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    edit_config(cli_env, youtube={"timeout_s": 7.5})
+
+    ok(cli_env.run("fetch-youtube", VIDEO, "--out", tmp_path / "yt.jsonl"))
+
+    assert youtube_api.timeouts == [7.5] * 3
+
+
+def test_the_printed_ingest_command_imports_into_the_database_given_to_fetch(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    """``--db`` (and ``--config``) given to fetch-youtube are part of the printed command."""
+    private_db = tmp_path / "private" / "real.sqlite"
+    out = tmp_path / "yt.jsonl"
+
+    fetched = ok(cli_env.run("--db", private_db, "fetch-youtube", VIDEO, "--out", out))
+    imported = ok(run_printed(fetched["ingest_command"]))
+
+    options = shlex.split(fetched["ingest_command"])[len(PROGRAM) : len(PROGRAM) + 5]
+    assert options == ["--config", str(cli_env.config), "--db", str(private_db), "ingest"]
+    assert imported["inserted"] == len(YT_ORDER)
+    assert summary(cli_env, "private", "--db", str(private_db))["comments"] == len(YT_ORDER)
+    assert not cli_env.db_path.exists()  # the configured database was never touched
+
+
+def test_the_printed_ingest_command_names_no_default_config(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli_module, "DEFAULT_CONFIG_PATH", cli_env.config)
+    out = tmp_path / "yt.jsonl"
+
+    fetched = ok(invoke_cli(["fetch-youtube", VIDEO, "--out", str(out)]))
+
+    assert shlex.split(fetched["ingest_command"])[len(PROGRAM)] == "ingest"
+    assert "--config" not in fetched["ingest_command"]
+    assert "--db" not in fetched["ingest_command"]
+
+
+def test_a_refetch_sharing_no_comment_id_with_the_stored_copy_imports_as_printed(
+    cli_env: CliEnv, youtube_api: FakeApi, tmp_path: Path
+) -> None:
+    """Every old comment was removed and a new one posted: the refresh still goes through."""
+    out = tmp_path / "yt.jsonl"
+    ok(run_printed(ok(cli_env.run("fetch-youtube", VIDEO, "--out", out))["ingest_command"]))
+    fresh = comment("UgSynD", "Synthetic: a new comment after the old ones were removed.")
+    youtube_api.thread_pages, youtube_api.reply_pages = [[thread(fresh)]], {}
+
+    refetched = ok(cli_env.run("fetch-youtube", VIDEO, "--out", out))
+    imported = ok(run_printed(refetched["ingest_command"]))
+
+    assert (imported["inserted"], imported["deleted"]) == (1, len(YT_ORDER))
+    assert imported["rights_status"] == "private_unverified"
+    assert summary(cli_env, "private")["comments"] == 1
+
+
+def test_a_key_put_in_the_config_by_mistake_is_never_echoed_by_any_command(
+    cli_env: CliEnv,
+) -> None:
+    edit_config(cli_env, youtube={"api_key_env": "AIzaSy-synthetic-not-a-real-key"})
+
+    line = failed(cli_env.run("summary"))
+
+    assert "api_key_env" in line
+    assert "synthetic" not in line
 
 
 def test_fetch_youtube_overwrites_a_regular_file_as_owner_only(

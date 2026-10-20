@@ -16,8 +16,9 @@ the header (a network secret for the API host).
 Records hold exactly the four ``ingest`` fields (``comment_id``, ``text``, ``permalink``,
 ``created_at``), never author names, channel ids, avatars or like counts. Rows are
 de-duplicated by comment id (the first one seen wins) in API order: each thread, then its
-replies (inline ones first, then the paged ones). Errors name the thread number and comment
-id, never comment text; only counts are logged.
+replies (inline ones first, then the paged ones); a thread seen again on a later page is
+skipped with its replies. Errors name the thread number and comment id, never comment text;
+only counts are logged.
 """
 
 from __future__ import annotations
@@ -82,26 +83,35 @@ _BAD_VIDEO: Final = (
     "https://www.youtube.com/watch?v=ID URL or a https://youtu.be/ID URL"
 )
 
+_KEY_INVALID: Final = (
+    "the API key is not valid; check the key in the environment variable (or, with "
+    f"{KEY_VIA_PROXY_FLAG}, in the network secret)"
+)
+_API_NOT_ENABLED: Final = (
+    "the YouTube Data API v3 is not enabled for the API key's Google Cloud project"
+)
+_APPLICATION_RESTRICTED: Final = (
+    "the API key's application restrictions block this request (use no application "
+    "restriction, or an IP address restriction, for a command-line key)"
+)
 _REASONS: Final = MappingProxyType(
     {
         "commentsDisabled": "comments are turned off for this video",
         "videoNotFound": "no public video has this id",
-        "forbidden": "the API refused access (the video or its comments may not be public)",
+        "forbidden": (
+            "the API refused access: the video's comments may not be public, or the API key's "
+            "restrictions block this request"
+        ),
         "quotaExceeded": (
             "the API key's daily quota is used up; try again after the daily reset (midnight "
             "Pacific Time)"
         ),
         "dailyLimitExceeded": "the API key's daily limit is used up; try again tomorrow",
         "rateLimitExceeded": "too many requests in a short time; wait and try again",
-        "keyInvalid": (
-            "the API key is not valid; check the key in the environment variable (or, with "
-            f"{KEY_VIA_PROXY_FLAG}, in the network secret)"
-        ),
+        "keyInvalid": _KEY_INVALID,
         "keyExpired": "the API key has expired; create a new one",
         "badRequest": "the API rejected the request (most often an invalid API key)",
-        "accessNotConfigured": (
-            "the YouTube Data API v3 is not enabled for the API key's Google Cloud project"
-        ),
+        "accessNotConfigured": _API_NOT_ENABLED,
         "ipRefererBlocked": "the API key's restrictions do not allow this request",
         "commentNotFound": "a comment thread disappeared while fetching; try again",
         "processingFailure": "the API could not process the request; try again later",
@@ -109,6 +119,25 @@ _REASONS: Final = MappingProxyType(
     }
 )
 """Explanations of ``error.errors[0].reason`` values (the API's own messages are not shown)."""
+_ERROR_INFO_TYPE: Final = "type.googleapis.com/google.rpc.ErrorInfo"
+_DETAIL_REASONS: Final = MappingProxyType(
+    {
+        "API_KEY_INVALID": _KEY_INVALID,
+        "API_KEY_HTTP_REFERRER_BLOCKED": _APPLICATION_RESTRICTED,
+        "API_KEY_IP_ADDRESS_BLOCKED": _APPLICATION_RESTRICTED,
+        "API_KEY_ANDROID_APP_BLOCKED": _APPLICATION_RESTRICTED,
+        "API_KEY_IOS_APP_BLOCKED": _APPLICATION_RESTRICTED,
+        "API_KEY_SERVICE_BLOCKED": (
+            "the API key's API restrictions do not include YouTube Data API v3"
+        ),
+        "SERVICE_DISABLED": _API_NOT_ENABLED,
+    }
+)
+"""Explanations of ``google.rpc.ErrorInfo`` reasons in ``error.details``.
+
+Google reports API-key problems this way while ``errors[0].reason`` says only ``badRequest``
+or ``forbidden``, so these are checked first.
+"""
 _UNREGISTERED_MARKER: Final = "unregistered callers"
 """Matched (never shown) in ``error.message`` of a request that reached the API without a key."""
 _UNREGISTERED: Final = (
@@ -303,27 +332,30 @@ def fetch_comments(
 
 
 def api_error(status: int, body: bytes) -> YouTubeError:
-    """Describe an API error response from its status and ``error.errors[0].reason``.
+    """Describe an API error response from its status and its reason tokens.
 
     Parameters
     ----------
     status
         The HTTP status code.
     body
-        The response body; only a short reason token is read from it, and ``error.message`` is
-        matched for "unregistered callers" (a request without a key: ``--key-via-proxy``
-        without a network secret). The API's own message text is never shown, and headers are
-        never passed in.
+        The response body. Only short reason tokens are read from it: ``error.errors[0].reason``
+        and the first ``google.rpc.ErrorInfo`` reason in ``error.details`` (how Google reports
+        API-key problems such as ``API_KEY_INVALID`` or ``API_KEY_HTTP_REFERRER_BLOCKED``; it
+        is explained first). ``error.message`` is only matched for "unregistered callers" (a
+        request without a key: ``--key-via-proxy`` without a network secret). The API's own
+        message text is never shown, and headers are never passed in.
 
     Returns
     -------
     YouTubeError
-        ``YouTube Data API error (HTTP <status>[, <reason>]): <explanation>``.
+        ``YouTube Data API error (HTTP <status>[, <reason>][, <detail>]): <explanation>``.
     """
     error = _error_object(body)
-    reason = _error_reason(error)
-    label = f"HTTP {status}" if reason is None else f"HTTP {status}, {reason}"
-    return YouTubeError(f"YouTube Data API error ({label}): {_explain(status, reason, error)}")
+    reason, detail = _error_reason(error), _detail_reason(error)
+    label = ", ".join([f"HTTP {status}", *(token for token in (reason, detail) if token)])
+    explanation = _explain(status, reason, detail, error)
+    return YouTubeError(f"YouTube Data API error ({label}): {explanation}")
 
 
 def decode_json(body: bytes) -> dict[str, object]:
@@ -473,11 +505,11 @@ class _Collector:
     threads: int = 0
     replies: int = 0
 
-    def add(self, resource: object, where: str, *, is_reply: bool) -> YouTubeComment:
-        """Validate a comment resource and keep it unless its id was already seen."""
+    def add(self, resource: object, where: str, *, is_reply: bool) -> YouTubeComment | None:
+        """Validate a comment resource; keep and return it, or ``None`` if its id was seen."""
         row = _comment(resource, self.video_id, where)
         if row.comment_id in self.rows:
-            return row
+            return None
         self.rows[row.comment_id] = row
         if is_reply:
             self.replies += 1
@@ -492,9 +524,16 @@ class _Collector:
 
 
 def _collect_thread(pager: _Pager, collector: _Collector, item: object, where: str) -> None:
-    """Add a thread's top-level comment, its inline replies and, if truncated, the rest."""
+    """Add a thread's top-level comment, its inline replies and, if truncated, the rest.
+
+    A thread already collected from an earlier page (pages shift when a comment is posted
+    during the fetch) is skipped whole: its replies were collected with its first copy, and
+    paging them again would spend quota and could place a reply after an unrelated thread.
+    """
     snippet = _field(item, "snippet", dict, where)
     top = collector.add(_member(snippet, "topLevelComment", where), where, is_reply=False)
+    if top is None:
+        return
     inline = _inline_replies(item, where)
     for reply in inline:
         collector.add(reply, f"a reply in {where}", is_reply=True)
@@ -585,21 +624,37 @@ def _error_object(body: bytes) -> dict[str, Any]:
     return error if isinstance(error, dict) else {}
 
 
+def _token(value: object) -> str | None:
+    """Return ``value`` when it is a short reason token, else ``None`` (it is never shown)."""
+    return value if isinstance(value, str) and _REASON_TOKEN.fullmatch(value) else None
+
+
 def _error_reason(error: Mapping[str, Any]) -> str | None:
     """Return ``errors[0].reason`` when it is a short token, else ``None``."""
     try:
-        reason = error["errors"][0]["reason"]
+        reason: object = error["errors"][0]["reason"]
     except (LookupError, TypeError):
         return None
-    return reason if isinstance(reason, str) and _REASON_TOKEN.fullmatch(reason) else None
+    return _token(reason)
 
 
-def _explain(status: int, reason: str | None, error: Mapping[str, Any]) -> str:
+def _detail_reason(error: Mapping[str, Any]) -> str | None:
+    """Return the first ``google.rpc.ErrorInfo`` reason in ``details`` when it is a token."""
+    details = error.get("details")
+    infos = [
+        detail
+        for detail in (details if isinstance(details, list) else [])
+        if isinstance(detail, dict) and detail.get("@type") == _ERROR_INFO_TYPE
+    ]
+    return _token(infos[0].get("reason")) if infos else None
+
+
+def _explain(status: int, reason: str | None, detail: str | None, error: Mapping[str, Any]) -> str:
     """Return the fixed explanation of an API error (the API's own text is never shown)."""
     message = error.get("message")
     if isinstance(message, str) and _UNREGISTERED_MARKER in message.lower():
         return _UNREGISTERED
-    explanation = _REASONS.get(reason or "")
+    explanation = _DETAIL_REASONS.get(detail or "") or _REASONS.get(reason or "")
     if explanation is not None:
         return explanation
     return _REDIRECT_REFUSED if status in _REDIRECT else _REQUEST_FAILED

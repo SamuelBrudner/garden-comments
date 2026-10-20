@@ -222,6 +222,13 @@ def test_youtube_settings_are_configured() -> None:
         ("api_base_url", "https://www.googleapis.com/youtube/v3/"),
         ("api_base_url", "https://www.googleapis.com/youtube/v3?key=x"),
         ("api_base_url", "https://user@www.googleapis.com/youtube/v3"),
+        # The key header goes to this host: only Google's API hosts, no port.
+        ("api_base_url", "https://www.googleapis.co/youtube/v3"),
+        ("api_base_url", "https://www.googleapi.com/youtube/v3"),
+        ("api_base_url", "https://googleapis.com/youtube/v3"),
+        ("api_base_url", "https://evil.example.com/youtube/v3"),
+        ("api_base_url", "https://www.googleapis.com.example.com/youtube/v3"),
+        ("api_base_url", "https://www.googleapis.com:8443/youtube/v3"),
         ("page_size", 0),
         ("page_size", 101),
         ("timeout_s", 0),
@@ -233,6 +240,9 @@ def test_youtube_settings_are_configured() -> None:
         ("api_key_env", ""),
         ("api_key_env", "YOUTUBE API KEY"),
         ("api_key_env", "1KEY"),
+        # Upper case only, so a key (Google keys mix cases) is never taken for a name.
+        ("api_key_env", "youtube_api_key"),
+        ("api_key_env", "AIzaSyntheticNotARealKey0123"),
     ],
 )
 def test_invalid_youtube_settings_are_rejected(tmp_path: Path, key: str, value: object) -> None:
@@ -241,6 +251,44 @@ def test_invalid_youtube_settings_are_rejected(tmp_path: Path, key: str, value: 
 
     with pytest.raises(ValidationError, match=key):
         load_config(write_config(tmp_path, raw))
+
+
+@pytest.mark.parametrize(
+    "url", ["https://youtube.googleapis.com/youtube/v3", "https://WWW.GoogleAPIs.com/youtube/v3"]
+)
+def test_google_api_hosts_are_accepted(tmp_path: Path, url: str) -> None:
+    raw = raw_config()
+    raw["youtube"]["api_base_url"] = url
+
+    assert load_config(write_config(tmp_path, raw)).youtube.api_base_url == url
+
+
+SYNTHETIC_KEY = "AIzaSy-synthetic-not-a-real-key"
+"""Shaped like the start of a Google API key; too short to be one."""
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("api_key_env", SYNTHETIC_KEY),
+        ("api_key_env", SYNTHETIC_KEY.replace("-", "")),
+        ("api_base_url", f"https://www.googleapis.com/youtube/v3?key={SYNTHETIC_KEY}"),
+        ("api_base_url", f"https://{SYNTHETIC_KEY.lower()}.example.com/youtube/v3"),
+    ],
+)
+def test_a_key_put_in_the_config_by_mistake_is_never_echoed(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    """Validation errors reach stderr and the viewer page: they name the setting, not its value."""
+    raw = raw_config()
+    raw["youtube"][key] = value
+
+    with pytest.raises(ValidationError, match=key) as caught:
+        load_config(write_config(tmp_path, raw))
+
+    message = str(caught.value)
+    for fragment in ("synthetic", "Synthetic", "not-a-real", "notareal", "NotAReal"):
+        assert fragment not in message
 
 
 @pytest.mark.parametrize(

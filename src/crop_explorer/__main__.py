@@ -19,12 +19,15 @@ Commands (docs/ARCHITECTURE.md, "CLI"):
     (:func:`crop_explorer.demo.build_demo_database`; any rejection is an error).
 ``fetch-youtube VIDEO --out PATH [--key-via-proxy]``
     Download one video's public comments through the YouTube Data API v3 into JSONL that
-    ``ingest`` reads, and print the private, expiring ``ingest`` command for it
-    (:mod:`crop_explorer.youtube`). The key comes from the environment variable named by
-    ``youtube.api_key_env``; with ``--key-via-proxy`` no key is read or sent, because the
-    network proxy attaches it (a network secret).
+    ``ingest`` reads, and print the private, expiring ``ingest --replace`` command for it, with
+    this command's own ``--config``/``--db`` (:mod:`crop_explorer.youtube`). A video without
+    public comments is an error (``ingest`` refuses an empty file). The key comes from the
+    environment variable named by ``youtube.api_key_env``; with ``--key-via-proxy`` no key is
+    read or sent, because the network proxy attaches it (a network secret).
 
-``--config`` and ``--db`` may be given before or after the command. On success exactly one line
+``--config`` and ``--db`` may be given before or after the command. Options must be spelled out
+(no abbreviations), and a usage error never repeats an argument's value (it may be a key typed
+after a guessed option such as ``--key``). On success exactly one line
 of JSON (ids and counts only) goes to stdout and the exit status is 0. On invalid input
 (``IngestError``, ``ValueError``, ``KeyError``), an unreadable file (``OSError``), malformed
 configuration YAML (``yaml.YAMLError``) or a database that SQLite cannot use
@@ -44,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import sqlite3
 import sys
@@ -52,7 +56,7 @@ from contextlib import AbstractContextManager, closing, contextmanager, nullcont
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Final, TextIO, get_args
+from typing import Any, Final, NoReturn, TextIO, get_args
 
 import yaml
 
@@ -106,6 +110,16 @@ _KEY_VIA_PROXY_HELP: Final = (
     "send no API key and do not read the key variable: the network proxy attaches it (a "
     f"network secret for www.googleapis.com with header {youtube.API_KEY_HEADER})"
 )
+_FETCH_YOUTUBE_EPILOG: Final = (
+    "By default the API key is read from the environment variable named by "
+    "youtube.api_key_env in the configuration (YOUTUBE_API_KEY in the repository's "
+    f"config.yaml) and sent only as the {youtube.API_KEY_HEADER} header. No option takes the "
+    "key: never type it on a command line."
+)
+_UNRECOGNIZED: Final = "unrecognized arguments: "
+_VALUES_HIDDEN: Final = "(values are never shown: one may be an API key)"
+_EXPLICIT_VALUE: Final = re.compile(r"ignored explicit argument .*", re.DOTALL)
+_EXPLICIT_VALUE_HIDDEN: Final = "takes no value (the value given is not shown)"
 _OUTPUT_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
 _DATABASE_FILE_SUFFIXES: Final = ("", "-wal", "-journal", "-shm")
 _REPLACE_HELP: Final = (
@@ -177,6 +191,29 @@ def _one_line(exc: BaseException) -> str:
 # --------------------------------------------------------------------------- argument parser
 
 
+class _Parser(argparse.ArgumentParser):
+    """An argument parser whose usage errors name options but never repeat a value.
+
+    A guessed key option (``--key=VALUE``, ``--api-key VALUE``) would otherwise copy the key to
+    stderr, logs and transcripts. ``add_subparsers`` gives every command this class too, and
+    ``allow_abbrev=False`` keeps ``--key`` from silently meaning ``--key-via-proxy``.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        """Print the usage and the message without argument values, then exit with status 2."""
+        super().error(_without_values(message))
+
+
+def _without_values(message: str) -> str:
+    """Drop argument values from argparse's "unrecognized" and "explicit argument" errors."""
+    if not message.startswith(_UNRECOGNIZED):
+        return _EXPLICIT_VALUE.sub(_EXPLICIT_VALUE_HIDDEN, message)
+    words = message.removeprefix(_UNRECOGNIZED).split()
+    options = [word.split("=", 1)[0] for word in words if word.startswith("-")]
+    named = " ".join(options) or "a value"
+    return f"{_UNRECOGNIZED}{named} {_VALUES_HIDDEN}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for every command.
 
@@ -185,26 +222,38 @@ def build_parser() -> argparse.ArgumentParser:
     argparse.ArgumentParser
         Parser whose namespace carries ``config``, ``db``, ``command`` and a ``handler``.
     """
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="python -m crop_explorer",
         description="Import, extract and summarise gardeners' comments (no comment text is "
         "printed; output is one line of JSON).",
         parents=[_global_options(suppress=False)],
+        allow_abbrev=False,
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     late_globals = _global_options(suppress=True)
     for spec in _COMMANDS:
-        sub = commands.add_parser(
-            spec.name, parents=[late_globals], help=spec.summary, description=spec.summary
-        )
-        sub.set_defaults(handler=spec.handler)
-        spec.add_arguments(sub)
+        _add_command(commands, spec, late_globals)
     return parser
 
 
-def _global_options(*, suppress: bool) -> argparse.ArgumentParser:
+def _add_command(
+    commands: argparse._SubParsersAction[_Parser], spec: _CommandSpec, late_globals: _Parser
+) -> None:
+    """Add ``spec`` as a command (``--config``/``--db`` may also follow it; no abbreviations)."""
+    sub = commands.add_parser(
+        spec.name,
+        parents=[late_globals],
+        help=spec.summary,
+        description=spec.summary,
+        allow_abbrev=False,
+    )
+    sub.set_defaults(handler=spec.handler)
+    spec.add_arguments(sub)
+
+
+def _global_options(*, suppress: bool) -> _Parser:
     """``--config``/``--db``; the suppressed copy lets them also follow the command."""
-    options = argparse.ArgumentParser(add_help=False)
+    options = _Parser(add_help=False)
     options.add_argument(
         "--config",
         type=Path,
@@ -278,6 +327,7 @@ def _summary_arguments(sub: argparse.ArgumentParser) -> None:
 
 
 def _fetch_youtube_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.epilog = _FETCH_YOUTUBE_EPILOG
     sub.add_argument("video", help="video id, or a youtube.com/watch?v=ID or youtu.be/ID URL")
     sub.add_argument("--out", type=Path, required=True, help="output JSONL for ingest (mode 600)")
     sub.add_argument(youtube.KEY_VIA_PROXY_FLAG, action="store_true", help=_KEY_VIA_PROXY_HELP)
@@ -396,14 +446,25 @@ def _fetch_youtube(cfg: AppConfig, args: argparse.Namespace) -> Payload:
     _prepare_output(args.out, protected)  # before the first request spends quota
     fetched_at = utc_now_iso()
     fetch_json = youtube_http.urllib_transport(cfg.youtube.timeout_s)
-    result = youtube.fetch_comments(video_id, api_key, cfg.youtube, fetch_json)
+    result = _require_comments(youtube.fetch_comments(video_id, api_key, cfg.youtube, fetch_json))
     with _open_output(args.out, protected, owner_only=True) as out:
         _write_rows(out, (row._asdict() for row in result.comments))
-    return _fetch_payload(result, args.out, fetched_at, cfg.youtube.retention_days)
+    return _fetch_payload(result, args, fetched_at, cfg.youtube.retention_days)
+
+
+def _require_comments(result: youtube.FetchResult) -> youtube.FetchResult:
+    """Refuse an empty fetch before ``--out`` is opened: ``ingest`` refuses an empty file."""
+    if not result.comments:
+        raise youtube.YouTubeError(
+            f"video {result.video_id} has no public comments: nothing to import (an existing "
+            "--out file is left untouched; a copy imported earlier stays until it expires or "
+            f"delete-source {youtube.source_id(result.video_id)} removes it)"
+        )
+    return result
 
 
 def _fetch_payload(
-    result: youtube.FetchResult, out: Path, fetched_at: str, retention_days: int
+    result: youtube.FetchResult, args: argparse.Namespace, fetched_at: str, retention_days: int
 ) -> Payload:
     """Return counts, times and the ``ingest`` command (expiry counted from the fetch start)."""
     expires_at = youtube.retention_expiry(fetched_at, retention_days)
@@ -413,27 +474,42 @@ def _fetch_payload(
         "replies": result.replies,
         "rows": len(result.comments),
         "api_pages": result.pages,
-        "out": str(out),
+        "out": str(args.out),
         "fetched_at": fetched_at,
         "expires_at": expires_at,
-        "ingest_command": _private_ingest_command(out, result.video_id, expires_at),
+        "ingest_command": _private_ingest_command(args, result.video_id, expires_at),
     }
 
 
-def _private_ingest_command(out: Path, video_id: str, expires_at: str) -> str:
-    """Return the shell command that imports ``out`` privately, expiring at ``expires_at``."""
+def _private_ingest_command(args: argparse.Namespace, video_id: str, expires_at: str) -> str:
+    """Return the shell command that imports ``args.out`` privately, expiring at ``expires_at``.
+
+    It repeats this command's own ``--config`` (unless the default) and ``--db`` (if given), so
+    the comments land in the database that ``purge-expired`` with the same options cleans.
+    ``--replace``: the source id is the video's, so a re-fetch is always the same dataset,
+    even when it shares no comment with the stored copy (and a stored rights status can only
+    be lowered to private by it).
+    """
     return shlex.join(
         [
             *INGEST_PROGRAM,
+            *_global_option_args(args),
             "ingest",
-            str(out),
+            str(args.out),
             *("--scope", "private"),
             *("--source-id", youtube.source_id(video_id)),
             *("--kind", youtube.SOURCE_KIND),
             *("--source-url", youtube.watch_url(video_id)),
             *("--expires-at", expires_at),
+            "--replace",
         ]
     )
+
+
+def _global_option_args(args: argparse.Namespace) -> list[str]:
+    """Return ``--config``/``--db`` as given to this command (a default config is left out)."""
+    config = [] if args.config == DEFAULT_CONFIG_PATH else ["--config", str(args.config)]
+    return [*config, *([] if args.db is None else ["--db", str(args.db)])]
 
 
 @dataclass(frozen=True)

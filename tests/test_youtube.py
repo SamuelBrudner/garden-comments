@@ -306,6 +306,34 @@ def test_duplicates_are_dropped_and_the_first_seen_copy_wins() -> None:
     assert (result.threads, result.replies) == (2, 0)
 
 
+def test_a_thread_seen_again_on_a_later_page_is_not_paged_again() -> None:
+    """Pages shift when a comment is posted mid-fetch: the repeated thread is skipped whole.
+
+    Its replies were collected with its first copy; paging them again would spend quota and
+    could put a reply after an unrelated thread.
+    """
+    parent = "UgSynThread1"
+    r1, r2, r3 = (reply(parent, f"R{n}", f"Synthetic reply {n}.") for n in range(1, 4))
+    late = reply(parent, "R9", "Synthetic reply posted during the fetch.")
+    api = FakeApi(
+        thread_pages=[
+            [thread(top(1), r1, total=3)],
+            [thread(top(1), r1, late, total=4), thread(top(2))],
+        ],
+        reply_pages={parent: [[r1, r2, r3]]},
+    )
+
+    result = fetch(api)
+
+    assert ids(result) == [parent, f"{parent}.R1", f"{parent}.R2", f"{parent}.R3", "UgSynThread2"]
+    assert [request.endpoint for request in api.requests] == [
+        "commentThreads",
+        "comments",
+        "commentThreads",
+    ]
+    assert (result.threads, result.replies, result.pages) == (2, 3, 3)
+
+
 def test_exactly_max_pages_pages_are_allowed() -> None:
     api = FakeApi(thread_pages=[[thread(top(1))], [thread(top(2))], [thread(top(3))]])
 
@@ -564,9 +592,87 @@ def test_other_forbidden_errors_keep_their_own_explanation(error: dict[str, Any]
     message = str(api_error(403, json.dumps({"error": error}).encode("utf-8")))
 
     assert message == (
-        "YouTube Data API error (HTTP 403, forbidden): the API refused access (the video or "
-        "its comments may not be public)"
+        "YouTube Data API error (HTTP 403, forbidden): the API refused access: the video's "
+        "comments may not be public, or the API key's restrictions block this request"
     )
+
+
+KEY_INVALID_FRAGMENTS = ("API key is not valid", "environment variable", "network secret")
+APPLICATION_RESTRICTED = (
+    "application restrictions block this request",
+    "no application restriction",
+    "IP address",
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "detail", "fragments"),
+    [
+        (400, "badRequest", "API_KEY_INVALID", KEY_INVALID_FRAGMENTS),
+        (403, "forbidden", "API_KEY_HTTP_REFERRER_BLOCKED", APPLICATION_RESTRICTED),
+        (403, "forbidden", "API_KEY_IP_ADDRESS_BLOCKED", APPLICATION_RESTRICTED),
+        (403, "forbidden", "API_KEY_ANDROID_APP_BLOCKED", APPLICATION_RESTRICTED),
+        (403, "forbidden", "API_KEY_IOS_APP_BLOCKED", APPLICATION_RESTRICTED),
+        (403, "forbidden", "API_KEY_SERVICE_BLOCKED", ("API restrictions", "YouTube Data API v3")),
+        (403, "accessNotConfigured", "SERVICE_DISABLED", ("YouTube Data API v3 is not enabled",)),
+    ],
+)
+def test_error_info_details_explain_api_key_problems(
+    status: int, reason: str, detail: str, fragments: tuple[str, ...]
+) -> None:
+    """Google reports key problems in ``error.details[].reason`` (``google.rpc.ErrorInfo``).
+
+    ``errors[0].reason`` is then only ``badRequest`` or ``forbidden``, so the detail decides
+    the explanation: an invalid key or a key restriction, not the video's visibility.
+    """
+    secret = "Synthetic: Requests from referer <empty> are blocked."
+
+    message = str(api_error(status, error_body(status, reason, secret, detail=detail)))
+
+    assert message.startswith(f"YouTube Data API error (HTTP {status}, {reason}, {detail}): ")
+    for fragment in fragments:
+        assert fragment in message
+    assert "may not be public" not in message
+    assert secret not in message and "referer" not in message
+
+
+def test_an_unknown_error_info_reason_is_named_but_explained_by_the_error_reason() -> None:
+    message = str(api_error(403, error_body(403, "commentsDisabled", detail="SOMETHING_NEW")))
+
+    assert message == (
+        "YouTube Data API error (HTTP 403, commentsDisabled, SOMETHING_NEW): comments are "
+        "turned off for this video"
+    )
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        "not a list",
+        [{"@type": "type.googleapis.com/google.rpc.Help", "reason": "API_KEY_INVALID"}],
+        [{"reason": "API_KEY_INVALID"}],
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "has spaces in it"}],
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": 7}],
+        ["not an object"],
+    ],
+)
+def test_details_without_a_usable_error_info_reason_are_ignored(details: object) -> None:
+    error = {"message": "Synthetic", "errors": [{"reason": "badRequest"}], "details": details}
+
+    message = str(api_error(400, json.dumps({"error": error}).encode("utf-8")))
+
+    assert message == (
+        "YouTube Data API error (HTTP 400, badRequest): the API rejected the request (most "
+        "often an invalid API key)"
+    )
+
+
+def test_a_request_without_a_key_is_explained_even_with_error_info_details() -> None:
+    body = error_body(403, "forbidden", UNREGISTERED_CALLERS, detail="CONSUMER_INVALID")
+
+    message = str(api_error(403, body))
+
+    assert "network secret" in message and KEY_VIA_PROXY_FLAG in message
 
 
 @pytest.mark.parametrize(

@@ -126,7 +126,8 @@ outside_context:
 
 youtube:
   # fetch-youtube: download one video's public comments through the official YouTube Data
-  # API v3 (README, "Importing a YouTube video's comments"). Only https is accepted.
+  # API v3 (README, "Importing a YouTube video's comments"). Only https on www.googleapis.com
+  # or youtube.googleapis.com (no port) is accepted: the API key header is sent there.
   api_base_url: https://www.googleapis.com/youtube/v3
   # Comments per API page (the API's maxResults, 1-100). Every page costs one quota unit
   # (default quota: 10,000 units a day), so fewer, fuller pages save quota.
@@ -140,10 +141,10 @@ youtube:
   # fetch time plus this, and purge-expired deletes the source after it. YouTube Developer
   # Policies allow at most 30 days for API data that is not refreshed (1-30).
   retention_days: 30
-  # Name of the environment variable holding the API key. The key itself never goes in this
-  # file, a command line, a log or the output. With --key-via-proxy this variable is not read:
-  # the network proxy attaches the key (a network secret for www.googleapis.com, header
-  # X-Goog-Api-Key).
+  # Name of the environment variable holding the API key (upper case). The key itself never
+  # goes in this file, a command line, a log or the output. With --key-via-proxy this
+  # variable is not read: the network proxy attaches the key (a network secret for
+  # www.googleapis.com, header X-Goog-Api-Key).
   api_key_env: YOUTUBE_API_KEY
 
 logging:

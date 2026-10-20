@@ -114,13 +114,37 @@ def parse_request(url: str, headers: Mapping[str, str], base_url: str) -> ApiReq
     return ApiRequest(url=url, endpoint=endpoint, params=params, headers=lowered)
 
 
-def error_body(status: int, reason: str, message: str = "Synthetic API message") -> bytes:
-    """An API error document as Google sends it (``error.errors[0].reason``)."""
-    error = {
+ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo"
+
+
+def error_body(
+    status: int,
+    reason: str,
+    message: str = "Synthetic API message",
+    *,
+    detail: str | None = None,
+) -> bytes:
+    """An API error document as Google sends it (``error.errors[0].reason``).
+
+    ``detail`` adds a ``google.rpc.ErrorInfo`` entry to ``error.details`` with that reason, the
+    shape in which Google reports API-key problems (``API_KEY_INVALID``,
+    ``API_KEY_HTTP_REFERRER_BLOCKED``, ...), after an unrelated detail entry.
+    """
+    error: dict[str, Any] = {
         "code": status,
         "message": message,
         "errors": [{"message": message, "domain": "youtube.commentThread", "reason": reason}],
     }
+    if detail is not None:
+        error["details"] = [
+            {"@type": "type.googleapis.com/google.rpc.LocalizedMessage", "message": message},
+            {
+                "@type": ERROR_INFO_TYPE,
+                "reason": detail,
+                "domain": "googleapis.com",
+                "metadata": {"service": "youtube.googleapis.com", "consumer": "projects/0"},
+            },
+        ]
     return json.dumps({"error": error}).encode("utf-8")
 
 
@@ -137,6 +161,8 @@ class FakeApi:
     base_url: str = BASE_URL
     failure: tuple[int, bytes] | None = None
     requests: list[ApiRequest] = field(default_factory=list)
+    handlers: list[FakeHttpsHandler] = field(default_factory=list)
+    """The urllib handlers serving this API (CLI tests read each request's ``timeout``)."""
 
     def __call__(self, url: str, headers: Mapping[str, str]) -> dict[str, Any]:
         """``fetch_json`` for the pure module: decode the page this request asks for."""
@@ -164,6 +190,17 @@ class FakeApi:
     @property
     def urls(self) -> list[str]:
         return [request.url for request in self.requests]
+
+    def https_handler(self) -> FakeHttpsHandler:
+        """A new in-process handler answering from :meth:`respond`, kept in ``handlers``."""
+        handler = FakeHttpsHandler(self.respond)
+        self.handlers.append(handler)
+        return handler
+
+    @property
+    def timeouts(self) -> list[float | None]:
+        """The ``timeout`` urllib gave each request, in order."""
+        return [request.timeout for handler in self.handlers for request in handler.seen]
 
 
 class FakeHttpsHandler(urllib.request.HTTPSHandler):
