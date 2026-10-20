@@ -1,4 +1,4 @@
-# What Gardeners Are Saying (crop_explorer)
+# Garden variety (crop_explorer)
 
 A small, local, growing-environment-first explorer of gardeners' firsthand comments about crop
 varieties. A visitor describes a few conditions of their own garden (region, hardiness zone,
@@ -87,7 +87,9 @@ for growing conditions", and a condition stated in words the app cannot compare 
 "Mentioned as written, not comparable: soil "rocky hillside dirt"". Each result group shows
 `viewer.page_size` cards at a time with a "Show N more" button. "Optional outside context"
 (official references, published trials and outside gardeners' ratings, each badged) sits just
-above the Comments and Map tabs.
+above the Comments and Map tabs; the USDA zone map and NOAA rows say they are "also available
+as a map overlay". Choosing a U.S. state as Region shows a small **regional climate
+reference** box under the conditions (see "Regional climate overlays" below).
 
 **At a glance.** Above "My growing conditions", a header shows what the community shared,
 counted over the visible reports only (the public view never counts private imports). Four stat
@@ -139,8 +141,9 @@ arguments and the scope in `config.yaml`, so a private import can never be serve
 Cloud runs the app from the repository root, reads the root `.streamlit/config.toml` (which
 sets no server address or port, because Cloud health-checks the app on `localhost:8501` and
 proxies visitors to it) and installs the dependencies from the root `uv.lock`, the first
-dependency file it finds. No secrets are needed. The map's state outlines load from Plotly's
-CDN (`cdn.plot.ly`) in each visitor's browser.
+dependency file it finds. No secrets are needed. The maps' U.S. base map (state outlines) is
+served by the app itself from `static/topojson/` (`server.enableStaticServing` in
+`.streamlit/config.toml`), so visitors' browsers never fetch it from Plotly's CDN.
 
 If the build log shows the package or a dependency failing to install, the documented escape
 hatch is a `requirements.txt` listing the runtime dependencies of `pyproject.toml`. Cloud only
@@ -305,9 +308,10 @@ config file):
 | `viewer.page_size` | Cards shown per result group before "Show N more". |
 | `overview.top_varieties`, `overview.heatmap_varieties` | How many most-discussed varieties the "At a glance" bar chart lists (default 10), and how many of those same varieties, in the same order, the topic grid shows (default 8; at most `top_varieties`). |
 | `map.public_min_cell_count` | In public scope, map cells with fewer reports are drawn as "fewer than k". This **only coarsens the map display**: cards still show each comment's text and region, and filtering by that state still lists the reports, so it is not a privacy control. Only publish comments whose source is cleared. |
+| `map.height_px`, `map.zone_mute` | Height of the map in pixels (200-1200; the report-count map and every overlay, scale legend included), and how far the other zones fade toward the background when one zone is highlighted on the zone overlay (strictly between 0 and 1). There is no default-overlay setting: overlays are always off until the viewer picks one (SPEC §7). |
 | `extraction.hypothetical_markers` | Phrases that make a sentence advice, a plan or a wish; facts quoted from such sentences (and from questions) are rejected. A marker starting with `^` (`^maybe`) counts only at the start of a sentence. Keep the list in `docs/EXTRACTION_PROMPT.md` Part 2 in step (a test checks it). |
 | `quick_chips` | Label plus the garden conditions each chip sets. |
-| `outside_context` | Opt-in outbound links, each badged with its evidence type: `regional climate reference` (USDA zone map, NOAA normals, NASA climatology), `published external trial` (university variety trials) or `community report` (outside gardeners' own ratings, e.g. Cornell's Vegetable Varieties for Gardeners; never this channel's comments). `reported conditions` is not allowed here, and a government host (`*.gov`, `*.mil`, `*.gov.au`, `*.gc.ca`, ...) can never be labelled `community report`. |
+| `outside_context` | Opt-in outbound links, each badged with its evidence type: `regional climate reference` (USDA zone map, NOAA normals, NASA climatology), `published external trial` (university variety trials) or `community report` (outside gardeners' own ratings, e.g. Cornell's Vegetable Varieties for Gardeners; never this channel's comments). `reported conditions` is not allowed here, and a government host (`*.gov`, `*.mil`, `*.gov.au`, `*.gc.ca`, ...) can never be labelled `community report`. Optional `overlay: zones` or `overlay: normals` marks a regional climate reference whose kind of data is also a map overlay (its row then says "Also available as a map overlay"); only a `regional climate reference` may have one. |
 | `logging.level`, `logging.json_path` | Loguru level and optional JSON-lines log file (never receives comment text). |
 
 ## Testing and quality
@@ -337,7 +341,18 @@ the first-load labels, the source link's address, the "At a glance" tiles two by
 three tab labels on screen and the first bars above the fold), then desktop checks (tiles four
 across; one hover box per row; clicking a variety bar or a topic cell shows exactly the reports
 it counts, names them above the chart and links down to them) and a touch-screen check (the
-touch hint shows; two taps on a bar show its reports). That test is
+touch hint shows; two taps on a bar show its reports), the hardiness-zone overlay at 390x844
+(zones, state outlines and count labels drawn with no network, the disclaimer on screen, no
+sideways scrolling) and the base map and zone layer served by the app. `tests/test_overlay_charts.py` checks
+the overlay figures (one fill and one scale legend, the zone layer named by URL, count labels
+only for states with reports and never with coordinates, suppressed counts never shown, the
+zone emphasis and its configured fade, the NOAA scale spanning the contiguous states, light and
+dark tokens, escaping), their tables and the regional box's wording; `tests/test_app.py` checks
+the overlay picker (off by default), "Highlight a zone" (a view option that never sets a
+condition or changes the results), each overlay's badge, source, period, disclaimer and table,
+that public counts never include private rows, that the state filter still works, that a
+missing served zone layer is an error, and that the regional box appears only for a chosen
+region and never on a card. The browser test is
 marked `browser`, takes about 40 seconds and needs Playwright's Chromium (`uv run playwright
 install chromium`; CI uses `--with-deps`); deselect it with `-m "not browser"`.
 `tests/test_code_standards.py` fails for any function in `src/`, `app.py` or `streamlit_app.py`
@@ -347,6 +362,106 @@ phrasings, look-alikes and crop synonyms must match what the loader reads, and i
 example must load with zero rejections. CI (`.github/workflows/ci.yml`) runs the pre-commit hooks, installs Chromium and
 runs the tests with coverage.
 
+## Regional climate overlays
+
+Outside resources such as hardiness zones are **optional overlays**, not just links. They are
+**regional climate references** (SPEC §7): background for a region, never evidence about a
+variety, a report or a commenter.
+
+**On the map.** The Map tab has an **Overlay** choice: **None** (the default: the report-count
+map, unchanged), **USDA hardiness zones (2023)**, **Average July high (NOAA 1991-2020)**,
+**Average January low (NOAA 1991-2020)** and **Annual precipitation (NOAA 1991-2020)**. With an
+overlay on, it is the map's only fill; the state outlines stay, and the shown reports become
+one number per state that has any (an aggregate placed at the state's centre, never a garden
+location). Reports that give only a hardiness zone are never placed on the map. Each overlay
+is badged `regional climate reference` and names its source and period under the map, with a
+scale legend and a "Show as table" twin. Hovering a state gives its value (zones: the state's
+main zones by area) and, on its own line, "Reports naming this state: 4 (zones are not
+assigned to reports)". Clicking a state, or the "Filter by reported state" box, still filters
+the reports.
+
+<p>
+<img src="docs/img/overlays/phone-zones-highlight-5a-light.png" width="260" alt="Phone, light mode: the hardiness-zone overlay with zone 5a highlighted, the disclaimer above the map and report counts on the states">
+<img src="docs/img/overlays/phone-july-dark.png" width="260" alt="Phone, dark mode: the average July high overlay on the orange scale, with the note on Alaska and Hawaii below the map">
+<img src="docs/img/overlays/phone-regional-box-light.png" width="260" alt="Phone, light mode: the regional climate reference box for Connecticut under My growing conditions">
+</p>
+
+More screenshots (phone and desktop, light and dark) are in `docs/img/`.
+
+The zone layer shows, above the map and again above its tables, the required disclaimer
+"Simplified from the 2023 USDA Plant Hardiness Zone Map GIS data (PRISM Climate Group, Oregon
+State University). This is not the official USDA Plant Hardiness Zone Map — see
+planthardiness.ars.usda.gov." Its colours run cold (blue) to warm (red) with lightness always
+increasing one way (the "semantic heat" exception to one-hue ramps, always with a scale
+legend). Only the seven anchor colours pass the palette validator's ordinal checks; the 26
+half-zone steps between them are, by design, too close to tell neighbouring half-zones (6a/6b)
+apart by colour alone. So the zone layer has a **Highlight a zone** box under the Overlay
+choice: pick any zone or half-zone and it keeps its colour while every other zone fades, on the
+map and in the legend ("Where zone 5a is (2023 USDA zones)"). Left empty, it highlights the
+hardiness zone you chose under My growing conditions, if any. It is a view option only: it
+never sets your zone, never changes the results, and Clear leaves it alone. Its tables: each
+state's main zones by area (the half-zones covering at least 0.1% of the state), each state's
+share per half-zone (one row per state and zone, the share as a number), and the zone key.
+
+The NOAA layers use one orange ramp (blue already means "reports"), as sequential maps whose
+scale spans the 48 contiguous states, so they use the whole ramp; Alaska and Hawaii take its end
+colours when outside it, and a line under the map says so ("Alaska (62.3°F) and Hawaii (76.3°F)
+are below it and drawn in its lowest colour"); their exact values are in the hover and the
+table. Light and dark modes have their own steps. Overlays never change the results: zones are
+never assigned to reports, and no climate value is attached to a comment.
+
+**Under My growing conditions.** Choosing a U.S. state as Region shows a compact box, e.g.
+"Connecticut — main USDA zones by area 6a-7b (2023, simplified; largest area 6b); July average
+high 83°F, January average low 18°F, annual precipitation 49 in (NOAA 1991-2020 statewide
+averages)", with the zone disclaimer in its own info box, then what "main zones" means (a few
+places can be in a zone not listed; look up a ZIP code at planthardiness.ars.usda.gov for an
+exact zone) and the sources. It describes your chosen region only: it never sorts or matches
+reports and never appears on a card. DC has no NOAA statewide series, and a region outside the
+U.S. gets a line saying no reference is available.
+
+**NASA POWER stays a link.** SPEC §7 makes it a P2 "only if it adds real usefulness": the NOAA
+statewide averages already cover the same variables (temperature, precipitation) for the same
+regions, and a POWER overlay would need either request-time API calls (not allowed) or a
+gridded climatology build for a state-level map that cannot show its resolution. Cornell's and
+Nebraska's trial and gardener resources stay labelled links (no bulk rehosting).
+
+**The data** (`src/crop_explorer/data/overlays/`) are small, attributed files built offline:
+simplified 2023 USDA Plant Hardiness Zone half-zone polygons (contiguous U.S., Alaska and
+Hawaii, 0.9 MB), each state's half-zone shares, and statewide 1991-2020 averages of three NOAA
+nClimDiv series (Climate at a Glance; statistical averages computed by this project, not
+NOAA's station-based Climate Normals and not observed weather). The zone geometry is altered
+(simplified) from the PRISM/OSU GIS data, so under the PRISM/OSU terms every display carries
+the disclaimer above and no USDA-ARS or OSU logo is used anywhere. Sources, terms (verbatim),
+retrieval dates, checksums and tolerances: `NOTICE.md` and `sources.yaml` in that folder. The
+app loads them once per server process (`st.cache_resource`; query results are never cached)
+and makes no network call for them; a corrupt file is reported where it would show while the
+rest of the page keeps working.
+
+**Served to browsers.** Plotly draws nothing on a map (not even the zone polygons) until it
+has loaded its U.S. base map. The app serves that file, Plotly's own `usa_110m.json`
+(unchanged, MIT; provenance in `static/topojson/NOTICE.md`), from `static/topojson/` and sets
+Plotly's `topojsonURL` to it, so maps draw on phones and networks that cannot reach
+`cdn.plot.ly`. The zone figure names its polygons by URL too: `static/overlays/` holds a
+byte-identical copy of the packaged zone layer (the app checks this at start-up and shows an
+error instead of the overlay if the copy is missing or stale), so the 0.9 MB GeoJSON is fetched
+once and cached by the browser instead of being copied into every figure and resent on every
+rerun. Run the app from the repository root (where `.streamlit/config.toml` turns on static
+serving).
+
+On a 390x844 phone viewport with 4x CPU throttling (demo data), switching the map to the zone
+overlay draws in about 2.2 s (its largest main-thread task about 1.0 s, drawing 1.9 million
+characters of SVG path), a NOAA overlay in about 1.2 s; scrolling over the map drops no frames.
+Building a zone figure costs the server about 60 ms and sends about 19 KB.
+
+To rebuild the overlay data (network; geometry tools come from the optional `overlays`
+dependency group and are never imported by the app; with the default output folder the script
+also refreshes the browser copy in `static/overlays/`):
+
+```bash
+uv run --group overlays python -I scripts/build_overlays.py --download-dir ~/.cache/crop_explorer/overlay-downloads
+uv run pytest tests/test_overlays.py tests/test_overlay_charts.py -q
+```
+
 ## Project layout
 
 ```text
@@ -354,10 +469,14 @@ runs the tests with coverage.
 ├── config.yaml                   # runtime configuration
 ├── app.py                        # Streamlit Browse screen (thin; logic lives in the package)
 ├── streamlit_app.py              # hosted public demo entrypoint (Streamlit Community Cloud)
-├── .streamlit/config.toml        # Streamlit settings (no server address or port)
+├── .streamlit/config.toml        # Streamlit settings (no server address or port; static serving)
+├── static/topojson/              # Plotly's U.S. base map, served by the app (NOTICE.md)
+├── static/overlays/              # browser copy of the zone layer, checked identical (NOTICE.md)
 ├── docs/
 │   ├── ARCHITECTURE.md           # module contracts and exact behavioural rules
 │   └── EXTRACTION_PROMPT.md      # operator guide + instructions for the offline model step
+├── scripts/
+│   └── build_overlays.py         # offline build of src/crop_explorer/data/overlays/
 ├── fixtures/
 │   ├── synthetic_comments.jsonl  # 69 fictional comments (public-safe demo data)
 │   ├── synthetic_extractions.jsonl
@@ -377,6 +496,9 @@ runs the tests with coverage.
 │   ├── geography.py              # conservative state counts and the choropleth
 │   ├── overview.py               # "At a glance" counts (distinct comments, never quality)
 │   ├── overview_charts.py        # its Plotly figures, light/dark tokens, escaping
+│   ├── overlays.py               # loaders for the packaged regional climate references
+│   ├── overlay_charts.py         # the map's optional overlays: figures, tables, panel text
+│   ├── data/overlays/            # zone GeoJSON, state zone ranges, NOAA averages, NOTICE.md
 │   ├── db.py                     # SQLite + FTS5 persistence and scope-gated reads
 │   ├── visibility.py             # rights/expiry gate shared by every viewer read
 │   └── ui.py                     # pure viewer helpers (escaping, card text, state)
@@ -406,8 +528,19 @@ runs the tests with coverage.
 - Regions are coarse (U.S. states, Canadian provinces, countries); the map shows U.S. states
   only. Small-cell suppression only coarsens the map display (see Configuration); it is per
   cell, so with a threshold above 1 a suppressed count can also be derived by subtraction from
-  the "not reported" totals. Plotly loads the state outlines from `cdn.plot.ly`, so an offline
-  browser shows the counts and the state selector but an empty map.
+  the "not reported" totals. The maps' base map is served by the app (`static/topojson/`);
+  if static serving is off (the app run from another directory, without the repository's
+  `.streamlit/config.toml`), the maps stay empty while the counts and state selector work.
+- The climate overlays are coarse regional references: one NOAA number per state hides large
+  differences within it, the zone layer is simplified (about 110 m to a few km), Puerto Rico
+  is not included, and DC has no NOAA statewide series. A state's "main zones" leave out
+  half-zones covering under 0.1% of it, so the official ZIP lookup can name a zone the range
+  does not (Texas, Maine and Arizona each have one such ZIP). Neighbouring half-zones look alike
+  on the zone layer; use "Highlight a zone". The zone layer, like the base map, needs the app's
+  static serving: run from another directory, it stays empty.
+- On the overlays, every state with shown reports gets a count label; with many reports in the
+  small northeastern states the labels can crowd at phone width (the state selector and the
+  table carry the same counts).
 - Built for small datasets: each viewer rerun loads all visible comments into Python (fine for
   thousands of comments, not millions); result groups are paged. CSV cells over 131,072
   characters are rejected.

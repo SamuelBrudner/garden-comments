@@ -10,7 +10,9 @@ own words" condition lines fit, and that the "At a glance" stat tiles sit two by
 three tab labels on screen and the first bars above the fold; then a 1280x900 smoke test (tiles
 four across) and click-through tests: clicking a variety bar or a topic cell shows exactly the
 reports it counts, says so above the chart and links down to them; on a touch screen the touch
-hint is shown and two taps on a bar (Plotly selects on the second) show its reports.
+hint is shown and two taps on a bar (Plotly selects on the second) show its reports; and, at
+390x844, the hardiness-zone overlay draws its own (self-contained) zone polygons with the "not
+the official map" disclaimer on screen and no sideways scrolling.
 Marked ``browser`` (deselect with
 ``-m "not browser"``); CI installs Chromium with ``uv run playwright install --with-deps
 chromium``.
@@ -37,6 +39,8 @@ from crop_explorer import db
 from crop_explorer.config import DEFAULT_CONFIG_PATH, load_config
 from crop_explorer.extraction import load_extractions
 from crop_explorer.ingest import build_source, import_file
+from crop_explorer.overlay_charts import ZONE_LAYER_URL
+from crop_explorer.overlays import ZONE_DISCLAIMER
 from crop_explorer.schemas import ColumnMapping, RightsStatus
 
 pytestmark = pytest.mark.browser
@@ -451,3 +455,55 @@ def test_on_a_touch_screen_two_taps_on_a_bar_show_its_reports(
     expect(feedback(page, GLANCE_TABS[0], "Juliet · tomato")).to_be_attached()
     assert_no_horizontal_overflow(page)
     assert_no_exception(page)
+
+
+# --------------------------------------------------------------------------- climate overlays
+
+
+def test_phone_width_zone_overlay_shows_the_map_and_the_disclaimer(
+    browser: Browser, viewer_url: str
+) -> None:
+    """The zone layer is packaged GeoJSON, so it draws even without Plotly's CDN state shapes."""
+    page = open_viewer(browser, viewer_url, 390, 844, touch=True)
+    page.get_by_role("tab", name="Map", exact=True).click()
+    panel = page.get_by_role("tabpanel", name="Map")
+    panel.get_by_text("USDA hardiness zones (2023)", exact=True).click()
+    disclaimer = panel.get_by_text(ZONE_DISCLAIMER).first  # above the map (again in the table)
+    disclaimer.scroll_into_view_if_needed()
+    expect(disclaimer).to_be_in_viewport()
+    plot = panel.locator(".js-plotly-plot")
+    expect(plot).to_have_count(1)
+    # 25 half-zones, then the 51 state outlines from the app's own base map (no CDN here).
+    expect(plot.locator(".choroplethlocation")).to_have_count(25 + 51)
+    labels = plot.locator(".scattergeo text")
+    expect(labels.first).to_be_attached()
+    assert "4" in labels.all_text_contents()  # Connecticut's count, a state-level aggregate
+    plot.scroll_into_view_if_needed()
+    expect(plot).to_be_in_viewport()
+    expect(plot.locator(".colorbar")).to_have_count(1)  # the scale legend
+    box = plot.bounding_box()
+    assert box is not None
+    assert box["x"] >= 0 and box["x"] + box["width"] <= 390, box
+    assert box["height"] > 200, box
+    assert_no_horizontal_overflow(page)
+    assert_no_exception(page)
+
+
+def test_the_base_map_is_served_by_the_app_not_the_cdn(viewer_url: str) -> None:
+    """Plotly draws nothing on a map until its base map loads; the app serves it itself."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"{viewer_url}app/static/topojson/usa_110m.json", timeout=10) as response:
+        topology = json.loads(response.read())
+    assert topology["type"] == "Topology"
+    assert len(topology["objects"]["subunits"]["geometries"]) == 51
+
+
+def test_the_zone_layer_is_served_by_the_app(viewer_url: str) -> None:
+    """The zone figure names this URL; the browser fetches the layer once and caches it."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    url = f"{viewer_url}{ZONE_LAYER_URL}"
+    with opener.open(url, timeout=10) as response:
+        layer = json.loads(response.read())
+    assert layer["type"] == "FeatureCollection"
+    assert layer["disclaimer"] == ZONE_DISCLAIMER
+    assert len(layer["features"]) == 25
