@@ -12,6 +12,7 @@ rules so modules can be built and tested independently. Shared types live in:
 | `views.py` | `GardenContext`, `FactView`, `MentionView`, `CommentView` (`parse_status=None`, never extracted, requires `mentions == ()`, else `ValidationError`), `DimensionMatch` (incl. display-only `written_values`), `MatchResult`, `MentionMatch`, `CommentResult`, `SearchQuery`, `ResultGroup`, `SearchResult` (incl. `n_not_analysed`), `ChipSupport(n_any, n_all)` (non-negative, `n_all <= n_any`), literals `ViewerScope`, `MatchStatus` (incl. `described_differently`), `Tier`, `RegionStatus` (`same`, `same_country`, `elsewhere`, `not_stated`), `GroupKey`, constants `TIER_ORDER`, `GROUP_TITLES` (titles: Search rule 5) |
 | `config.py` | `AppConfig` and sub-models (incl. `OverviewConfig(top_varieties, heatmap_varieties)`, `heatmap_varieties <= top_varieties`; `OutsideLink.overlay` (`"zones"`, `"normals"` or `None`), only on a `regional climate reference`; `MapConfig(public_min_cell_count, height_px 200-1200, zone_mute in (0, 1))`, no default-overlay field: overlays are always opt-in; `YouTubeConfig(api_base_url, page_size, timeout_s, max_pages, retention_days, api_key_env)`: https base URL without query or final slash whose host is one of `YOUTUBE_API_HOSTS` (`www.googleapis.com`, `youtube.googleapis.com`; no port: the key header is sent there), `1 <= page_size <= 100`, finite `timeout_s > 0`, `max_pages >= 1`, `1 <= retention_days <= 30`, an upper-case environment-variable name `^[A-Z_][A-Z0-9_]*$`, so a mixed-case API key is never accepted as one; `AppConfig` sets `hide_input_in_errors`, so a validation error names the setting and the rule but never the value, which may be a mistakenly pasted key), `load_config(path)`, `ContextLabel` (every evidence label), `OutsideLabel` (labels allowed on outside links: `regional climate reference`, `published external trial`, `community report` — never `reported conditions`), `is_official_host(url)` (a `community report` outside link on a government host such as `*.gov`, `*.mil`, `*.gov.au` or `*.gc.ca` fails validation: an official resource is a reference or a trial, never gardener testimony) |
 | `logging_setup.py` | `configure_logging(cfg)` |
+| `legal.py` | `LegalPage` (`"privacy"`, `"terms"`), `LEGAL_PAGES`, `LEGAL_TITLES`, `PAGE_PARAM` (`"page"`), `LEGAL_DIR` (`data/legal`), `YOUTUBE_TERMS_URL`, `GOOGLE_PRIVACY_URL`, `page_from_param(value)` (`None` → `None`; an exact page name → that page; anything else → `ValueError("Unknown page ...")` repeating at most 20 characters), `legal_text(page)` (the packaged Markdown, stripped), `page_href(page)` (`"?page=<page>"`), `footer_markdown()` |
 
 ## Engineering rules (all modules)
 
@@ -1383,6 +1384,14 @@ import it and pass its own options. One Browse screen
 function in `app.py`, `ui.py` and `geography.py` has at most 15 code lines
 (`tests/test_code_standards.py`).
 
+- **Legal pages** (YouTube Developer Policies III.A.1-2). Right after the title, `main` reads
+  `st.query_params["page"]` with `legal.page_from_param`: a legal page renders
+  `legal.legal_text(page)` (trusted, packaged Markdown) between two "Back to the comments"
+  buttons (keys `back-top`, `back-bottom`; they clear the query parameters) **instead of** the
+  Browse screen, before any startup guard, so it needs no database and shows no comment. An
+  unknown value is an `st.error` with the back button, then `st.stop()`. Otherwise the Browse
+  screen ends with a divider and `legal.footer_markdown()` as a caption (a footer, so it never
+  pushes "At a glance" down on a phone), on every scope.
 - **Startup guards** (each shows `st.error` and calls `st.stop()`, never a traceback):
   `ui.parse_app_args` uses `parse_args` (not `parse_known_args`, `allow_abbrev=False`), so an
   unknown, abbreviated or invalid option (`--database`, `--confg`, `--scope everyone`) raises

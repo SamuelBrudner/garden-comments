@@ -32,6 +32,7 @@ import streamlit as st
 from crop_explorer import (
     db,
     geography,
+    legal,
     overlay_charts,
     overlays,
     overview,
@@ -48,6 +49,7 @@ from crop_explorer.config import (
     load_config,
 )
 from crop_explorer.geography import RegionCounts
+from crop_explorer.legal import LegalPage
 from crop_explorer.logging_setup import configure_logging
 from crop_explorer.overlay_charts import OverlayKey
 from crop_explorer.overlays import OVERLAY_LABEL, OverlayDataError, Overlays
@@ -139,6 +141,7 @@ _GLANCE_ALTS: Final = {
     ),
     "setups": "Bar charts: how many comments mention each growing method and each setting.",
 }
+_BACK_LABEL: Final = "Back to the comments"
 _DB_ERROR: Final = (
     "The database at {path} cannot be opened: {reason}. Build a new one with: {command}"
 )
@@ -866,6 +869,34 @@ def _browse(ctx: _Context) -> None:
     _results(ctx, query, names)
 
 
+# --------------------------------------------------------------------------- legal pages
+
+
+def _back_to_browse() -> None:
+    st.query_params.clear()
+
+
+def _back_button(key: str) -> None:
+    st.button(_BACK_LABEL, on_click=_back_to_browse, key=key)
+
+
+def _legal_page() -> LegalPage | None:
+    """Return the legal page the URL asks for; an unknown one is an error that stops the run."""
+    try:
+        return legal.page_from_param(st.query_params.get(legal.PAGE_PARAM))
+    except ValueError as exc:
+        st.error(ui.escape_markdown(str(exc)))
+        _back_button("back-top")
+        st.stop()
+
+
+def _legal(page: LegalPage) -> None:
+    """Render one legal page (trusted, packaged Markdown) instead of the Browse screen."""
+    _back_button("back-top")
+    st.markdown(legal.legal_text(page))
+    _back_button("back-bottom")
+
+
 # --------------------------------------------------------------------------- startup guards
 
 
@@ -927,6 +958,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     cfg = load_config(args.config)
     _configure_logging_once(cfg.logging.model_dump_json())
     st.title(_TITLE, anchor=False)
+    page = _legal_page()
+    if page is None:
+        _browse_page(args, cfg)
+    else:
+        _legal(page)
+
+
+def _browse_page(args: ui.AppArgs, cfg: AppConfig) -> None:
+    """Render the Browse screen: the startup guards, the comments, then the legal links."""
     st.markdown(_SUBTITLE)
     scope = args.scope or cfg.viewer.scope
     _require_local_server(scope)
@@ -934,6 +974,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     _require_database(db_path)
     with closing(_connect(db_path)) as conn:
         _browse(_Context(conn, cfg, scope, utc_now_iso()))
+    st.divider()
+    st.caption(legal.footer_markdown())
 
 
 if __name__ == "__main__":

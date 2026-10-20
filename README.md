@@ -426,6 +426,23 @@ The first deliverable is a **private local prototype**, not a public copy of any
 - `data/` (database, logs, exports, model output) is git-ignored. Exports and model output
   contain verbatim comment text and are as private as the source.
 
+### Privacy policy and terms of use
+
+The foot of every Browse page, the hosted demo included, reads: "By using this site you agree
+to its Terms of use and Privacy policy", linking `?page=terms` and
+`?page=privacy`. Each opens (in a new tab) that page instead of the comments; "Back to the
+comments" returns. Any other `?page=` value is an error. The texts are
+[`src/crop_explorer/data/legal/privacy.md`](src/crop_explorer/data/legal/privacy.md) and
+[`terms.md`](src/crop_explorer/data/legal/terms.md). They cover what the
+[YouTube Developer Policies](https://developers.google.com/youtube/terms/developer-policies)
+ask of an app that shows YouTube API data: a link to the YouTube Terms of Service and
+agreement to be bound by them (III.A.1); a privacy policy, reachable from every page, that says
+the app uses YouTube API Services, links the Google Privacy Policy and says what information is
+accessed, used, stored and shared, and with whom, including that comment text is sent to an AI
+model for extraction (III.A.2). Having them does **not** clear any comments for publication
+(see above). Edit them when what the app collects, stores or shares changes, and update their
+"Last updated" date.
+
 ## Configuration
 
 `config.yaml` (validated by `crop_explorer.config.AppConfig`; relative paths resolve against the
@@ -636,6 +653,8 @@ uv run pytest tests/test_overlays.py tests/test_overlay_charts.py -q
 │   ├── overlays.py               # loaders for the packaged regional climate references
 │   ├── overlay_charts.py         # the map's optional overlays: figures, tables, panel text
 │   ├── data/overlays/            # zone GeoJSON, state zone ranges, NOAA averages, NOTICE.md
+│   ├── legal.py                  # privacy policy and terms of use pages (loaders, links)
+│   ├── data/legal/               # their texts: privacy.md, terms.md
 │   ├── db.py                     # SQLite + FTS5 persistence and scope-gated reads
 │   ├── visibility.py             # rights/expiry gate shared by every viewer read
 │   └── ui.py                     # pure viewer helpers (escaping, card text, state)

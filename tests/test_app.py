@@ -34,7 +34,7 @@ from loguru import logger
 from streamlit import config as streamlit_config
 from streamlit.testing.v1 import AppTest
 
-from crop_explorer import db, overlay_charts, overlays, search, ui
+from crop_explorer import db, legal, overlay_charts, overlays, search, ui
 from crop_explorer.config import DEFAULT_CONFIG_PATH, load_config
 from crop_explorer.extraction import load_extractions
 from crop_explorer.ingest import build_source, import_file
@@ -225,11 +225,14 @@ def run_app(
     config: Path | None = None,
     address: str | None = "localhost",
     extra_args: Sequence[str] = (),
+    query: Mapping[str, str] | None = None,
 ) -> AppTest:
     streamlit_config.set_option("server.address", address)
     argv = ["app.py", "--config", str(config or env.config), "--db", str(db_path or env.db_path)]
     monkeypatch.setattr(sys, "argv", [*argv, "--scope", scope, *extra_args])
     at = AppTest.from_file(str(APP), default_timeout=TIMEOUT)
+    for name, value in (query or {}).items():
+        at.query_params[name] = value
     return at.run()
 
 
@@ -1981,3 +1984,46 @@ class TestOutsideContextOverlays:
             assert ui.outside_link_markdown(link) in [
                 m.value.split(" :")[0] for m in panel.markdown
             ]
+
+
+class TestLegalPages:
+    """The privacy policy and terms of use (YouTube Developer Policies III.A.1-2)."""
+
+    def test_browse_links_both_pages(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env)
+        assert legal.footer_markdown() in [c.value for c in at.caption]
+
+    @pytest.mark.parametrize("page", legal.LEGAL_PAGES)
+    def test_page_replaces_the_browse_screen(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, page: legal.LegalPage
+    ) -> None:
+        at = run_app(monkeypatch, app_env, query={legal.PAGE_PARAM: page})
+        assert not at.exception
+        assert legal.legal_text(page) in [m.value for m in at.markdown]
+        assert not shown_ids(at, app_env)
+        assert not at.tabs
+
+    def test_page_needs_no_database(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv, tmp_path: Path
+    ) -> None:
+        missing = tmp_path / "missing.sqlite"
+        at = run_app(monkeypatch, app_env, db_path=missing, query={legal.PAGE_PARAM: "privacy"})
+        assert not at.error
+        assert not missing.exists()
+
+    def test_unknown_page_is_an_error(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env, query={legal.PAGE_PARAM: "about"})
+        assert any("Unknown page" in e.value for e in at.error)
+        assert not shown_ids(at, app_env)
+
+    def test_back_returns_to_the_comments(
+        self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
+    ) -> None:
+        at = run_app(monkeypatch, app_env, query={legal.PAGE_PARAM: "terms"})
+        at.button(key="back-bottom").click().run()
+        assert legal.PAGE_PARAM not in at.query_params
+        assert shown_ids(at, app_env)
