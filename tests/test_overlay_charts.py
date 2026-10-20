@@ -29,10 +29,9 @@ from crop_explorer.overlays import (
     NORMAL_ELEMENTS,
     NORMALS_PERIOD,
     NORMALS_SOURCE,
-    OVERLAY_LABEL,
     SERVED_ZONES_NAME,
     ZONE_DISCLAIMER,
-    ZONE_PERIOD,
+    ZONE_PERIOD_TEXT,
     ZONE_SOURCE,
     OverlayDataError,
     Overlays,
@@ -135,7 +134,7 @@ def figure_strings(figure: go.Figure) -> list[str]:
 def test_overlay_choices_are_off_by_default_and_named_as_specified() -> None:
     assert oc.OVERLAY_KEYS[0] == "none"
     assert dict(oc.OVERLAY_LABELS) == {
-        "none": "None",
+        "none": "Number of comments",
         "zones": "USDA hardiness zones (2023)",
         "july_avg_high_f": "Average July high (NOAA 1991-2020)",
         "jan_avg_low_f": "Average January low (NOAA 1991-2020)",
@@ -155,11 +154,9 @@ def test_zone_view_carries_label_source_period_and_the_disclaimer() -> None:
     view = oc.overlay_view("zones")
     assert view.title == "USDA hardiness zones (2023)"
     assert view.disclaimer == ZONE_DISCLAIMER
-    assert view.caption.startswith(
-        f"{OVERLAY_LABEL.capitalize()} · {ZONE_SOURCE} · {ZONE_PERIOD}."
-    )
-    assert "never assigned to the reports" in view.caption
-    assert "aggregates, not garden locations" in view.caption
+    assert view.caption.startswith(f"Climate data · {ZONE_SOURCE} · {ZONE_PERIOD_TEXT}.")
+    assert "Zones are not linked to the comments here." in view.caption
+    assert "in the middle of its state, not at anyone's garden" in view.caption
     assert "logo" not in view.caption.lower()
 
 
@@ -174,10 +171,10 @@ def test_noaa_views_say_what_the_averages_are_not(element: str) -> None:
     assert view.disclaimer is None
     assert NORMALS_SOURCE in view.caption
     assert view.caption.count(NORMALS_PERIOD) == 1  # the source already names the period
-    assert view.caption.startswith(f"{OVERLAY_LABEL.capitalize()} · {NORMALS_SOURCE}. ")
-    assert "not the weather of any season or garden" in view.caption
-    assert "not NOAA's station-based Climate Normals" in view.caption
-    assert "never attached to the reports here" in view.caption
+    assert view.caption.startswith(f"Climate data · {NORMALS_SOURCE}. ")
+    assert "not the weather in any one year or garden" in view.caption
+    assert "not NOAA's weather-station Climate Normals" in view.caption
+    assert "not linked to the comments here" in view.caption
 
 
 def test_emphasis_zones() -> None:
@@ -229,10 +226,10 @@ def test_zone_figure_hover_is_per_state_with_its_range_and_reports(refs: Overlay
     hover = dict(zip(states.locations, states.text, strict=True))
     assert hover["CT"] == (
         "Connecticut<br>Main USDA zones by area: 6a-7b (2023, simplified)"
-        "<br>Reports naming this state: 4 (zones are not assigned to reports)"
+        "<br>Comments that name this state: 4 (zones are not linked to the comments)"
     )
     assert hover["VT"].endswith(
-        "Reports naming this state: none shown (zones are not assigned to reports)"
+        "Comments that name this state: none shown (zones are not linked to the comments)"
     )
     assert states.hovertemplate == "%{text}<extra></extra>"
 
@@ -357,7 +354,7 @@ def test_suppressed_cells_never_show_their_count(refs: Overlays) -> None:
         hover = [
             t for trace in figure.data[:-1] for t in (trace.text or ()) if t.startswith("Texas")
         ]
-        assert hover and all("Reports naming this state: fewer than 3 (" in t for t in hover)
+        assert hover and all("Comments that name this state: fewer than 3 (" in t for t in hover)
 
 
 @THEMES
@@ -404,7 +401,7 @@ def test_noaa_hover_names_the_average_and_the_reports(refs: Overlays) -> None:
     hover = dict(zip(fill.locations, fill.text, strict=True))
     assert hover["CT"] == (
         "Connecticut<br>July average high: 82.9°F<br>statewide 1991-2020 average (NOAA)"
-        "<br>Reports naming this state: 4 (the average is not attached to reports)"
+        "<br>Comments that name this state: 4 (the average is not linked to the comments)"
     )
 
 
@@ -412,15 +409,15 @@ def test_noaa_scale_spans_the_contiguous_states_and_says_who_is_off_it(refs: Ove
     """Alaska's July (62.3°F) would squeeze the 48 states into the dark half of the ramp."""
     july = oc.scale_note("july_avg_high_f", refs)
     assert july == (
-        "The colour scale spans the 48 contiguous states (77.2°F to 95.2°F); Alaska (62.3°F) "
-        "and Hawaii (76.3°F) are below it and drawn in its lowest colour."
+        "The color scale covers the lower 48 states (77.2°F to 95.2°F); Alaska (62.3°F) "
+        "and Hawaii (76.3°F) are below that range and shown in the lowest color."
     )
     january = oc.scale_note("jan_avg_low_f", refs)
     assert january is not None
-    assert "Alaska (-2.4°F) is below it and drawn in its lowest colour" in january
-    assert "Hawaii (55.4°F) is above it and drawn in its highest colour" in january
+    assert "Alaska (-2.4°F) is below that range and shown in the lowest color" in january
+    assert "Hawaii (55.4°F) is above that range and shown in the highest color" in january
     rain = oc.scale_note("annual_precip_in", refs)
-    assert rain is not None and "Hawaii (61.7 in) is above it" in rain
+    assert rain is not None and "Hawaii (61.7 in) is above that range" in rain
     assert oc.scale_note("zones", refs) is None
 
 
@@ -558,21 +555,21 @@ def test_us_state_reference(refs: Overlays) -> None:
     reference = oc.regional_reference("US-CT", refs)
     assert reference is not None
     assert reference.summary == (
-        "Connecticut — main USDA zones by area 6a-7b (2023, simplified; largest area 6b); "
+        "Connecticut — main USDA zones by area 6a-7b (2023, simplified; largest area 6b). "
         "July average high 83°F, January average low 18°F, annual precipitation 49 in "
-        "(NOAA 1991-2020 statewide averages)"
+        "(NOAA 1991-2020 statewide averages)."
     )
     assert reference.disclaimer == ZONE_DISCLAIMER
     assert ZONE_DISCLAIMER not in reference.sources  # shown on its own, prominently
     assert reference.sources.startswith(
-        "Main zones: the half-zones covering at least 0.1% of the state's area, so a few "
-        "places can be in a zone not listed; for an exact zone, look up a ZIP code at "
+        "Main zones are the half-zones that cover at least 0.1% of the state's area. A few "
+        "places may be in a zone not listed. For an exact zone, look up a ZIP code at "
         "planthardiness.ars.usda.gov."
     )
-    assert "not a reading from any report's garden" in reference.sources
-    assert "never used to sort or match reports" in reference.sources
-    assert "NOAA NCEI Climate at a Glance (nClimDiv)" in reference.sources
-    assert "not observed weather" in reference.sources
+    assert "the whole region you chose, not any one garden" in reference.sources
+    assert "It is not used to sort or match comments." in reference.sources
+    assert "Averages are from NOAA NCEI Climate at a Glance." in reference.sources
+    assert "not the weather of any one year or place" in reference.sources
 
 
 def test_negative_averages_never_show_minus_zero(refs: Overlays) -> None:
@@ -591,13 +588,13 @@ def test_dc_says_noaa_averages_are_missing(refs: Overlays) -> None:
     )
     assert reference.disclaimer == ZONE_DISCLAIMER
     assert "NOAA" not in reference.sources  # no averages shown, so no NOAA source
-    assert reference.sources.startswith("Main zones:")
+    assert reference.sources.startswith("Main zones are")
 
 
 @pytest.mark.parametrize(("code", "name"), [("CA-ON", "Ontario"), ("GB", "United Kingdom")])
 def test_outside_the_us_says_what_is_unavailable(refs: Overlays, code: str, name: str) -> None:
     reference = oc.regional_reference(code, refs)
     assert reference is not None
-    assert reference.summary.startswith(f"No regional climate reference for {name}")
+    assert reference.summary.startswith(f"No climate data for {name}")
     assert reference.disclaimer is None
     assert reference.sources == ""

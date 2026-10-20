@@ -107,8 +107,8 @@ outside_context:
     label: regional climate reference
     overlay: zones
     note: >-
-      Zones reflect the average annual extreme minimum winter temperature only. They do not
-      describe summer heat, humidity, season length, soil or sunlight.
+      A USDA hardiness zone is based only on the coldest winter temperatures. It says nothing
+      about summer heat, humidity, season length, soil or sun.
   - title: How to use the USDA zone map
     url: https://planthardiness.ars.usda.gov/pages/how-to-use-the-maps
     label: regional climate reference
@@ -118,22 +118,22 @@ outside_context:
     label: regional climate reference
     overlay: normals
     note: >-
-      30-year statistical averages for a place, not the weather any gardener experienced in
-      a particular season.
+      30-year averages from weather stations, not the weather any gardener had in a given
+      year.
   - title: NASA POWER climatology
     url: https://power.larc.nasa.gov/docs/services/api/temporal/climatology/
     label: regional climate reference
-    note: Gridded long-term climatology; coarse spatial resolution.
+    note: Long-term climate averages for large grid squares, so they miss local differences.
   - title: Cornell Vegetable Varieties for Gardeners
     url: https://vegvariety.cce.cornell.edu/
     label: community report
     note: >-
-      Variety ratings by outside home gardeners, hosted by Cornell Cooperative Extension. These
-      are not this channel's comments and not a controlled trial.
+      Variety ratings from other home gardeners, hosted by Cornell Cooperative Extension. They
+      are not the comments shown on this page and not a formal variety trial.
   - title: Nebraska Vegetable Variety Navigator
     url: https://agronomy.unl.edu/vegetable-variety-navigator/
     label: published external trial
-    note: Published variety trial context from the University of Nebraska-Lincoln.
+    note: Variety trial information from the University of Nebraska-Lincoln.
 
 logging:
   level: INFO

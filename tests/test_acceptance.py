@@ -483,10 +483,11 @@ def test_11_16_sparse_conditions_still_offer_search_and_explain_the_limitation(
     assert thanks.n_candidates >= 1 and thanks.n_with_conditions == 0
     assert [group.key for group in thanks.groups] == ["not_stated"]
     assert thanks.limitation_message is not None
-    assert thanks.limitation_message.startswith(f"None of these {thanks.n_candidates} report")
+    assert thanks.limitation_message.startswith(f"None of these {thanks.n_candidates} comment")
     overall = run(demo_conn, garden=EXAMPLE_GARDEN)
     assert overall.limitation_message == (
-        "Only 33 of 69 reports mention comparable growing conditions (3 not yet analysed)."
+        "Only 33 of 69 comments mention garden details that can be compared (3 not yet read "
+        "for garden details)."
     )
 
     # A corpus where *no* comment states a condition (and none was ever extracted).
@@ -504,8 +505,8 @@ def test_11_16_sparse_conditions_still_offer_search_and_explain_the_limitation(
     sparse = run(demo_conn, garden=EXAMPLE_GARDEN)
     assert (sparse.n_candidates, sparse.n_with_conditions) == (3, 0)
     assert sparse.limitation_message == (
-        "None of these 3 reports have been analysed for growing conditions yet, so none can "
-        "be compared with your garden. All are shown below."
+        "None of these 3 comments have been read for garden details yet, so none can be "
+        "compared with your garden. All are shown below."
     )
     assert [(group.key, len(group.results)) for group in sparse.groups] == [("not_stated", 3)]
     assert ids(run(demo_conn, text="tomato", garden=EXAMPLE_GARDEN)) == ["n2", "n3"]

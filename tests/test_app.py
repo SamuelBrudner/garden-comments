@@ -6,10 +6,10 @@ synthetic fixtures (public demo data), one extra synthetic comment full of Markd
 grouping, strict toggle, chips), §6 (state filter and map notes), §9/§11 #15 (rights isolation:
 nothing private reaches the public view), §11 #1 (text search finds unextracted comments), #16
 (limitation message), #17 (inputs exist, Clear resets them, source references open: a cleared
-comment's permalink becomes a "Source ↗" link while synthetic rows never link out) and #18 (every
-card and the map carry their provenance labels), that untrusted comment text renders literally,
-and that a private-scope viewer refuses to run unless it listens on this computer only. Phone
-width is covered by ``tests/test_browser.py``.
+comment's permalink becomes an "Original comment ↗" link while synthetic rows never link out) and
+#18 (every card and the map carry their provenance labels), that untrusted comment text renders
+literally, and that a private-scope viewer refuses to run unless it listens on this computer
+only. Phone width is covered by ``tests/test_browser.py``.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from crop_explorer.overlays import (
     NORMALS_SOURCE,
     OVERLAY_LABEL,
     ZONE_DISCLAIMER,
-    ZONE_PERIOD,
+    ZONE_PERIOD_TEXT,
     ZONE_SOURCE,
     OverlayDataError,
 )
@@ -333,9 +333,12 @@ class TestBrowseScreen:
         at = run_app(monkeypatch, app_env)
         assert not at.exception
         assert [t.value for t in at.title] == ["Garden variety"]
-        assert "Find real experiences from gardens like yours." in texts_of(at)
+        assert (
+            "Gardeners' comments about the varieties they grew. Choose details about your garden "
+            "to see comments from similar gardens first." in texts_of(at)
+        )
         assert ui.DEMO_BANNER in [info.value for info in at.info]
-        assert subheaders(at)[-1] == "Reports (70)"
+        assert subheaders(at)[-1] == "Comments (70)"
         assert len(shown_ids(group(at, "all"), app_env)) == 70
 
     def test_limitation_message_is_prominent(
@@ -343,17 +346,15 @@ class TestBrowseScreen:
     ) -> None:
         at = run_app(monkeypatch, app_env)
         assert (
-            "Only 33 of 70 reports mention comparable growing conditions (4 not yet analysed)."
-            in infos(at)
+            "Only 33 of 70 comments mention garden details that can be compared (4 not yet read "
+            "for garden details)." in infos(at)
         )
 
     def test_search_and_condition_inputs_exist(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
-        assert at.text_input(key=ui.TEXT_KEY).label == (
-            "Search crops, varieties, or anything people mentioned"
-        )
+        assert at.text_input(key=ui.TEXT_KEY).label == "Search comments"
         labels = {box.label for box in at.selectbox}
         assert {
             "Region",
@@ -369,12 +370,12 @@ class TestBrowseScreen:
             "Watering",
             "Year grown",
             "Crop",
-            "Filter by reported state",
+            "Filter by state",
         } <= labels
         assert at.multiselect(key=ui.TOPICS_KEY).label == "Topics"
-        assert at.checkbox(key=ui.STRICT_KEY).label == "Only show stated matches"
+        assert at.checkbox(key=ui.STRICT_KEY).label == "Only show matching comments"
         assert [tab.label for tab in at.tabs] == [*ui.GLANCE_TABS, "Comments", "Map"]
-        assert {"About / Sources", "More conditions", "Optional outside context"} <= {
+        assert {"About and sources", "More garden details", "Links to other websites"} <= {
             e.label for e in at.expander
         }
 
@@ -393,7 +394,7 @@ class TestBrowseScreen:
         at = run_app(monkeypatch, app_env)
         at.text_input(key=ui.TEXT_KEY).input("kids watch").run()
         assert shown_ids(group(at, "all"), app_env) == {"syn-0025"}  # never extracted
-        assert "1 report" in texts_of(at)
+        assert "1 comment" in texts_of(at)
         assert ui.NOT_ANALYSED_LINE in texts_of(group(at, "all"))  # F20: never "not stated"
         at.text_input(key=ui.TEXT_KEY).input("trellis").run()
         assert "syn-0033" in shown_ids(group(at, "all"), app_env)  # unresolved, no mentions
@@ -415,7 +416,7 @@ class TestLayout:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
-        more = expander(at, "More conditions")
+        more = expander(at, "More garden details")
         hidden = {box.key for box in more.selectbox}
         assert hidden == {ui.CONDITION_KEYS[key] for key in ui.MORE_KEYS}
         assert ui.CONDITION_KEYS["summer_heat"] in hidden
@@ -428,7 +429,9 @@ class TestLayout:
     ) -> None:
         at = run_app(monkeypatch, app_env)
         assert at.selectbox(key=ui.YEAR_KEY).label == "Year grown"
-        assert ui.YEAR_KEY not in {box.key for box in expander(at, "More conditions").selectbox}
+        assert ui.YEAR_KEY not in {
+            box.key for box in expander(at, "More garden details").selectbox
+        }
         order = [n.key for n in walk(at.main) if getattr(n, "key", None)]
         crop, topics, year = (order.index(k) for k in (ui.CROP_KEY, ui.TOPICS_KEY, ui.YEAR_KEY))
         assert crop < topics < year
@@ -439,7 +442,7 @@ class TestLayout:
         at = run_app(monkeypatch, app_env)
         nodes = list(walk(at.main))
         outside = next(
-            i for i, n in enumerate(nodes) if getattr(n, "label", "") == "Optional outside context"
+            i for i, n in enumerate(nodes) if getattr(n, "label", "") == "Links to other websites"
         )
         strict = next(i for i, n in enumerate(nodes) if getattr(n, "key", "") == ui.STRICT_KEY)
         comments_tab = next(
@@ -459,9 +462,9 @@ class TestGrouping:
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         heads = subheaders(at)
-        assert "Matching reported conditions (3)" in heads
-        assert "Partially matching conditions (4)" in heads
-        assert any(h.startswith("Conditions not stated or not comparable (") for h in heads)
+        assert "Matching your garden (3)" in heads
+        assert "Partly matching your garden (4)" in heads
+        assert any(h.startswith("Not mentioned or can't be compared (") for h in heads)
         assert not has_group(at, "all")
         assert shown_ids(group(at, "match"), app_env) == set(FULL_MATCHES)
         assert shown_ids(group(at, "partial"), app_env) == {
@@ -487,8 +490,8 @@ class TestGrouping:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
-        (different,) = [e for e in at.expander if e.label.startswith("Different reported")]
-        assert different.label == "Different reported conditions (8)"
+        (different,) = [e for e in at.expander if e.label.startswith("Different from")]
+        assert different.label == "Different from your garden (8)"
         assert different.proto.expanded is False
         assert "syn-0019" in shown_ids(group(at, "different"), app_env)
 
@@ -497,24 +500,24 @@ class TestGrouping:
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         match = "\n".join(texts_of(group(at, "match")))
-        assert ui.escape_markdown("Relevant: zone 6b · containers") in match
+        assert ui.escape_markdown("Matches: zone 6b · containers") in match
         assert ui.escape_markdown("Region: Connecticut (same as yours)") not in match
         assert ui.escape_markdown("Region: Connecticut") in match
         assert ui.escape_markdown(ui.SYNTHETIC_NOTE) in match
         assert ui.EVIDENCE_LABEL in match
         partial = "\n".join(texts_of(group(at, "partial")))
-        assert ui.escape_markdown("Not stated: hardiness zone") in partial
-        imprecise = "Relevant: zone 6, subzone unknown (you: zone 6b) · containers"
+        assert ui.escape_markdown("Not mentioned: hardiness zone") in partial
+        imprecise = "Matches: zone 6, a or b not given (you chose zone 6b) · containers"
         assert ui.escape_markdown(imprecise) in partial
 
     def test_count_summary_lists_every_tier(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
-        summary = [t for t in texts_of(at) if t.startswith("70 reports ·")]
+        summary = [t for t in texts_of(at) if t.startswith("70 comments ·")]
         assert summary == [
-            "70 reports · 3 matching · 4 partially matching · 55 not stated or not comparable "
-            "· 8 different"
+            "70 comments · 3 matching · 4 partly matching · 55 not mentioned or can't be "
+            "compared · 8 different"
         ]
 
     def test_strict_checkbox_hides_groups_and_shows_count(
@@ -522,19 +525,18 @@ class TestGrouping:
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         assert (
-            "Ticking this would hide 63 reports whose conditions were not stated, not comparable "
-            "or differ." in texts_of(at)
+            "Ticking this would hide 63 comments where no garden detail matches yours, or where "
+            "one is different." in texts_of(at)
         )
         assert at.checkbox(key=ui.STRICT_KEY).help == (
-            "Hide reports whose conditions were not stated, not comparable or different from "
-            "yours."
+            "Hides comments where no garden detail matches yours, or where one is different."
         )
         at.checkbox(key=ui.STRICT_KEY).check().run()
         assert has_group(at, "match") and has_group(at, "partial")
         assert not has_group(at, "not_stated")
         assert not has_group(at, "different")
         assert (
-            "63 reports hidden because their conditions were not stated, not comparable or differ."
+            "Hidden: 63 comments where no garden detail matches yours, or where one is different."
             in texts_of(at)
         )
 
@@ -543,13 +545,14 @@ class TestGrouping:
     ) -> None:
         """F18: a two-condition chip states how many reports mention any and both conditions."""
         at = run_app(monkeypatch, app_env)
-        assert at.button(key="chip_0").proto.help == "Set this condition (8 reports state it)"
+        assert at.button(key="chip_0").proto.help == (
+            "Sets this garden detail (8 comments mention it)"
+        )
         assert at.button(key="chip_1").proto.help == (
-            "6 reports describe hot summers or humid conditions in their own words; "
-            "2 describe both"
+            "6 comments describe hot summers or humid weather in their own words; 2 describe both"
         )
         assert at.button(key="chip_2").proto.help == (
-            "Set this condition (4 reports describe it in their own words)"
+            "Sets this garden detail (4 comments describe it in their own words)"
         )
 
     def test_hot_and_humid_matches_quote_the_commenters_words(
@@ -561,14 +564,14 @@ class TestGrouping:
         match = "\n".join(texts_of(group(at, "match")))
         georgia = "In their own words: “brutally hot” (counted as hot summers) · Georgia"
         assert ui.escape_markdown(georgia) in match
-        assert "Relevant" not in match
+        assert "Matches" not in match
         assert not has_group(at, "different")
 
     def test_a_self_description_unlike_yours_is_not_comparable(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), humidity="dry_air")
-        assert "Conditions not stated or not comparable (" in "\n".join(subheaders(at))
+        assert "Not mentioned or can't be compared (" in "\n".join(subheaders(at))
         assert not has_group(at, "different")
         assert shown_ids(group(at, "match"), app_env) == {"syn-0019"}
         not_stated = group(at, "not_stated")
@@ -576,7 +579,8 @@ class TestGrouping:
             not_stated, app_env
         )
         line = (
-            "In their own words: “muggy” (humid; you chose dry air) · not counted as a difference"
+            "In their own words: “muggy” (read as humid; you chose dry air) · not counted as a "
+            "difference"
         )
         assert ui.escape_markdown(line) in "\n".join(texts_of(not_stated))
 
@@ -586,11 +590,11 @@ class TestGrouping:
         """F32: a condition set out of sight is named on the expander, which opens."""
         at = run_app(monkeypatch, app_env)
         at.button(key="chip_1").click().run()
-        more = expander(at, "More conditions")
-        assert more.label == "More conditions (hot summers, humid)"
+        more = expander(at, "More garden details")
+        assert more.label == "More garden details (hot summers, humid)"
         assert more.proto.expanded is True
         at.selectbox(key=ui.CONDITION_KEYS["summer_heat"]).set_value(None).run()
-        assert expander(at, "More conditions").label == "More conditions (humid)"
+        assert expander(at, "More garden details").label == "More garden details (humid)"
         assert at.button(key="chip_1").proto.type == "secondary"
 
     def test_chip_applies_its_conditions(
@@ -629,7 +633,7 @@ class TestClear:
         assert not at.exception
         for key, default in ui.reset_values().items():
             assert at.session_state[key] == default, key
-        assert subheaders(at)[-1] == "Reports (70)"
+        assert subheaders(at)[-1] == "Comments (70)"
         assert [w.value for w in at.warning] == []  # no session-state API warnings
 
     def test_cleared_selects_show_their_first_load_labels(
@@ -662,11 +666,11 @@ class TestFiltersAndEmptyStates:
         assert ui.year_filter_note("2024") not in infos(at)
         at.selectbox(key=ui.YEAR_KEY).set_value("2024").run()
         assert ui.year_filter_note("2024") in infos(at)
-        assert at.button(key="clear_year_filter").label == "Any year"
+        assert at.button(key="clear_year_filter").label == "Show all years"
         at.button(key="clear_year_filter").click().run()
         assert at.selectbox(key=ui.YEAR_KEY).value is None
         assert ui.year_filter_note("2024") not in infos(at)
-        assert subheaders(at)[-1] == "Reports (70)"
+        assert subheaders(at)[-1] == "Comments (70)"
 
     def test_strict_mode_that_hides_everything_says_so(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -678,8 +682,8 @@ class TestFiltersAndEmptyStates:
         messages = infos(at)
         assert ui.NO_RESULTS not in messages
         assert (
-            'The 1 report found is hidden by "Only show stated matches". Untick it to see it.'
-            in messages
+            'The 1 comment found is hidden by "Only show matching comments". Untick the box to '
+            "see it." in messages
         )
 
     def test_strict_hiding_is_explained_once(
@@ -692,9 +696,9 @@ class TestFiltersAndEmptyStates:
         at.checkbox(key=ui.STRICT_KEY).check().run()
         messages = infos(at)
         assert ui.NO_RESULTS not in messages
-        hiding = [m for m in messages if '"Only show stated matches"' in m]
+        hiding = [m for m in messages if '"Only show matching comments"' in m]
         assert len(hiding) == 1
-        assert hiding[0].endswith("untick it to see them.")
+        assert hiding[0].endswith("Untick the box to see them.")
 
     def test_plain_empty_state(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
@@ -709,7 +713,7 @@ class TestFiltersAndEmptyStates:
         at.selectbox(key=ui.REGION_KEY).set_value("US-CT")
         at.checkbox(key=ui.STRICT_KEY).check().run()
         assert any(
-            t.startswith("Region only lists reports from your area first") for t in texts_of(at)
+            t.startswith("Region only puts comments from your area first") for t in texts_of(at)
         )
 
 
@@ -721,7 +725,7 @@ class TestPaging:
     ) -> None:
         config = _write_config(app_env.root, app_env.db_path, page_size=10, name="paged.yaml")
         at = run_app(monkeypatch, app_env, config=config)
-        assert subheaders(at)[-1] == "Reports (70)"  # the heading keeps the full count
+        assert subheaders(at)[-1] == "Comments (70)"  # the heading keeps the full count
         assert len(shown_ids(group(at, "all"), app_env)) == 10
         assert at.button(key="more-all").label == "Show 10 more (60 not shown yet)"
         at.button(key="more-all").click().run()
@@ -730,7 +734,7 @@ class TestPaging:
         assert len(shown_ids(group(at, "all"), app_env)) == 10
         at.text_input(key=ui.TEXT_KEY).input("")
         at = select_garden(at, zone="6b", method="container")
-        assert "Matching reported conditions (3)" in subheaders(at)
+        assert "Matching your garden (3)" in subheaders(at)
         assert len(shown_ids(group(at, "not_stated"), app_env)) == 10
         assert at.button(key="more-not_stated").label.startswith("Show 10 more")
         with pytest.raises(KeyError):
@@ -753,7 +757,7 @@ class TestProvenanceLabels:
     ) -> None:
         at = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
         badge = ui.label_badge("reported conditions")
-        captions = [c.value for c in group(at, "match").caption if "Relevant" in c.value]
+        captions = [c.value for c in group(at, "match").caption if "Matches" in c.value]
         assert len(captions) == 3
         assert all(caption.startswith(f"{badge} ") for caption in captions)
 
@@ -765,16 +769,16 @@ class TestProvenanceLabels:
         at.text_input(key=ui.TEXT_KEY).input("visiting relatives").run()
         assert shown_ids(group(at, "not_stated"), app_env) == {"syn-0008"}
         captions = [c.value for c in group(at, "not_stated").caption if "Region" in c.value]
-        assert captions == [ui.escape_markdown("Not stated: hardiness zone\nRegion: Maine")]
+        assert captions == [ui.escape_markdown("Not mentioned: hardiness zone\nRegion: Maine")]
         assert (
-            "The 1 report found does not mention comparable growing conditions, so it cannot be "
-            "compared with your garden. It is shown below."
+            "The 1 comment found does not mention any garden details that can be compared with "
+            "yours. It is shown below."
         ) in infos(at)
 
     def test_map_tab_is_labelled(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
         (map_tab,) = [tab for tab in at.tabs if tab.label == "Map"]
-        badges = f"{ui.label_badge('community report')} {ui.label_badge('reported conditions')}"
+        badges = ":green-badge[comments] :green-badge[places named in comments]"
         assert badges in [m.value for m in map_tab.markdown]
 
 
@@ -785,11 +789,11 @@ class TestMap:
         at = run_app(monkeypatch, app_env)
         states = at.selectbox(key=ui.REGION_FILTER_KEY)
         assert states.options[0] == "All states"
-        assert "Connecticut (4 reports)" in states.options
+        assert "Connecticut (4 comments)" in states.options
         states.set_value("US-CT").run()
         assert shown_ids(group(at, "all"), app_env) == set(CT_COMMENTS)
         assert ui.region_filter_note("US-CT") in [i.value for i in at.info]
-        assert "Connecticut (4 reports)" in at.selectbox(key=ui.REGION_FILTER_KEY).options
+        assert "Connecticut (4 comments)" in at.selectbox(key=ui.REGION_FILTER_KEY).options
         at.button(key="clear_region_filter").click().run()
         assert at.selectbox(key=ui.REGION_FILTER_KEY).value is None
         assert len(shown_ids(group(at, "all"), app_env)) == 70
@@ -797,7 +801,7 @@ class TestMap:
     def test_map_notes_are_shown(self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv) -> None:
         at = run_app(monkeypatch, app_env)
         captions = texts_of(at)
-        assert "Region not reported: 46" in captions
+        assert "Region not mentioned: 46" in captions
         assert "Outside the U.S.: 3" in captions
 
     def test_map_respects_other_filters(
@@ -807,8 +811,8 @@ class TestMap:
         at.text_input(key=ui.TEXT_KEY).input("Juliet").run()
         options = at.selectbox(key=ui.REGION_FILTER_KEY).options
         # Juliet comments: syn-0006, 0013 and 0063 (Connecticut), 0041 (Georgia), 0044 (none).
-        assert options == ["All states", "Connecticut (3 reports)", "Georgia (1 report)"]
-        assert "Region not reported: 1" in texts_of(at)
+        assert options == ["All states", "Connecticut (3 comments)", "Georgia (1 comment)"]
+        assert "Region not mentioned: 1" in texts_of(at)
 
     def test_map_is_remounted_without_a_stale_selection_when_the_filter_changes(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -891,10 +895,10 @@ class TestSourceLinks:
     ) -> None:
         at = run_app(monkeypatch, linked_env, db_path=linked_env.db_path)
         assert ui.MIXED_DEMO_BANNER in infos(at)
-        assert link_buttons(at) == [("Source ↗", CLEARED_URL)]  # the only real permalink
+        assert link_buttons(at) == [("Original comment ↗", CLEARED_URL)]  # the only real permalink
         at.text_input(key=ui.TEXT_KEY).input("CLEAREDLINK").run()
         assert shown_ids(group(at, "all"), linked_env) == {CLEARED_ID}
-        assert link_buttons(at) == [("Source ↗", CLEARED_URL)]
+        assert link_buttons(at) == [("Original comment ↗", CLEARED_URL)]
         assert ui.escape_markdown("Posted 2024-07-01") in texts_of(group(at, "all"))
 
     def test_cleared_comment_without_permalink_says_so(
@@ -944,7 +948,7 @@ class TestViewerStartup:
     ) -> None:
         at = run_app(monkeypatch, app_env, address="0.0.0.0")
         assert not at.error
-        assert subheaders(at)[-1] == "Reports (70)"
+        assert subheaders(at)[-1] == "Comments (70)"
 
     def test_importing_the_viewer_does_not_run_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``streamlit_app.py`` imports ``app``; only running it as ``__main__`` renders."""
@@ -987,15 +991,15 @@ class TestRightsAndSafety:
         at = run_app(monkeypatch, app_env)
         at.text_input(key=ui.TEXT_KEY).input("PRIVATEONLY").run()
         assert "PRIVATEONLY" not in all_text(at)
-        assert "0 reports" in texts_of(at)
+        assert "0 comments" in texts_of(at)
         at.text_input(key=ui.TEXT_KEY).input("").run()
         text = all_text(at)
         assert "PRIVATEONLY" not in text
         assert "private-import" not in text
         assert "70 comments from 2 sources" in text
-        assert "Connecticut (4 reports)" in at.selectbox(key=ui.REGION_FILTER_KEY).options
+        assert "Connecticut (4 comments)" in at.selectbox(key=ui.REGION_FILTER_KEY).options
         at = select_garden(at, zone="6b", method="container")
-        assert "Matching reported conditions (3)" in subheaders(at)
+        assert "Matching your garden (3)" in subheaders(at)
 
     def test_private_scope_shows_private_rows_with_warning(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1003,7 +1007,7 @@ class TestRightsAndSafety:
         at = run_app(monkeypatch, app_env, scope="private")
         assert ui.PRIVATE_BANNER in [w.value for w in at.warning]
         assert PRIVATE_ID in shown_ids(group(at, "all"), app_env)
-        assert "Connecticut (5 reports)" in at.selectbox(key=ui.REGION_FILTER_KEY).options
+        assert "Connecticut (5 comments)" in at.selectbox(key=ui.REGION_FILTER_KEY).options
         assert "71 comments from 3 sources" in all_text(at)
 
     def test_injection_comment_renders_literally(
@@ -1037,23 +1041,24 @@ class TestContext:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
-        (panel,) = [e for e in at.expander if e.label == "Optional outside context"]
+        (panel,) = [e for e in at.expander if e.label == "Links to other websites"]
         text = "\n".join(texts_of(panel))
         cfg = load_config(app_env.config)
         for link in cfg.outside_context:
-            assert ui.outside_link_markdown(link) in text
-        assert "regional climate reference" in text
-        assert "published external trial" in text
-        assert ui.label_badge("community report") in text  # outside gardeners' own ratings
+            assert f"{ui.outside_link_markdown(link)} {ui.outside_badge(link)}" in text
+        assert ":blue-badge[climate data]" in text
+        assert ":violet-badge[university trial]" in text
+        assert ":green-badge[other gardeners' ratings]" in text  # outside gardeners' own ratings
 
     def test_about_explains_provenance(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
-        (panel,) = [e for e in at.expander if e.label == "About / Sources"]
+        (panel,) = [e for e in at.expander if e.label == "About and sources"]
         text = "\n".join(texts_of(panel))
-        assert "not variety quality" in text
-        assert "synthetic demo data" in text
+        assert "The groups are not a rating." in text
+        assert "made-up example comments, which are marked as made up" in " ".join(text.split())
+        assert ui.escape_markdown("made-up examples") in text
         assert "synthetic\\-demo" in text
 
 
@@ -1064,9 +1069,9 @@ GLANCE_CROP = "rutabaga"
 GLANCE_SECRETS = ("Aardvark", "aardvark", GLANCE_CROP, "PRIVATEGLANCE", "Hawaii", "glance-private")
 QUALITY_WORDS = ("best", "top-rated", "recommend", "score", "%")
 DEMO_TILES = (
-    "Reports 70 comments in this view "
+    "Comments 70 in total "
     "Varieties mentioned 44 across 8 crops "
-    "Describe conditions 33 of 70 zone, method, heat… "
+    "With garden details 33 of 70 zone, method, heat… "
     "Places named 21 18 U.S. states · 3 outside the U.S."
 )
 """The public test database: 69 synthetic fixtures plus one unextracted Markdown comment."""
@@ -1203,7 +1208,7 @@ class TestAtAGlance:
         glance = values.index("At a glance")
         tiles = next(i for i, v in enumerate(values) if isinstance(v, str) and "glance-kpis" in v)
         first_tab = kinds.index("Tab")
-        conditions = values.index("My growing conditions")
+        conditions = values.index("Your garden")
         assert banner < glance < tiles < first_tab < conditions
         assert [tab.label for tab in at.tabs][:3] == list(ui.GLANCE_TABS)
 
@@ -1215,7 +1220,9 @@ class TestAtAGlance:
         assert tile_text(markup) == DEMO_TILES
         assert 'aria-valuenow="33"' in markup
         assert 'aria-valuemax="70"' in markup
-        assert "Only 33 of 70 reports mention comparable growing conditions" in " ".join(infos(at))
+        assert "Only 33 of 70 comments mention garden details that can be compared" in " ".join(
+            infos(at)
+        )
         assert "State growing" not in markup  # never read as a U.S. state
 
     def test_each_tab_has_a_caption_a_chart_and_a_table(
@@ -1243,13 +1250,13 @@ class TestAtAGlance:
         varieties, topics, setups = glance_tabs(at)
         caption = varieties.caption[0].value
         assert caption.startswith("Comments that mention each variety: top 10 of 44.")
-        assert "This counts conversation, not quality" in caption
+        assert "This counts comments, not how well a variety did." in caption
         assert "Click a bar to show its comments below." in caption
-        assert "ties are listed" not in caption  # the demo's cut falls between 2 and 1
+        assert "same count are listed" not in caption  # the demo's cut falls between 2 and 1
         assert "the 8 most-discussed varieties" in topics.caption[0].value
         assert "not whether it went well" in topics.caption[0].value
         assert setups.caption[0].value.startswith(
-            "Only reports that state a growing method or setting are counted: 20 of 70. Most "
+            "Only comments that mention a growing method or setting are counted: 20 of 70. Most "
             "don't say."
         )
         (bars,) = [t for t in glance_figures(at)[0]["data"] if t.get("hoverinfo") == "skip"]
@@ -1369,7 +1376,7 @@ class TestAtAGlance:
         db.connect(empty).close()
         at = run_app(monkeypatch, app_env, db_path=empty)
         assert not at.exception
-        assert tile_text(tiles_markup(at)).startswith("Reports 0 ")
+        assert tile_text(tiles_markup(at)).startswith("Comments 0 ")
         assert [tab.label for tab in at.tabs] == ["Comments", "Map"]
 
     def test_unanalysed_comments_explain_the_empty_charts(
@@ -1423,7 +1430,7 @@ class TestGlanceClickThrough:
         for key, count in bars:
             show_variety(at, key)
             assert not at.exception
-            assert f"Reports ({count})" in subheaders(at), key
+            assert f"Comments ({count})" in subheaders(at), key
 
     def test_a_text_search_would_find_more_than_the_bar(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1432,10 +1439,10 @@ class TestGlanceClickThrough:
         at = run_app(monkeypatch, app_env)
         assert ("sungold", 10) in bar_counts(at)
         at.text_input(key=ui.TEXT_KEY).input("Sungold").run()
-        assert "Reports (11)" in subheaders(at)
+        assert "Comments (11)" in subheaders(at)
         show_variety(at, "sungold")
         assert at.session_state[ui.TEXT_KEY] == ""
-        assert "Reports (10)" in subheaders(at)
+        assert "Comments (10)" in subheaders(at)
         assert INJECTION_ID not in shown_ids(at, app_env)
 
     def test_a_cell_shows_exactly_the_reports_it_counts(
@@ -1449,7 +1456,7 @@ class TestGlanceClickThrough:
         picked = [(c, n) for c, n in zip(cells["customdata"], counts, strict=True) if n][:4]
         for (key, topic), count in picked:
             show_variety(at, html.unescape(key), [topic])
-            assert f"Reports ({count})" in subheaders(at), (key, topic)
+            assert f"Comments ({count})" in subheaders(at), (key, topic)
             assert at.session_state[ui.TOPICS_KEY] == [topic]
 
     def test_feedback_above_the_charts_names_what_is_shown_and_links_down(
@@ -1489,10 +1496,10 @@ class TestGlanceClickThrough:
         at = run_app(monkeypatch, app_env)
         show_variety(at, "earlygirl")
         assert ui.variety_filter_note("Early Girl · tomato") in infos(at)
-        assert "Reports (2)" in subheaders(at)
+        assert "Comments (2)" in subheaders(at)
         at.button(key="clear_variety_filter").click().run()
         assert at.session_state[ui.VARIETY_FILTER_KEY] is None
-        assert "Reports (70)" in subheaders(at)
+        assert "Comments (70)" in subheaders(at)
         assert not [m for tab in glance_tabs(at) for m in tab.markdown]
 
     def test_clear_resets_the_variety_filter(
@@ -1503,7 +1510,7 @@ class TestGlanceClickThrough:
         at.button(key="clear_all").click().run()
         assert at.session_state[ui.VARIETY_FILTER_KEY] is None
         assert at.session_state[ui.TOPICS_KEY] == []
-        assert "Reports (70)" in subheaders(at)
+        assert "Comments (70)" in subheaders(at)
 
     def test_a_click_keeps_the_garden(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1522,7 +1529,7 @@ class TestGlanceClickThrough:
         at.run()
         assert not at.exception
         assert at.session_state[ui.VARIETY_FILTER_KEY] is None
-        assert "Reports (70)" in subheaders(at)
+        assert "Comments (70)" in subheaders(at)
 
     def test_a_private_variety_cannot_be_shown_in_the_public_view(
         self, monkeypatch: pytest.MonkeyPatch, glance_env: AppEnv
@@ -1560,10 +1567,10 @@ def count_labels(at: AppTest) -> dict[str, str]:
 
 
 def selector_counts(at: AppTest) -> dict[str, str]:
-    """``postal -> count`` read from the "Filter by reported state" options."""
+    """``postal -> count`` read from the "Filter by state" options."""
     found = {}
     for option in at.selectbox(key=ui.REGION_FILTER_KEY).options[1:]:
-        name, count = re.fullmatch(r"(.+) \((\d+) reports?\)", option).groups()  # type: ignore[union-attr]
+        name, count = re.fullmatch(r"(.+) \((\d+) comments?\)", option).groups()  # type: ignore[union-attr]
         (code,) = [c for c, n in US_STATES.items() if n == name]
         found[code.removeprefix("US-")] = count
     return found
@@ -1600,10 +1607,14 @@ def has_highlight(at: AppTest) -> bool:
     return True
 
 
+def count_captions(at: AppTest) -> list[str]:
+    """The result list's count lines ("70 comments · 3 matching · ...")."""
+    return [c.value for c in at.caption if re.match(r"\d+ comments?( ·|$)", c.value)]
+
+
 def result_snapshot(at: AppTest, env: AppEnv) -> tuple[list[str], set[str]]:
-    """What the result list shows: its "reports" captions and the full matches."""
-    captions = [c.value for c in at.caption if "reports" in c.value]
-    return captions[:1], shown_ids(group(at, "match"), env)
+    """What the result list shows: its count captions and the full matches."""
+    return count_captions(at)[:1], shown_ids(group(at, "match"), env)
 
 
 class TestClimateOverlays:
@@ -1618,10 +1629,10 @@ class TestClimateOverlays:
             (intro,) = [
                 c.value
                 for c in map_tab(at).caption
-                if c.value.startswith("Where gardeners explicitly said they grew")
+                if c.value.startswith("This map shows the states where gardeners said they grew")
             ]
-            assert "Reports that give only a hardiness zone are never placed on the map" in intro
-            assert "no point locations are shown" in intro
+            assert "A comment that gives only a hardiness zone is not on the map" in intro
+            assert "No exact locations are shown" in intro
             assert "Zones are never mapped" not in all_text(at)
 
     def test_the_overlay_is_off_by_default_and_the_map_is_unchanged(
@@ -1630,11 +1641,11 @@ class TestClimateOverlays:
         at = run_app(monkeypatch, app_env)
         picker = at.radio(key=ui.OVERLAY_KEY)
         assert picker.value == "none"
-        assert picker.label == "Overlay"
+        assert picker.label == "Shade states by"
         assert picker.options == list(overlay_charts.OVERLAY_LABELS.values())
         figure = map_figure(at)
         assert [trace["type"] for trace in figure["data"]] == ["choropleth"]
-        assert figure["data"][0]["colorbar"]["title"]["text"] == "Reports"
+        assert figure["data"][0]["colorbar"]["title"]["text"] == "Comments"
         assert figure["layout"]["height"] == load_config(app_env.config).map.height_px
         assert not has_highlight(at)
         tab_text = "\n".join(texts_of(map_tab(at)))
@@ -1665,7 +1676,7 @@ class TestClimateOverlays:
         assert [i.value for i in tab.info] == [ZONE_DISCLAIMER, ZONE_DISCLAIMER]
         caption = overlay_charts.overlay_view("zones").caption
         assert caption in [c.value for c in tab.caption]
-        assert ZONE_SOURCE in caption and ZONE_PERIOD in caption
+        assert ZONE_SOURCE in caption and ZONE_PERIOD_TEXT in caption
         traces = map_figure(at)["data"]
         assert [t["type"] for t in traces] == ["choropleth", "choropleth", "scattergeo"]
         assert traces[0]["featureidkey"] == "properties.zone"
@@ -1769,7 +1780,9 @@ class TestClimateOverlays:
         box = at.selectbox(key=ui.HIGHLIGHT_ZONE_KEY)
         assert box.label == "Highlight a zone"
         assert box.value is None
-        assert "never changes which reports are shown" in (box.help or "")
+        assert "does not change your hardiness zone or which comments are shown" in (
+            box.help or ""
+        )
         box.set_value("5a").run()
         assert "**Where zone 5a is (2023 USDA zones)**" in [m.value for m in map_tab(at).markdown]
         assert "<b>5a</b>" in map_figure(at)["data"][0]["colorbar"]["ticktext"]
@@ -1801,10 +1814,11 @@ class TestClimateOverlays:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         base = select_garden(run_app(monkeypatch, app_env), zone="6b", method="container")
-        before = [c.value for c in base.caption if "reports" in c.value]
+        before = count_captions(base)
+        assert before
         for key in overlay_charts.OVERLAY_KEYS[1:]:
             show_overlay(base, key)
-            assert [c.value for c in base.caption if "reports" in c.value][:1] == before[:1]
+            assert count_captions(base)[:1] == before[:1]
             assert shown_ids(group(base, "match"), app_env) == set(FULL_MATCHES)
 
 
@@ -1834,7 +1848,7 @@ class TestBrokenReferences:
         assert not has_regional_box(at)
         assert [t["type"] for t in map_figure(at)["data"]] == ["choropleth"]  # the count map
         assert ui.label_badge(OVERLAY_LABEL) not in "\n".join(texts_of(map_tab(at)))
-        assert "Reports (70)" in subheaders(at)  # the reports are all still listed
+        assert "Comments (70)" in subheaders(at)  # the comments are all still listed
 
 
 class TestUnservedZoneLayer:
@@ -1880,9 +1894,9 @@ class TestRegionalReference:
         assert "July average high 83°F" in summary
         assert [i.value for i in box.info] == [ZONE_DISCLAIMER]  # prominent, not a caption
         (notes,) = [c.value for c in box.caption]
-        assert notes.startswith("Main zones: the half-zones covering at least 0.1%")
+        assert notes.startswith("Main zones are the half-zones that cover at least 0.1%")
         assert "look up a ZIP code at planthardiness.ars.usda.gov" in notes
-        assert "never used to sort or match reports" in notes
+        assert "It is not used to sort or match comments." in notes
 
     def test_it_sits_under_the_conditions_and_never_on_a_card(
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
@@ -1900,7 +1914,7 @@ class TestRegionalReference:
         search_box = next(i for i, n in enumerate(nodes) if getattr(n, "key", "") == ui.TEXT_KEY)
         assert zone < where < search_box
         cards = card_texts(at)
-        for leak in ("6a-7b", "83°F", OVERLAY_LABEL, "NOAA", "Simplified from"):
+        for leak in ("6a-7b", "83°F", OVERLAY_LABEL, "climate data", "NOAA", "Simplified from"):
             assert leak not in cards
 
     def test_the_region_choice_groups_exactly_as_before(
@@ -1930,7 +1944,7 @@ class TestRegionalReference:
         )
         at.selectbox(key=ui.REGION_KEY).set_value("CA-ON").run()
         (summary,) = [m.value for m in regional_box(at).markdown]
-        assert "No regional climate reference for Ontario" in summary
+        assert "No climate data for Ontario" in summary
         assert not regional_box(at).caption
         assert not regional_box(at).info
 
@@ -1946,7 +1960,7 @@ class TestOutsideContextOverlays:
         self, monkeypatch: pytest.MonkeyPatch, app_env: AppEnv
     ) -> None:
         at = run_app(monkeypatch, app_env)
-        panel = expander(at, "Optional outside context")
+        panel = expander(at, "Links to other websites")
         captions = [c.value for c in panel.caption]
         cfg = load_config(app_env.config)
         overlays_by_title = {link.title: link.overlay for link in cfg.outside_context}
@@ -1954,7 +1968,7 @@ class TestOutsideContextOverlays:
         assert overlays_by_title["NOAA U.S. Climate Normals (1991-2020)"] == "normals"
         assert overlays_by_title["Cornell Vegetable Varieties for Gardeners"] is None
         assert overlays_by_title["Nebraska Vegetable Variety Navigator"] is None
-        notes = [c for c in captions if c.startswith("Also available as a map overlay")]
+        notes = [c for c in captions if c.startswith("The Map tab can also shade states by")]
         assert len(notes) == 2
         for link in cfg.outside_context:
             assert ui.outside_link_markdown(link) in [

@@ -51,7 +51,7 @@ CHROMIUM = Path("/opt/pw-browsers/chromium")
 NOW = "2026-10-15T12:00:00Z"
 STARTUP_SECONDS = 90
 TIMEOUT_MS = 60_000
-SEARCH_LABEL = "Search crops, varieties, or anything people mentioned"
+SEARCH_LABEL = "Search comments"
 ALWAYS_VISIBLE = ("Region", "Hardiness zone", "Growing method", "Setting")
 CLEARED_URL = "https://www.youtube.com/watch?v=abc123&lc=Ug-cleared"
 CLEARED_COMMENT = {
@@ -193,7 +193,7 @@ def open_viewer(
     page = context.new_page()
     page.set_default_timeout(TIMEOUT_MS)
     page.goto(url)
-    expect(heading(page, f"Reports ({N_PUBLIC})")).to_be_visible()
+    expect(heading(page, f"Comments ({N_PUBLIC})")).to_be_visible()
     expect(combobox(page, "Region")).to_be_visible()
     return page
 
@@ -258,17 +258,17 @@ def test_phone_width_exposes_inputs_resets_them_and_opens_sources(
     first_load = select_states(page)
 
     pick(page, "Hardiness zone", "Zone 6b")
-    expect(heading(page, re.compile(r"^Matching reported conditions \(\d+\)$"))).to_be_visible()
-    expect(heading(page, f"Reports ({N_PUBLIC})")).to_have_count(0)
+    expect(heading(page, re.compile(r"^Matching your garden \(\d+\)$"))).to_be_visible()
+    expect(heading(page, f"Comments ({N_PUBLIC})")).to_have_count(0)
     assert_no_horizontal_overflow(page)
 
     page.get_by_role("button", name="Clear", exact=True).click()
-    expect(heading(page, f"Reports ({N_PUBLIC})")).to_be_visible()
+    expect(heading(page, f"Comments ({N_PUBLIC})")).to_be_visible()
     expect(combobox(page, "Hardiness zone")).not_to_have_value("Zone 6b")
     assert select_states(page) == first_load  # same value and placeholder as on first load
     assert "Choose an option" not in page.content()
 
-    source = page.get_by_role("link", name="Source ↗")
+    source = page.get_by_role("link", name="Original comment ↗")
     expect(source).to_have_count(1)  # synthetic rows never link out
     expect(source).to_have_attribute("href", CLEARED_URL)
     assert_no_exception(page)
@@ -277,7 +277,7 @@ def test_phone_width_exposes_inputs_resets_them_and_opens_sources(
 def test_phone_width_more_conditions_are_one_tap_away(browser: Browser, viewer_url: str) -> None:
     page = open_viewer(browser, viewer_url, 390, 844)
     expect(combobox(page, "Summer heat")).to_be_hidden()
-    page.get_by_text("More conditions", exact=True).click()
+    page.get_by_text("More garden details", exact=True).click()
     expect(combobox(page, "Summer heat")).to_be_visible()
     assert_no_horizontal_overflow(page)
 
@@ -286,7 +286,7 @@ def test_phone_width_own_words_lines_fit(browser: Browser, viewer_url: str) -> N
     """The Hot & humid chip's cards quote the commenters' own words without sideways scroll."""
     page = open_viewer(browser, viewer_url, 390, 844)
     page.get_by_role("button", name="Hot & humid", exact=True).click()
-    expect(heading(page, re.compile(r"^Matching reported conditions \(\d+\)$"))).to_be_visible()
+    expect(heading(page, re.compile(r"^Matching your garden \(\d+\)$"))).to_be_visible()
     own_words = page.get_by_text(re.compile(r"In their own words.*counted as hot summers"))
     expect(own_words.first).to_be_visible()
     assert_no_horizontal_overflow(page)
@@ -299,9 +299,9 @@ def test_desktop_smoke(browser: Browser, viewer_url: str) -> None:
     expect(page.get_by_label(SEARCH_LABEL)).to_be_visible()
     page.get_by_role("tab", name="Map").click()
     map_panel = page.get_by_role("tabpanel", name="Map")
-    expect(combobox(map_panel, "Filter by reported state")).to_be_visible()
-    expect(map_panel.get_by_text("community report", exact=True)).to_be_visible()
-    expect(map_panel.get_by_text("reported conditions", exact=True)).to_be_visible()
+    expect(combobox(map_panel, "Filter by state")).to_be_visible()
+    expect(map_panel.get_by_text("comments", exact=True)).to_be_visible()
+    expect(map_panel.get_by_text("places named in comments", exact=True)).to_be_visible()
     assert_no_exception(page)
 
 
@@ -387,7 +387,7 @@ def hover_texts(page: Page) -> list[str]:
 def feedback(page: Page, tab: str, name: str) -> Locator:
     """The line above the chart in ``tab`` naming what a click is showing."""
     panel = page.get_by_role("tabpanel", name=tab)
-    return panel.get_by_text(f"Showing the reports that mention {name}")
+    return panel.get_by_text(f"Showing the comments that mention {name}")
 
 
 def test_clicking_a_bar_shows_exactly_its_reports_and_says_so(
@@ -402,19 +402,19 @@ def test_clicking_a_bar_shows_exactly_its_reports_and_says_so(
     expect(page.locator(".hoverlayer .hovertext")).to_have_count(1)  # one box, not two
     assert hover_texts(page) == ["Juliet · tomato: 5 comments"]
     page.mouse.click(grid["x"] + grid["width"] - 20, row_y)
-    expect(heading(page, "Reports (5)")).to_be_visible()  # exactly the bar's count
+    expect(heading(page, "Comments (5)")).to_be_visible()  # exactly the bar's count
     expect(page.get_by_label(SEARCH_LABEL)).to_have_value("")
     shown = feedback(page, GLANCE_TABS[0], "Juliet · tomato")
     expect(shown).to_be_in_viewport()  # right above the chart that was clicked
-    expect(page.get_by_text("Showing only reports that mention Juliet · tomato")).to_be_attached()
+    expect(page.get_by_text("Showing only comments that mention Juliet · tomato")).to_be_attached()
 
-    page.get_by_role("link", name="Go to the reports ↓").first.click()
+    page.get_by_role("link", name="Go to the comments ↓").first.click()
     page.wait_for_function(  # the empty anchor div scrolls to the top of the window
         "() => Math.abs(document.getElementById('glance-results').getBoundingClientRect().top) < 4"
     )
-    expect(heading(page, "Reports (5)")).to_be_in_viewport()
-    page.get_by_role("button", name="Any variety", exact=True).click()
-    expect(heading(page, f"Reports ({N_PUBLIC})")).to_be_visible()
+    expect(heading(page, "Comments (5)")).to_be_in_viewport()
+    page.get_by_role("button", name="Show all varieties", exact=True).click()
+    expect(heading(page, f"Comments ({N_PUBLIC})")).to_be_visible()
     assert_no_exception(page)
 
 
@@ -431,7 +431,7 @@ def test_clicking_a_topic_cell_shows_exactly_its_reports(
     count, topic, variety = first
     grid = plot_area(page, GLANCE_TABS[1])
     page.mouse.click(grid["x"] + 10, grid["y"] + 8)  # top-left cell
-    expect(heading(page, f"Reports ({count})")).to_be_visible()
+    expect(heading(page, f"Comments ({count})")).to_be_visible()
     expect(page.get_by_test_id("stMultiSelect")).to_contain_text(topic)  # same label as the grid
     expect(feedback(page, GLANCE_TABS[1], f"{variety} · tomato about {topic}")).to_be_in_viewport()
     assert_no_exception(page)
@@ -451,7 +451,7 @@ def test_on_a_touch_screen_two_taps_on_a_bar_show_its_reports(
     expect(page.locator(".hoverlayer .hovertext")).to_have_count(1)
     assert hover_texts(page) == ["Juliet · tomato: 5 comments"]
     page.touchscreen.tap(*point)
-    expect(heading(page, "Reports (5)")).to_be_visible()
+    expect(heading(page, "Comments (5)")).to_be_visible()
     expect(feedback(page, GLANCE_TABS[0], "Juliet · tomato")).to_be_attached()
     assert_no_horizontal_overflow(page)
     assert_no_exception(page)

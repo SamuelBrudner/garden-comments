@@ -112,7 +112,7 @@ KEY_LABELS: Final = MappingProxyType(
         "sun": "sun exposure",
         "soil": "soil",
         "irrigation": "watering",
-        "growing_year": "growing year",
+        "growing_year": "year grown",
     }
 )
 

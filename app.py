@@ -69,57 +69,65 @@ from crop_explorer.views import (
 from crop_explorer.vocab import ComparableKey
 
 _TITLE: Final = "Garden variety"
-_SUBTITLE: Final = "Find real experiences from gardens like yours."
+_SUBTITLE: Final = (
+    "Gardeners' comments about the varieties they grew. Choose details about your garden to "
+    "see comments from similar gardens first."
+)
 _ZONE_HELP: Final = (
-    "USDA hardiness zones describe average winter low temperatures only. They say nothing "
+    "A USDA hardiness zone is based only on the coldest winter temperatures. It says nothing "
     "about summer heat, humidity, season length, soil or sun."
 )
 _ABOUT: Final = """
-Comments from gardeners, grouped by how well the growing conditions **they stated** match the
-conditions you choose. Matching is about stated circumstances, not variety quality: a failure
-reported under conditions like yours is exactly as relevant as a success.
+If you choose details about your garden, comments are grouped by how closely the garden
+details **they mention** match yours. The groups are not a rating. A crop that failed in a
+garden like yours is grouped the same way as one that did well.
 
-Every condition on a card comes from an exact quote in that comment (open **Evidence**). A
-condition the commenter did not mention is shown as *not stated*, never as a match or a
-mismatch; words that could not be mapped are shown as written, and comments not yet analysed
-say so. A region is a location preference, not proof of a similar climate, and a report that
-gives only a hardiness zone is never placed on the map.
+Each garden detail on a card comes from the exact words of that comment (open **Quotes** to
+see them). If a comment does not mention one of your garden details, the card says
+*Not mentioned*. That is never counted as a match or a difference. Summer heat, humidity,
+rainfall and season length are the gardener's own description, not a measurement. Words that
+don't fit one of the choices are shown as written. Comments not yet read for garden details say
+so. Region only puts comments from your area first; nearby gardens can still have different
+climates. A comment that gives only a hardiness zone is not placed on the map.
 
-Conditions were extracted offline and checked against the comment text; nothing is generated
-when you search. Each source carries a rights status, and the public view shows only sources
-cleared for publication and clearly labelled synthetic demo data.
+Garden details were picked out of each comment ahead of time and checked against its exact
+words. Searching only filters and sorts the comments; it does not write any new text. The list
+below shows where the comments come from and whether they may be published. The public version
+of this page shows only comments cleared for publishing and made-up example comments, which
+are marked as made up.
 """
 _OUTSIDE_INTRO: Final = (
-    "Official references, published trials and outside gardeners' own ratings (community "
-    "report). They describe regions, trials or other gardens, not what any commenter here "
-    "experienced in their garden."
+    "These sites have climate data, university variety trials and other gardeners' ratings. "
+    "They describe regions, trials or other gardens, not the gardens in these comments."
 )
 _MAP_BADGES: Final = (
-    f"{ui.label_badge('community report')} {ui.label_badge('reported conditions')}"
+    f"{ui.label_badge('community report', 'comments')} "
+    f"{ui.label_badge('reported conditions', 'places named in comments')}"
 )
 _MAP_INTRO: Final = (
-    "Where gardeners explicitly said they grew (one count per comment and state). Reports that "
-    "give only a hardiness zone are never placed on the map, and no point locations are shown."
+    "This map shows the states where gardeners said they grew. Each comment counts once for "
+    "each state it names. A comment that gives only a hardiness zone is not on the map. No "
+    "exact locations are shown."
 )
 _MAP_ALT: Final = (
-    "Map of U.S. states shaded by how many reports name each state as where they grew."
+    "Map of U.S. states shaded by how many comments name each state as where the gardener grew."
 )
 _MAP_CONFIG: Final = {"displayModeBar": False, "scrollZoom": False, "topojsonURL": ui.BASE_MAP_URL}
 """The report-count map: no mode bar or zoom, and the base map from this app, not the CDN."""
 _OVERLAY_CONFIG: Final = {**overview_charts.CHART_CONFIG, "topojsonURL": ui.BASE_MAP_URL}
 _OVERLAY_HELP: Final = (
-    "Optional regional climate references drawn under the report counts: background for a "
-    "region, never evidence about a report, a commenter or a variety."
+    "The climate choices shade each state by whole-state data and write the number of comments "
+    "on top. That data says nothing about any gardener's garden or any variety."
 )
 _OVERLAY_ALT: Final = (
-    "Map of U.S. states shaded by a regional climate reference ({layer}), with the number of "
-    "reports naming each state written on it."
+    "Map of U.S. states shaded by {layer}, with the number of comments that name each state "
+    "written on it."
 )
 _HIGHLIGHT_HELP: Final = (
-    "Shows where a zone is on this map. A view option only: it does not set your hardiness "
-    "zone and never changes which reports are shown."
+    "Shows where one zone is on this map. It does not change your hardiness zone or which "
+    "comments are shown."
 )
-_REFERENCES_ERROR: Final = "The regional climate references cannot be shown: {reason}"
+_REFERENCES_ERROR: Final = "The climate data can't be shown: {reason}"
 _SERVED_ZONES: Final = (
     Path(__file__).resolve().parent / "static" / "overlays" / (overlays.SERVED_ZONES_NAME)
 )
@@ -128,9 +136,9 @@ _GLANCE_TITLE: Final = "At a glance"
 _GLANCE_ALTS: Final = {
     "varieties": "Bar chart: how many comments mention each of the most-discussed varieties.",
     "topics": (
-        "Grid: how many comments about each of the most-discussed varieties touch each topic."
+        "Grid: for each of the most-discussed varieties, how many comments mention each topic."
     ),
-    "setups": "Bar charts: how many comments state each growing method and each setting.",
+    "setups": "Bar charts: how many comments mention each growing method and each setting.",
 }
 _DB_ERROR: Final = (
     "The database at {path} cannot be opened: {reason}. Build a new one with: {command}"
@@ -209,12 +217,11 @@ def _state() -> dict[str, Any]:
 
 
 def _about(ctx: _Context, views: Collection[CommentView]) -> None:
-    with st.expander("About / Sources"):
+    with st.expander("About and sources"):
         st.markdown(_ABOUT)
         st.caption(ui.summary_line(db.summary_counts(ctx.conn, ctx.scope, ctx.now)))
         for row in ui.source_rows(list(views)):
-            line = f"{row.source_id} ({row.kind}): {row.n_comments} visible · {row.rights}"
-            st.markdown(ui.escape_markdown(line))
+            st.markdown(ui.escape_markdown(ui.source_line(row)))
 
 
 def _banner(scope: ViewerScope, views: Collection[CommentView]) -> None:
@@ -381,9 +388,12 @@ def _select_rows(keys: tuple[ComparableKey, ...]) -> None:
 
 def _conditions_heading() -> None:
     with st.container(horizontal=True, vertical_alignment="center"):
-        st.subheader("My growing conditions", anchor=False)
+        st.subheader("Your garden", anchor=False)
         st.button(
-            "Clear", key="clear_all", on_click=_clear, help="Reset every condition and filter"
+            "Clear",
+            key="clear_all",
+            on_click=_clear,
+            help="Clears your garden, the search and all filters.",
         )
 
 
@@ -458,7 +468,7 @@ def _chips(ctx: _Context) -> None:
 
 def _search_box(max_chars: int) -> None:
     st.text_input(
-        "Search crops, varieties, or anything people mentioned",
+        "Search comments",
         key=ui.TEXT_KEY,
         placeholder="e.g. Sungold, blight, pots",
         max_chars=max_chars,
@@ -512,12 +522,9 @@ def _filters(ctx: _Context, options: FilterOptions) -> None:
     _search_box(ctx.cfg.viewer.max_query_chars)
     _filter_row(options)
     st.checkbox(
-        "Only show stated matches",
+        "Only show matching comments",
         key=ui.STRICT_KEY,
-        help=(
-            "Hide reports whose conditions were not stated, not comparable or different from "
-            "yours."
-        ),
+        help="Hides comments where no garden detail matches yours, or where one is different.",
     )
 
 
@@ -528,7 +535,7 @@ def _evidence(result: CommentResult) -> None:
     rows = ui.evidence_rows(result)
     if not rows:
         return
-    with st.expander(f"Evidence ({len(rows)})"):
+    with st.expander(f"Quotes ({len(rows)})"):
         for row in rows:
             about = f"{row.key_label} · {row.basis} · applies to {row.applies_to}"
             st.markdown(f"**{ui.escape_markdown(row.chip)}** · {ui.escape_markdown(about)}")
@@ -542,7 +549,7 @@ def _source(view: CommentView) -> None:
         st.caption(ui.escape_markdown(" · ".join(notes)))
     link = ui.source_link(view)
     if link is not None:
-        st.link_button("Source ↗", link)
+        st.link_button("Original comment ↗", link)
 
 
 def _card(result: CommentResult, garden: GardenContext) -> None:
@@ -585,10 +592,10 @@ def _filter_notes(query: SearchQuery, names: Mapping[str, str]) -> None:
     """Announce the hard filters set outside the result list, each with its reset button."""
     if query.variety is not None:
         note = ui.variety_filter_note(names.get(query.variety, query.variety))
-        _filter_note(note, "Any variety", "clear_variety_filter", ui.VARIETY_FILTER_KEY)
+        _filter_note(note, "Show all varieties", "clear_variety_filter", ui.VARIETY_FILTER_KEY)
     if query.year is not None:
         note = ui.year_filter_note(query.year)
-        _filter_note(note, "Any year", "clear_year_filter", ui.YEAR_KEY)
+        _filter_note(note, "Show all years", "clear_year_filter", ui.YEAR_KEY)
     if query.region_filter is not None:
         note = ui.region_filter_note(query.region_filter)
         _filter_note(note, "Show all states", "clear_region_filter", ui.REGION_FILTER_KEY)
@@ -642,7 +649,7 @@ def _map_chart(counts: RegionCounts, region_filter: str | None, height: int) -> 
 def _state_selector(counts: RegionCounts, region_filter: str | None) -> None:
     choices = ui.state_choices(counts, region_filter)
     st.selectbox(
-        "Filter by reported state",
+        "Filter by state",
         tuple(choices),
         index=None,
         format_func=choices.__getitem__,
@@ -655,7 +662,7 @@ def _state_selector(counts: RegionCounts, region_filter: str | None) -> None:
 
 def _overlay_picker() -> None:
     st.radio(
-        "Overlay",
+        "Shade states by",
         overlay_charts.OVERLAY_KEYS,
         format_func=overlay_charts.OVERLAY_LABELS.__getitem__,
         key=ui.OVERLAY_KEY,
@@ -767,7 +774,7 @@ def _map(ctx: _Context, query: SearchQuery, result: SearchResult) -> None:
 
 
 def _outside_link(link: OutsideLink) -> None:
-    st.markdown(f"{ui.outside_link_markdown(link)} {ui.label_badge(link.label)}")
+    st.markdown(f"{ui.outside_link_markdown(link)} {ui.outside_badge(link)}")
     if link.note:
         st.caption(ui.escape_markdown(link.note))
     overlay_note = ui.outside_overlay_note(link)
@@ -776,7 +783,7 @@ def _outside_link(link: OutsideLink) -> None:
 
 
 def _outside_context(cfg: AppConfig) -> None:
-    with st.expander("Optional outside context"):
+    with st.expander("Links to other websites"):
         st.caption(_OUTSIDE_INTRO)
         for link in cfg.outside_context:
             _outside_link(link)

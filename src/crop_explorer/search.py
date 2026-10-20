@@ -393,26 +393,24 @@ def _coverage(
     )
 
 
-_HIDDEN_BY_STRICT: Final = 'hidden by "Only show stated matches"'
+_HIDDEN_BY_STRICT: Final = 'hidden by "Only show matching comments"'
 _ONE_NOT_ANALYSED: Final = (
-    "The 1 report found has not been analysed for growing conditions yet, so it cannot be "
-    "compared with your garden."
-)
-_ONE_NOT_COMPARABLE: Final = (
-    "The 1 report found does not mention comparable growing conditions, so it cannot be "
-    "compared with your garden."
-)
-_NONE_ANALYSED: Final = (
-    "None of these {n} reports have been analysed for growing conditions yet, so none can be "
-    "compared with your garden."
-)
-_NONE_COMPARABLE: Final = (
-    "None of these {n} reports mention comparable growing conditions, so none can be compared "
+    "The 1 comment found has not been read for garden details yet, so it can't be compared "
     "with your garden."
 )
+_ONE_NOT_COMPARABLE: Final = (
+    "The 1 comment found does not mention any garden details that can be compared with yours."
+)
+_NONE_ANALYSED: Final = (
+    "None of these {n} comments have been read for garden details yet, so none can be compared "
+    "with your garden."
+)
+_NONE_COMPARABLE: Final = (
+    "None of these {n} comments mention garden details that can be compared with yours."
+)
 _SOME_NOT_ANALYSED: Final = (
-    "None of these {n} reports can be compared with your garden: {stated} not mention "
-    "comparable growing conditions and {new} not been analysed yet."
+    "None of these {n} comments can be compared with your garden: {stated} not mention garden "
+    "details that can be compared, and {new} not been read for garden details yet."
 )
 
 
@@ -438,9 +436,10 @@ def _where_shown(coverage: _Coverage) -> str:
     if n_hidden == 0:
         return "It is shown below." if n == 1 else "All are shown below."
     if n == 1:
-        return f"It is {_HIDDEN_BY_STRICT}; untick it to see it."
+        return f"It is {_HIDDEN_BY_STRICT}. Untick the box to see it."
     who = f"All {n} are" if n_hidden == n else _count(n_hidden, "of them is", "of them are")
-    return f"{who} {_HIDDEN_BY_STRICT}; untick it to see {'it' if n_hidden == 1 else 'them'}."
+    pronoun = "it" if n_hidden == 1 else "them"
+    return f"{who} {_HIDDEN_BY_STRICT}. Untick the box to see {pronoun}."
 
 
 def _limitation_message(coverage: _Coverage) -> str | None:
@@ -454,10 +453,10 @@ def _limitation_message(coverage: _Coverage) -> str | None:
     if coverage.n_with == 0:
         return f"{_uncomparable(coverage)} {_where_shown(coverage)}"
     verb = "mentions" if coverage.n_with == 1 else "mention"
-    pending = f" ({coverage.n_new} not yet analysed)" if coverage.n_new else ""
+    pending = f" ({coverage.n_new} not yet read for garden details)" if coverage.n_new else ""
     return (
-        f"Only {coverage.n_with} of {coverage.n} reports {verb} comparable growing conditions"
-        f"{pending}."
+        f"Only {coverage.n_with} of {coverage.n} comments {verb} garden details that can be "
+        f"compared{pending}."
     )
 
 

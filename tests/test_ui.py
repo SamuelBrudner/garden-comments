@@ -327,27 +327,27 @@ def full_match_view() -> CommentView:
 class TestConditionLines:
     def test_full_match_lists_relevant_conditions_only(self) -> None:
         lines = ui.condition_lines(result_of(full_match_view(), QUERY_6B_POTS), GARDEN_6B_POTS)
-        assert lines == ("Relevant: zone 6b · containers",)
+        assert lines == ("Matches: zone 6b · containers",)
 
     def test_partial_match_lists_what_was_not_stated(self) -> None:
         view = comment(mentions=[mention(facts=[fact("method", "container", "pots")])])
         lines = ui.condition_lines(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
-        assert lines == ("Relevant: containers", "Not stated: hardiness zone")
+        assert lines == ("Matches: containers", "Not mentioned: hardiness zone")
 
     def test_coarse_zone_is_shown_as_imprecise(self) -> None:
         view = comment(mentions=[mention(facts=[fact("zone", "6", "Zone 6")])])
         lines = ui.condition_lines(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
         assert lines == (
-            "Relevant: zone 6, subzone unknown (you: zone 6b)",
-            "Not stated: growing method",
+            "Matches: zone 6, a or b not given (you chose zone 6b)",
+            "Not mentioned: growing method",
         )
 
     def test_difference_names_both_values(self) -> None:
         view = comment(mentions=[mention(facts=[fact("method", "in_ground", "in the ground")])])
         lines = ui.condition_lines(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
         assert lines == (
-            "Not stated: hardiness zone",
-            "Different: in the ground (you: containers)",
+            "Not mentioned: hardiness zone",
+            "Different: in the ground (you chose containers)",
         )
 
     def test_heatwave_against_mild_summers_is_not_comparable(self) -> None:
@@ -355,23 +355,23 @@ class TestConditionLines:
         view = comment(mentions=[mention(facts=[fact("summer_heat", "heatwave", "heat wave")])])
         lines = ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden)
         assert lines == (
-            "In their own words: “heat wave” (a heatwave; you chose mild summers) · "
-            "not comparable",
+            "In their own words: “heat wave” (read as a heatwave; you chose mild summers) · "
+            "can't be compared",
         )
 
     def test_comment_without_mentions_states_every_selected_condition_as_unknown(self) -> None:
         unresolved = comment(analysed=True)  # extracted, but no variety mention was found
         lines = ui.condition_lines(result_of(unresolved, QUERY_6B_POTS), GARDEN_6B_POTS)
-        assert lines == ("Not stated: hardiness zone, growing method",)
+        assert lines == ("Not mentioned: hardiness zone, growing method",)
 
     def test_without_selection_lists_reported_conditions(self) -> None:
         lines = ui.condition_lines(result_of(full_match_view()), GardenContext())
-        assert lines == ("Reported: zone 6b · containers",)
+        assert lines == ("Garden details: zone 6b · containers",)
 
     def test_without_selection_and_without_facts(self) -> None:
         view = comment(mentions=[mention()])
         assert ui.condition_lines(result_of(view), GardenContext()) == (
-            "Growing conditions not stated",
+            "No garden details mentioned",
         )
 
     def test_region_selection_alone_is_not_a_condition_comparison(self) -> None:
@@ -379,7 +379,7 @@ class TestConditionLines:
         lines = ui.condition_lines(
             result_of(full_match_view(), SearchQuery(garden=garden)), garden
         )
-        assert lines == ("Reported: zone 6b · containers",)
+        assert lines == ("Garden details: zone 6b · containers",)
 
     def test_reported_lines_name_each_mention_when_they_differ(self) -> None:
         view = comment(
@@ -395,8 +395,8 @@ class TestConditionLines:
             ]
         )
         assert ui.condition_lines(result_of(view), GardenContext()) == (
-            "Reported for Jalapeño: greenhouse / tunnel",
-            "Reported for Roma: outdoors",
+            "Garden details for Jalapeño: greenhouse / tunnel",
+            "Garden details for Roma: outdoors",
         )
 
     def test_shared_conditions_are_reported_once(self) -> None:
@@ -405,7 +405,7 @@ class TestConditionLines:
             mentions=[mention("c1#m0", facts=[shared]), mention("c1#m1", variety="Juliet")]
         )
         assert ui.condition_lines(result_of(view), GardenContext()) == (
-            "Reported for Sungold, Juliet: containers",
+            "Garden details for Sungold, Juliet: containers",
         )
 
     def test_multiple_mentions_say_which_one_is_shown(self) -> None:
@@ -419,10 +419,10 @@ class TestConditionLines:
         )
         lines = ui.condition_lines(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
         assert lines == (
-            "Shown for Juliet (1 of 2 mentions)",
-            "Relevant: containers",
-            "Not stated: hardiness zone",
-            "Roma: Different: in the ground (you: containers)",
+            "Details for Juliet (1 of 2 varieties in this comment)",
+            "Matches: containers",
+            "Not mentioned: hardiness zone",
+            "Roma: Different: in the ground (you chose containers)",
         )
 
     # F15: a second relevant mention in a worse tier states its own tier line.
@@ -445,9 +445,9 @@ class TestConditionLines:
         garden = GardenContext(shelter="greenhouse")
         lines = ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden)
         assert lines == (
-            "Shown for Jalapeño (1 of 2 mentions)",
-            "Relevant: greenhouse / tunnel",
-            "Roma: Different: outdoors (you: greenhouse / tunnel)",
+            "Details for Jalapeño (1 of 2 varieties in this comment)",
+            "Matches: greenhouse / tunnel",
+            "Roma: Different: outdoors (you chose greenhouse / tunnel)",
         )
 
     def test_other_mentions_in_the_same_tier_are_not_repeated(self) -> None:
@@ -463,9 +463,9 @@ class TestConditionLines:
         garden = GardenContext(method="container")
         lines = ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden)
         assert lines == (
-            "Shown for Sungold (1 of 3 mentions)",
-            "Relevant: containers",
-            "Roma: Not stated: growing method",
+            "Details for Sungold (1 of 3 varieties in this comment)",
+            "Matches: containers",
+            "Roma: Not mentioned: growing method",
         )
 
     # F21: only the reported values that produced a status are labelled with it.
@@ -477,7 +477,7 @@ class TestConditionLines:
         garden = GardenContext(summer_heat="hot")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         assert ui.condition_lines(found, garden) == (
-            "In their own words: “a heat wave hit” (a heatwave; you chose hot summers)",
+            "In their own words: “a heat wave hit” (read as a heatwave; you chose hot summers)",
         )
 
     def test_hot_summers_with_a_heatwave_label_only_the_climate_as_described(self) -> None:
@@ -488,7 +488,7 @@ class TestConditionLines:
         garden = GardenContext(summer_heat="mild")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         assert ui.condition_lines(found, garden) == (
-            "In their own words: “hot summers” (hot summers; you chose mild summers) · "
+            "In their own words: “hot summers” (read as hot summers; you chose mild summers) · "
             "not counted as a difference",
         )
 
@@ -500,7 +500,7 @@ class TestConditionLines:
         garden = GardenContext(zone="6b")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         assert ui.condition_lines(found, garden) == (
-            "Relevant: zone 6, subzone unknown (you: zone 6b)",
+            "Matches: zone 6, a or b not given (you chose zone 6b)",
         )
 
     # F19: display-only phrases are stated as written, never as "not stated".
@@ -513,7 +513,7 @@ class TestConditionLines:
         garden = GardenContext(zone="6b", humidity="humid", soil="loam")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         assert ui.condition_lines(found, garden) == (
-            'Mentioned as written, not comparable: hardiness zone "zones 6-7" · '
+            'Mentioned, but can\'t be compared: hardiness zone "zones 6-7" · '
             'humidity "not humid" · soil "sandy loam"',
         )
 
@@ -525,16 +525,16 @@ class TestConditionLines:
         garden = GardenContext(zone="6b", method="container", soil="clay")
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         assert ui.condition_lines(found, garden) == (
-            "Relevant: containers",
-            "Not stated: hardiness zone",
-            'Mentioned as written, not comparable: soil "rocky hillside dirt"',
+            "Matches: containers",
+            "Not mentioned: hardiness zone",
+            'Mentioned, but can\'t be compared: soil "rocky hillside dirt"',
         )
 
     def test_without_selection_written_phrases_replace_the_not_stated_line(self) -> None:
         dirt = fact("soil", None, "rocky hillside dirt", fact_id="a")
         found = result_of(comment(mentions=[mention(facts=[dirt])]))
         assert ui.condition_lines(found, GardenContext()) == (
-            'Mentioned as written, not comparable: soil "rocky hillside dirt"',
+            'Mentioned, but can\'t be compared: soil "rocky hillside dirt"',
         )
 
     def test_without_selection_written_phrases_follow_reported_conditions(self) -> None:
@@ -545,8 +545,8 @@ class TestConditionLines:
         ]
         found = result_of(comment(mentions=[mention(facts=facts)]))
         assert ui.condition_lines(found, GardenContext()) == (
-            "Reported: containers",
-            'Mentioned as written, not comparable: soil "rocky hillside dirt"',
+            "Garden details: containers",
+            'Mentioned, but can\'t be compared: soil "rocky hillside dirt"',
         )
 
     # F20: a comment that was never extracted is "not yet analysed", not "not stated".
@@ -554,7 +554,7 @@ class TestConditionLines:
     def test_never_extracted_comment_is_not_yet_analysed(self, garden: GardenContext) -> None:
         view = comment(text="Zone 6b here, Sungold in containers.", analysed=False)
         found = result_of(view, SearchQuery(garden=garden))
-        assert ui.condition_lines(found, garden) == ("Not yet analysed for growing conditions",)
+        assert ui.condition_lines(found, garden) == ("Not yet read for garden details",)
 
     @settings(max_examples=200)
     @given(
@@ -579,12 +579,14 @@ class TestConditionLines:
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         lines = ui.condition_lines(found, garden)
         assert lines
-        assert all("match" not in line.casefold() for line in lines)
-        relevant = next((line for line in lines if line.startswith("Relevant:")), "")
+        relevant = next((line for line in lines if line.startswith("Matches:")), "")
+        # "match" only ever leads the line of true matches.
+        assert all("match" not in line.casefold() for line in lines if line != relevant)
+        assert "match" not in relevant.removeprefix("Matches:").casefold()
         unstated = {key for key in garden_values if key not in {f.key for f in facts}}
         for key in unstated:
             assert KEY_LABELS[key] in next(
-                line for line in lines if line.startswith("Not stated:")
+                line for line in lines if line.startswith("Not mentioned:")
             )
             assert KEY_LABELS[key] not in relevant
 
@@ -633,7 +635,7 @@ class TestOwnWords:
         found = result_of(comment(mentions=[mention(facts=facts)]), SearchQuery(garden=garden))
         assert found.tier == "match"
         assert ui.condition_lines(found, garden) == (
-            "Relevant: zone 6b · containers",
+            "Matches: zone 6b · containers",
             "In their own words: “brutal and muggy” (counted as humid) · Connecticut",
         )
 
@@ -643,7 +645,7 @@ class TestOwnWords:
         found = result_of(view, SearchQuery(garden=garden))
         assert found.tier == "not_stated"
         assert ui.condition_lines(found, garden) == (
-            "In their own words: “mild summers” (mild summers; you chose hot summers) · "
+            "In their own words: “mild summers” (read as mild summers; you chose hot summers) · "
             "not counted as a difference",
         )
 
@@ -653,8 +655,8 @@ class TestOwnWords:
             fact("region", "US-TX", "North Texas", fact_id="b"),
         ]
         assert own_words_of(facts, GardenContext(summer_heat="hot")) == (
-            "In their own words: “that July heat wave” (a heatwave; you chose hot summers) · "
-            "Texas",
+            "In their own words: “that July heat wave” (read as a heatwave; you chose hot "
+            "summers) · Texas",
         )
 
     def test_self_described_conditions_leave_the_relevant_line(self) -> None:
@@ -665,7 +667,7 @@ class TestOwnWords:
         ]
         garden = GardenContext(method="container", summer_heat="hot", humidity="humid")
         assert own_words_of(facts, garden) == (
-            "Relevant: containers",
+            "Matches: containers",
             "In their own words: “scorching” (counted as hot summers)",
             "In their own words: “sticky” (counted as humid)",
         )
@@ -673,7 +675,7 @@ class TestOwnWords:
     def test_unstated_self_described_condition_is_still_not_stated(self) -> None:
         garden = GardenContext(summer_heat="hot", humidity="humid")
         assert own_words_of([fact("humidity", "humid", "muggy")], garden) == (
-            "Not stated: summer heat",
+            "Not mentioned: summer heat",
             "In their own words: “muggy” (counted as humid)",
         )
 
@@ -685,7 +687,7 @@ class TestOwnWords:
         garden = GardenContext(summer_heat="hot", humidity="humid")
         assert own_words_of(facts, garden) == (
             "In their own words: “humid” (counted as humid)",
-            "In their own words: “mild” (mild summers; you chose hot summers) · "
+            "In their own words: “mild” (read as mild summers; you chose hot summers) · "
             "not counted as a difference",
         )
 
@@ -698,9 +700,9 @@ class TestOwnWords:
         ]
         garden = GardenContext(zone="6b", method="container", humidity="humid")
         assert own_words_of(facts, garden) == (
-            "Not stated: hardiness zone",
-            "Different: in the ground (you: containers)",
-            "In their own words: “dry conditions” (dry air; you chose humid) · "
+            "Not mentioned: hardiness zone",
+            "Different: in the ground (you chose containers)",
+            "In their own words: “dry conditions” (read as dry air; you chose humid) · "
             "not counted as a difference",
         )
 
@@ -720,21 +722,26 @@ class TestOwnWords:
             fact("summer_heat", "cool", "cool nights", fact_id="b"),
         ]
         assert own_words_of(facts, GardenContext(summer_heat="hot")) == (
-            "In their own words: “mild” / “cool nights” (mild summers / cool summers; "
+            "In their own words: “mild” / “cool nights” (read as mild summers / cool summers; "
             "you chose hot summers) · not counted as a difference",
         )
 
     @pytest.mark.parametrize(
         ("key", "value", "viewer", "expected"),
         [
-            ("precipitation", "rainy", "dry_season", "rainy; you chose dry spell / dry season"),
+            (
+                "precipitation",
+                "rainy",
+                "dry_season",
+                "read as rainy; you chose dry spell / dry season",
+            ),
             (
                 "season_length",
                 "long_season",
                 "short_season",
-                "long season; you chose short season",
+                "read as long season; you chose short season",
             ),
-            ("humidity", "humid", "dry_air", "humid; you chose dry air"),
+            ("humidity", "humid", "dry_air", "read as humid; you chose dry air"),
         ],
     )
     def test_each_self_described_key_is_not_counted_as_a_difference(
@@ -774,7 +781,7 @@ class TestOwnWords:
         )
         cape_cod = fact("region", None, "Cape Cod", fact_id="d")
         assert own_words_of([hot, cape_cod], garden) == (
-            "In their own words: “hot” (counted as hot summers) · Cape Cod (not mapped)",
+            "In their own words: “hot” (counted as hot summers) · Cape Cod (not recognized)",
         )
 
     def test_region_is_the_shown_mentions_own(self) -> None:
@@ -788,9 +795,9 @@ class TestOwnWords:
         )
         garden = GardenContext(summer_heat="hot")
         assert ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden) == (
-            "Shown for Roma (1 of 2 mentions)",
+            "Details for Roma (1 of 2 varieties in this comment)",
             "In their own words: “hot” (counted as hot summers)",
-            "Sungold: Not stated: summer heat",
+            "Sungold: Not mentioned: summer heat",
         )
 
     def test_another_mention_described_differently_states_its_own_words(self) -> None:
@@ -806,9 +813,9 @@ class TestOwnWords:
         )
         garden = GardenContext(summer_heat="hot")
         assert ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden) == (
-            "Shown for Sungold (1 of 2 mentions)",
+            "Details for Sungold (1 of 2 varieties in this comment)",
             "In their own words: “hot” (counted as hot summers)",
-            "Roma: In their own words: “mild” (mild summers; you chose hot summers) · "
+            "Roma: In their own words: “mild” (read as mild summers; you chose hot summers) · "
             "not counted as a difference",
         )
 
@@ -831,8 +838,8 @@ class TestOwnWords:
         )
         garden = GardenContext(method="container", summer_heat="hot")
         assert ui.condition_lines(result_of(view, SearchQuery(garden=garden)), garden) == (
-            "Shown for Sungold (1 of 2 mentions)",
-            "Relevant: containers",
+            "Details for Sungold (1 of 2 varieties in this comment)",
+            "Matches: containers",
             "In their own words: “hot” (counted as hot summers)",
             "Roma: In their own words: “really hot” (counted as hot summers)",
         )
@@ -861,7 +868,7 @@ class TestOwnWords:
         assert len(own) == len(described)
         assert all(line.endswith("") for line in own)
         assert any(line.startswith("Different:") for line in lines) == (found.tier == "different")
-        relevant = next((line for line in lines if line.startswith("Relevant:")), "")
+        relevant = next((line for line in lines if line.startswith("Matches:")), "")
         for key in described:
             assert value_label(key, garden.selected()[key]) not in relevant
         statuses = [
@@ -892,14 +899,14 @@ class TestRegionLine:
 
     def test_display_only_region_is_marked_unmapped(self) -> None:
         line = ui.region_line(result_of(self.view_in((None, "Cape Cod"))))
-        assert line == "Region as written: Cape Cod (not mapped)"
+        assert line == "Region: Cape Cod (not recognized)"
 
     def test_missing_region(self) -> None:
-        assert ui.region_line(result_of(comment(mentions=[mention()]))) == "Region not reported"
+        assert ui.region_line(result_of(comment(mentions=[mention()]))) == "Region not mentioned"
 
     def test_zone_never_produces_a_region(self) -> None:
         view = comment(mentions=[mention(facts=[fact("zone", "6b", "zone 6b")])])
-        assert ui.region_line(result_of(view)) == "Region not reported"
+        assert ui.region_line(result_of(view)) == "Region not mentioned"
 
     def test_two_regions_are_both_named_once(self) -> None:
         view = comment(
@@ -926,30 +933,28 @@ class TestCardLabels:
 
     def test_heading_is_badged_as_a_community_report(self) -> None:
         found = result_of(comment(mentions=[mention(topics=["flavor"])]))
-        assert ui.card_heading(found) == (
-            "**Sungold tomato · flavor** :green-badge[community report]"
-        )
+        assert ui.card_heading(found) == ("**Sungold tomato · flavor** :green-badge[comment]")
 
     def test_heading_escapes_untrusted_variety_names(self) -> None:
         found = result_of(comment(mentions=[mention(variety="[x](https://e.example)")]))
         heading = ui.card_heading(found)
         assert heading.startswith("**\\[x\\]\\(https\\:")
-        assert heading.endswith(" :green-badge[community report]")
+        assert heading.endswith(" :green-badge[comment]")
 
     def test_caption_with_stated_conditions_is_badged(self) -> None:
         found = result_of(full_match_view(), QUERY_6B_POTS)
         assert ui.condition_caption(found, GARDEN_6B_POTS) == (
-            ":green-badge[reported conditions] "
-            + ui.escape_markdown("Relevant: zone 6b · containers\nRegion not reported")
+            ":green-badge[from the comment] "
+            + ui.escape_markdown("Matches: zone 6b · containers\nRegion not mentioned")
         )
 
     def test_caption_without_stated_conditions_has_no_badge(self) -> None:
         found = result_of(comment(mentions=[mention()]), QUERY_6B_POTS)
         assert ui.condition_caption(found, GARDEN_6B_POTS) == ui.escape_markdown(
-            "Not stated: hardiness zone, growing method\nRegion not reported"
+            "Not mentioned: hardiness zone, growing method\nRegion not mentioned"
         )
         assert ui.condition_caption(result_of(comment(mentions=[mention()])), GardenContext()) == (
-            "Growing conditions not stated  \nRegion not reported"
+            "No garden details mentioned  \nRegion not mentioned"
         )
 
     def test_a_region_alone_is_not_badged_as_reported_conditions(self) -> None:
@@ -957,19 +962,19 @@ class TestCardLabels:
         contradiction; a location is never a comparable growing condition."""
         view = comment(mentions=[mention(facts=[fact("region", "US-ME", "Maine")])])
         assert ui.condition_caption(result_of(view), GardenContext()) == ui.escape_markdown(
-            "Growing conditions not stated\nRegion: Maine"
+            "No garden details mentioned\nRegion: Maine"
         )
         assert ui.condition_caption(
             result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS
-        ) == ui.escape_markdown("Not stated: hardiness zone, growing method\nRegion: Maine")
+        ) == ui.escape_markdown("Not mentioned: hardiness zone, growing method\nRegion: Maine")
 
     def test_a_region_beside_a_stated_condition_keeps_the_badge(self) -> None:
         maine = fact("region", "US-ME", "Maine", fact_id="a")
         pots = fact("method", "container", "pots", fact_id="b")
         view = comment(mentions=[mention(facts=[maine, pots])])
         caption = ui.condition_caption(result_of(view), GardenContext())
-        assert caption == ":green-badge[reported conditions] " + ui.escape_markdown(
-            "Reported: containers\nRegion: Maine"
+        assert caption == ":green-badge[from the comment] " + ui.escape_markdown(
+            "Garden details: containers\nRegion: Maine"
         )
 
     def test_caption_badges_display_only_phrases(self) -> None:
@@ -977,7 +982,10 @@ class TestCardLabels:
         caption = ui.condition_caption(
             result_of(comment(mentions=[mention(facts=[dirt])])), GardenContext()
         )
-        assert caption.startswith(":green-badge[reported conditions] Mentioned as written")
+        assert caption.startswith(
+            ":green-badge[from the comment] "
+            + ui.escape_markdown("Mentioned, but can't be compared")
+        )
 
     def test_caption_badges_another_mentions_difference(self) -> None:
         view = comment(
@@ -987,7 +995,7 @@ class TestCardLabels:
             ]
         )
         caption = ui.condition_caption(result_of(view, QUERY_6B_POTS), GARDEN_6B_POTS)
-        assert caption.startswith(":green-badge[reported conditions] Shown for Sungold")
+        assert caption.startswith(":green-badge[from the comment] Details for Sungold")
 
     @pytest.mark.parametrize(
         ("value", "viewer"), [("mild", "hot"), ("heatwave", "mild"), ("heatwave", "hot")]
@@ -1000,8 +1008,8 @@ class TestCardLabels:
         garden = GardenContext(summer_heat=viewer)
         view = comment(mentions=[mention(facts=[fact("summer_heat", value, "the summer")])])
         caption = ui.condition_caption(result_of(view, SearchQuery(garden=garden)), garden)
-        assert caption.startswith(":green-badge[reported conditions] In their own words")
-        assert caption.endswith(ui.escape_markdown("\nRegion not reported"))
+        assert caption.startswith(":green-badge[from the comment] In their own words")
+        assert caption.endswith(ui.escape_markdown("\nRegion not mentioned"))
 
     def test_another_mentions_self_description_in_the_same_tier_gets_no_badge(self) -> None:
         """The other mention's line is only shown when its tier differs, so no badge here."""
@@ -1014,14 +1022,13 @@ class TestCardLabels:
         garden = GardenContext(summer_heat="hot")
         caption = ui.condition_caption(result_of(view, SearchQuery(garden=garden)), garden)
         assert caption == ui.escape_markdown(
-            "Shown for Sungold (1 of 2 mentions)\nNot stated: summer heat\nRegion not reported"
+            "Details for Sungold (1 of 2 varieties in this comment)\nNot mentioned: summer heat\n"
+            "Region not mentioned"
         )
 
     def test_unanalysed_caption_omits_region_and_badge(self) -> None:
         found = result_of(comment(analysed=False), QUERY_6B_POTS)
-        assert ui.condition_caption(found, GARDEN_6B_POTS) == (
-            "Not yet analysed for growing conditions"
-        )
+        assert ui.condition_caption(found, GARDEN_6B_POTS) == ("Not yet read for garden details")
 
     def test_caption_escapes_untrusted_phrases(self) -> None:
         dirt = fact("soil", None, "[x](https://e.example)")
@@ -1041,17 +1048,17 @@ class TestEvidenceRows:
         pots = fact("method", "container", "containers", quote="in containers", fact_id="c1#m0#f1")
         rows = ui.evidence_rows(result_of(comment(mentions=[mention(facts=[zone, pots])])))
         assert [row.quote for row in rows] == ["Zone 6b here", "in containers"]
-        assert {row.label for row in rows} == {"community report · reported conditions"}
+        assert {row.label for row in rows} == {"Exact words from the comment"}
         assert [row.chip for row in rows] == ["zone 6b", "containers"]
         assert [row.key_label for row in rows] == ["hardiness zone", "growing method"]
 
     def test_basis_is_described(self) -> None:
         rain = fact("precipitation", "rainy", "rained for weeks", basis="observed_experience")
         (row,) = ui.evidence_rows(result_of(comment(mentions=[mention(facts=[rain])])))
-        assert row.basis == "observed that season"
+        assert row.basis == "seen that season"
         clay = fact("soil", "clay", "clay soil", basis="reported_garden_context")
         (row,) = ui.evidence_rows(result_of(comment(mentions=[mention(facts=[clay])])))
-        assert row.basis == "garden context"
+        assert row.basis == "about their garden"
 
     def test_inherited_whole_comment_fact_is_listed_once(self) -> None:
         shared = fact("region", "US-CT", "Connecticut", applicability="whole_comment")
@@ -1059,7 +1066,7 @@ class TestEvidenceRows:
             mentions=[mention("c1#m0", facts=[shared]), mention("c1#m1", variety="Juliet")]
         )
         (row,) = ui.evidence_rows(result_of(view))
-        assert row.applies_to == "whole comment"
+        assert row.applies_to == "the whole comment"
         assert row.chip == "Connecticut"
 
     def test_this_mention_fact_names_its_mention(self) -> None:
@@ -1092,18 +1099,20 @@ class TestEvidenceRows:
 class TestScopeBanner:
     def test_private_scope_always_warns(self) -> None:
         assert ui.scope_banner("private", {"synthetic"}) == (
-            "Private local view — includes unverified imported comments. Do not publish or share."
+            "Private view, on this computer only. It includes imported comments that have not "
+            "been checked or cleared for publishing. Do not publish or share."
         )
 
     def test_public_synthetic_only_is_labelled_demo(self) -> None:
         assert ui.scope_banner("public", {"synthetic"}) == (
-            "Demo data: synthetic comments, not real gardener reports"
+            "Every comment on this page is a made-up example, not a real comment from a gardener."
         )
 
     def test_public_mixed_mentions_the_demo_comments(self) -> None:
         banner = ui.scope_banner("public", {"synthetic", "cleared"})
         assert banner is not None
-        assert "synthetic demo comments" in banner
+        assert "made-up examples, not real comments from gardeners" in banner
+        assert "marked as made up on its card" in banner
 
     def test_public_cleared_only_needs_no_banner(self) -> None:
         assert ui.scope_banner("public", {"cleared"}) is None
@@ -1126,13 +1135,16 @@ class TestSourceRows:
             ("a", "synthetic_fixture", 2),
             ("b", "export", 1),
         ]
-        assert rows[0].rights == "synthetic demo data (fictional)"
-        assert rows[1].rights == "cleared for publication"
+        assert rows[0].rights == "made-up examples"
+        assert rows[1].rights == "cleared for publishing"
+        assert ui.source_line(rows[0]) == "a: 2 comments shown · made-up examples"
+        assert ui.source_line(rows[1]) == "b: 1 comment shown · cleared for publishing"
 
     def test_summary_line(self) -> None:
         counts = {"sources": 1, "comments": 69, "parsed_comments": 66, "mentions": 71, "facts": 82}
         assert ui.summary_line(counts) == (
-            "69 comments from 1 source · 66 extracted · 71 variety mentions · 82 condition facts"
+            "69 comments from 1 source · 66 read for garden details · 71 variety mentions · "
+            "82 quoted details"
         )
 
 
@@ -1156,10 +1168,10 @@ class TestSourceLink:
     def test_synthetic_comment_without_link_says_so(self) -> None:
         view = comment()
         assert ui.source_link(view) is None
-        assert ui.provenance_note(view) == "Synthetic demo comment — no source link"
+        assert ui.provenance_note(view) == "Made-up example comment"
 
     def test_real_comment_without_link(self) -> None:
-        assert ui.provenance_note(comment(rights="cleared")) == "No source link available"
+        assert ui.provenance_note(comment(rights="cleared")) == "No link to the original comment"
 
     def test_non_http_permalink_fails_loudly(self) -> None:
         with pytest.raises(ValueError, match="c1"):
@@ -1314,7 +1326,7 @@ class TestConditionLayout:
     def test_more_conditions_label_without_hidden_conditions(self) -> None:
         state = {**ui.reset_values(), ui.CONDITION_KEYS["zone"]: "6b"}
         assert ui.active_more_conditions(state) == ()
-        assert ui.more_conditions_label(()) == "More conditions"
+        assert ui.more_conditions_label(()) == "More garden details"
 
     def test_more_conditions_label_lists_the_hidden_conditions_that_are_set(self) -> None:
         state = {
@@ -1325,7 +1337,7 @@ class TestConditionLayout:
         }
         active = ui.active_more_conditions(state)
         assert active == ("humid", "clay soil")
-        assert ui.more_conditions_label(active) == "More conditions (humid, clay soil)"
+        assert ui.more_conditions_label(active) == "More garden details (humid, clay soil)"
 
     def test_none_labels_match_the_select_placeholders(self) -> None:
         """F33: after Clear a select shows its placeholder, which must read like first load."""
@@ -1453,21 +1465,19 @@ class TestChips:
             label="Pots under cover", conditions={"method": "container", "shelter": "greenhouse"}
         )
         assert ui.chip_help(chip, support(6, 2)) == (
-            "6 reports mention containers or greenhouse / tunnel; 2 mention both"
+            "6 comments mention containers or greenhouse / tunnel; 2 mention both"
         )
         assert ui.chip_help(chip, support(1, 1)) == (
-            "1 report mentions containers or greenhouse / tunnel; 1 mentions both"
+            "1 comment mentions containers or greenhouse / tunnel; 1 mentions both"
         )
 
     def test_help_of_a_self_described_chip_counts_descriptions_in_their_own_words(self) -> None:
         """Hot and humid are the gardeners' own, uncalibrated words, and the tooltip says so."""
         assert ui.chip_help(CHIPS[1], support(6, 2)) == (
-            "6 reports describe hot summers or humid conditions in their own words; "
-            "2 describe both"
+            "6 comments describe hot summers or humid weather in their own words; 2 describe both"
         )
         assert ui.chip_help(CHIPS[1], support(1, 1)) == (
-            "1 report describes hot summers or humid conditions in their own words; "
-            "1 describes both"
+            "1 comment describes hot summers or humid weather in their own words; 1 describes both"
         )
 
     def test_help_of_a_three_condition_chip(self) -> None:
@@ -1476,21 +1486,25 @@ class TestChips:
             conditions={"summer_heat": "hot", "humidity": "humid", "method": "container"},
         )
         assert ui.chip_help(chip, support(5, 0)) == (
-            "5 reports describe hot summers, humid conditions or containers in their own words; "
+            "5 comments describe hot summers, humid weather or containers in their own words; "
             "0 describe all of them"
         )
 
     def test_help_of_a_single_condition_chip(self) -> None:
-        assert ui.chip_help(CHIPS[0], support(8)) == "Set this condition (8 reports state it)"
-        assert ui.chip_help(CHIPS[2], support(1)) == "Set this condition (1 report states it)"
+        assert ui.chip_help(CHIPS[0], support(8)) == (
+            "Sets this garden detail (8 comments mention it)"
+        )
+        assert ui.chip_help(CHIPS[2], support(1)) == (
+            "Sets this garden detail (1 comment mentions it)"
+        )
 
     def test_help_of_a_single_self_described_chip(self) -> None:
         chip = QuickChip(label="Short season", conditions={"season_length": "short_season"})
         assert ui.chip_help(chip, support(4)) == (
-            "Set this condition (4 reports describe it in their own words)"
+            "Sets this garden detail (4 comments describe it in their own words)"
         )
         assert ui.chip_help(chip, support(1)) == (
-            "Set this condition (1 report describes it in their own words)"
+            "Sets this garden detail (1 comment describes it in their own words)"
         )
 
     def test_chip_state_maps_conditions_to_widget_keys(self) -> None:
@@ -1545,24 +1559,24 @@ def sample_views() -> list[CommentView]:
 class TestSummaries:
     def test_count_summary_without_selection(self) -> None:
         found = search_of(sample_views(), SearchQuery())
-        assert ui.count_summary(found) == "4 reports"
+        assert ui.count_summary(found) == "4 comments"
         one = search_of(sample_views()[:1], SearchQuery())
-        assert ui.count_summary(one) == "1 report"
+        assert ui.count_summary(one) == "1 comment"
 
     def test_count_summary_with_selection_lists_every_tier(self) -> None:
         found = search_of(sample_views(), QUERY_6B_POTS)
         assert ui.count_summary(found) == (
-            "4 reports · 1 matching · 1 partially matching · 1 not stated or not comparable · "
-            "1 different"
+            "4 comments · 1 matching · 1 partly matching · 1 not mentioned or can't be "
+            "compared · 1 different"
         )
 
     def test_group_heading_counts_reports(self) -> None:
         found = search_of(sample_views(), QUERY_6B_POTS)
         assert [ui.group_heading(g) for g in found.groups] == [
-            "Matching reported conditions (1)",
-            "Partially matching conditions (1)",
-            "Conditions not stated or not comparable (1)",
-            "Different reported conditions (1)",
+            "Matching your garden (1)",
+            "Partly matching your garden (1)",
+            "Not mentioned or can't be compared (1)",
+            "Different from your garden (1)",
         ]
 
     def test_flatten_keeps_display_order(self) -> None:
@@ -1573,21 +1587,21 @@ class TestSummaries:
         strict = QUERY_6B_POTS.model_copy(update={"only_stated_matches": True})
         found = search_of(sample_views(), strict)
         assert ui.strict_note(found, strict) == (
-            "2 reports hidden because their conditions were not stated, not comparable or differ."
+            "Hidden: 2 comments where no garden detail matches yours, or where one is different."
         )
 
     def test_strict_note_previews_what_would_be_hidden(self) -> None:
         found = search_of(sample_views(), QUERY_6B_POTS)
         assert ui.strict_note(found, QUERY_6B_POTS) == (
-            "Ticking this would hide 2 reports whose conditions were not stated, not "
-            "comparable or differ."
+            "Ticking this would hide 2 comments where no garden detail matches yours, or where "
+            "one is different."
         )
 
     def test_strict_note_without_selection(self) -> None:
         strict = SearchQuery(only_stated_matches=True)
         found = search_of(sample_views(), strict)
         assert ui.strict_note(found, strict) == (
-            "Choose at least one growing condition first: until then nothing is hidden."
+            "Choose at least one garden detail first. Until then, nothing is hidden."
         )
         assert ui.strict_note(found, SearchQuery()) is None
 
@@ -1596,24 +1610,25 @@ class TestSummaries:
         strict = SearchQuery(garden=GardenContext(region="US-CT"), only_stated_matches=True)
         found = search_of(sample_views(), strict)
         assert ui.strict_note(found, strict) == (
-            "Region only lists reports from your area first; choose a condition such as zone or "
-            "growing method to use this filter. Until then nothing is hidden."
+            "Region only puts comments from your area first. Choose a garden detail, such as "
+            "hardiness zone or growing method, to use this checkbox. Until then, nothing is "
+            "hidden."
         )
         relaxed = strict.model_copy(update={"only_stated_matches": False})
         assert ui.strict_note(found, relaxed) is None
 
     def test_region_filter_note(self) -> None:
         assert ui.region_filter_note("US-CT") == (
-            "Showing only reports that name Connecticut as where they grew."
+            "Showing only comments that name Connecticut as where they grew."
         )
 
     def test_year_filter_note(self) -> None:
-        assert ui.year_filter_note("2023") == ("Showing only reports that say they grew in 2023.")
+        assert ui.year_filter_note("2023") == ("Showing only comments that say they grew in 2023.")
 
     def test_empty_state_without_strict_hiding(self) -> None:
         found = search_of([], SearchQuery())
         assert ui.empty_state(found) == (
-            "No reports to show. Try a different search, or remove a filter or condition."
+            "No comments to show. Try a different search, or remove a filter or a garden detail."
         )
 
     def test_empty_state_names_the_strict_checkbox(self) -> None:
@@ -1623,11 +1638,13 @@ class TestSummaries:
         found = search_of(views, strict)
         assert found.groups == ()
         assert ui.empty_state(found) == (
-            'All 2 reports are hidden by "Only show stated matches". Untick it to see them.'
+            'All 2 comments are hidden by "Only show matching comments". Untick the box to see '
+            "them."
         )
         different = search_of(views[1:], strict)  # c4 states a differing method
         assert ui.empty_state(different) == (
-            'The 1 report found is hidden by "Only show stated matches". Untick it to see it.'
+            'The 1 comment found is hidden by "Only show matching comments". Untick the box to '
+            "see it."
         )
 
     def test_no_empty_state_when_the_limitation_message_already_explains_the_hiding(
@@ -1637,7 +1654,7 @@ class TestSummaries:
         found = search_of([comment("c1"), comment("c2", mentions=[mention("c2#m0")])], strict)
         assert found.groups == ()
         assert found.limitation_message is not None
-        assert '"Only show stated matches"' in found.limitation_message
+        assert '"Only show matching comments"' in found.limitation_message
         assert ui.empty_state(found) is None
 
 
@@ -1716,38 +1733,38 @@ class TestMapHelpers:
 
     def test_map_notes(self) -> None:
         assert ui.map_notes(ct_counts()) == (
-            "Region not reported: 1",
+            "Region not mentioned: 1",
             "Outside the U.S.: 1",
-            "In the U.S., state not reported: 1",
+            "In the U.S., state not mentioned: 1",
         )
 
     def test_map_notes_omit_empty_us_bucket(self) -> None:
         assert ui.map_notes(region_counts([], 1)) == (
-            "Region not reported: 0",
+            "Region not mentioned: 0",
             "Outside the U.S.: 0",
         )
 
     def test_state_choices_are_alphabetical_with_counts(self) -> None:
         assert ui.state_choices(ct_counts(), None) == {
             None: "All states",
-            "US-CT": "Connecticut (2 reports)",
-            "US-ME": "Maine (1 report)",
+            "US-CT": "Connecticut (2 comments)",
+            "US-ME": "Maine (1 comment)",
         }
 
     def test_state_choices_never_reveal_suppressed_counts(self) -> None:
         choices = ui.state_choices(ct_counts(min_cell_count=2), None)
-        assert choices["US-ME"] == "Maine (fewer than 2 reports)"
-        assert choices["US-CT"] == "Connecticut (2 reports)"
+        assert choices["US-ME"] == "Maine (fewer than 2 comments)"
+        assert choices["US-CT"] == "Connecticut (2 comments)"
 
     def test_current_filter_stays_selectable_when_it_has_no_reports(self) -> None:
         choices = ui.state_choices(ct_counts(), "US-VT")
-        assert choices["US-VT"] == "Vermont (no reports with the current filters)"
+        assert choices["US-VT"] == "Vermont (no comments with the current filters)"
 
     def test_colorbar_is_horizontal_with_whole_report_ticks(self) -> None:
         bar = ui.map_colorbar(ct_counts())
         assert bar["orientation"] == "h"
         assert bar["dtick"] == 1
-        assert bar["title"] == {"text": "Reports", "side": "top"}
+        assert bar["title"] == {"text": "Comments", "side": "top"}
 
     def test_colorbar_ticks_stay_whole_and_sparse_for_large_counts(self) -> None:
         assert ui.colorbar_dtick(0) == 1
@@ -1795,11 +1812,11 @@ class TestOutsideLinks:
             ui.outside_overlay_note(link("normals")),
         )
         assert zones is not None and normals is not None
-        assert zones.startswith("Also available as a map overlay")
+        assert zones.startswith("The Map tab can also shade states by")
         assert "\u201cUSDA hardiness zones (2023)\u201d" in zones
         assert "not the official map" in zones
-        assert normals.startswith("Also available as a map overlay")
-        assert "not this station-based product" in normals
+        assert normals.startswith("The Map tab can also shade states by")
+        assert "not the weather-station Climate Normals at this link" in normals
         assert ui.outside_overlay_note(link(None)) is None
         assert ui.outside_overlay_note(link(None, "published external trial")) is None
 
@@ -1813,13 +1830,21 @@ class TestOutsideLinks:
 
 class TestLabelBadge:
     def test_each_outside_label_gets_its_own_badge(self) -> None:
-        assert ui.label_badge("regional climate reference") == (
-            ":blue-badge[regional climate reference]"
-        )
-        assert ui.label_badge("published external trial") == (
-            ":violet-badge[published external trial]"
-        )
-        assert ui.label_badge("community report") == ":green-badge[community report]"
+        def badge(label: str) -> str:
+            link = {"title": "x", "url": "https://example.org/", "label": label, "note": ""}
+            return ui.outside_badge(OutsideLink.model_validate(link))
+
+        assert badge("regional climate reference") == ":blue-badge[climate data]"
+        assert badge("published external trial") == ":violet-badge[university trial]"
+        assert badge("community report") == ":green-badge[other gardeners' ratings]"
+        # Outside gardeners' ratings never read like this video's comments.
+        assert badge("community report") != ui.label_badge("community report")
+
+    def test_labels_inside_the_app_read_as_plain_words(self) -> None:
+        assert ui.label_badge("community report") == ":green-badge[comment]"
+        assert ui.label_badge("reported conditions") == ":green-badge[from the comment]"
+        assert ui.label_badge("regional climate reference") == ":blue-badge[climate data]"
+        assert ui.label_badge("community report", "comments") == ":green-badge[comments]"
 
 
 class TestParseAppArgs:
@@ -1907,9 +1932,9 @@ class TestGlanceTiles:
         markup = ui.kpi_tiles_html(glance_headline(), theme)
         assert markup.count('class="glance-tile"') == 4
         assert tile_text(markup) == (
-            "Reports 69 comments in this view "
+            "Comments 69 in total "
             "Varieties mentioned 44 across 8 crops "
-            "Describe conditions 33 of 69 zone, method, heat… "
+            "With garden details 33 of 69 zone, method, heat… "
             "Places named 21 18 U.S. states · 3 outside the U.S."
         )
         for token in (theme.text_primary, theme.text_secondary, theme.series, theme.meter_track):
@@ -1990,18 +2015,20 @@ class TestGlanceCaptions:
     def test_variety_caption_says_what_it_counts_and_that_it_is_not_quality(self) -> None:
         caption = ui.varieties_caption_html(10, 44, 0, 2)
         assert caption.startswith(
-            "Comments that mention each variety: top 10 of 44. This counts conversation, not "
-            "quality: a failed crop counts the same as a great one. "
+            "Comments that mention each variety: top 10 of 44. This counts comments, not how "
+            "well a variety did. A failed crop counts the same as a good one. "
         )
-        assert "ties are listed" not in caption
+        assert "same count are listed" not in caption
 
     def test_variety_caption_says_how_many_equal_varieties_were_cut(self) -> None:
-        assert "2 more varieties also have 2 comments; ties are listed alphabetically." in (
-            ui.varieties_caption_html(10, 46, 2, 2)
-        )
-        assert "1 more variety also has 1 comment; ties are listed alphabetically." in (
-            ui.varieties_caption_html(10, 46, 1, 1)
-        )
+        assert (
+            "2 more varieties also have 2 comments and did not fit. Varieties with the same "
+            "count are listed in alphabetical order."
+        ) in ui.varieties_caption_html(10, 46, 2, 2)
+        assert (
+            "1 more variety also has 1 comment and did not fit. Varieties with the same count "
+            "are listed in alphabetical order."
+        ) in ui.varieties_caption_html(10, 46, 1, 1)
 
     def test_captions_end_with_a_mouse_and_a_touch_hint(self) -> None:
         caption = ui.varieties_caption_html(10, 44, 0, 2)
@@ -2016,14 +2043,14 @@ class TestGlanceCaptions:
 
     def test_topic_caption(self) -> None:
         assert ui.topics_caption(8) == (
-            "Comments about each topic, for the 8 most-discussed varieties in the bar chart's "
-            "order."
+            "Comments about each topic, for the 8 most-discussed varieties (same order as the "
+            "Varieties chart)."
         )
         assert ui.topics_caption(1) == "Comments about each topic, for the most-discussed variety."
         caption = ui.topics_caption_html(8, 0, 3)
         assert caption.startswith(ui.topics_caption(8))
         assert "not whether it went well" in caption
-        assert "ties are listed" not in caption
+        assert "same count are listed" not in caption
         assert "1 more variety also has 3 comments" in ui.topics_caption_html(8, 1, 3)
 
     def test_captions_are_built_from_numbers_and_fixed_text_only(self) -> None:
@@ -2034,8 +2061,8 @@ class TestGlanceCaptions:
 
     def test_setup_caption_is_honest_about_how_few_say(self) -> None:
         assert ui.setups_caption(20, 69) == (
-            "Only reports that state a growing method or setting are counted: 20 of 69. Most "
-            "don't say. A report can state more than one."
+            "Only comments that mention a growing method or setting are counted: 20 of 69. Most "
+            "don't say. A comment can mention more than one."
         )
         assert "Most don't say" not in ui.setups_caption(40, 69)
 
@@ -2134,9 +2161,9 @@ class TestGlanceFeedback:
 
     def test_feedback_names_the_variety_and_topics_and_links_to_the_reports(self) -> None:
         line = ui.glance_feedback("Sungold · tomato", ["flavor", "weather_tolerance"])
-        assert line.startswith("Showing the reports that mention Sungold · tomato about ")
+        assert line.startswith("Showing the comments that mention Sungold · tomato about ")
         assert "Flavor or Weather tolerance" in line
-        assert line.endswith(f"[Go to the reports ↓](#{ui.RESULTS_ANCHOR})")
+        assert line.endswith(f"[Go to the comments ↓](#{ui.RESULTS_ANCHOR})")
         assert "about" not in ui.glance_feedback("Sungold · tomato", [])
 
     def test_feedback_and_filter_note_escape_the_untrusted_name(self) -> None:
@@ -2148,7 +2175,7 @@ class TestGlanceFeedback:
 
     def test_filter_note(self) -> None:
         assert ui.variety_filter_note("Juliet · tomato") == (
-            "Showing only reports that mention Juliet · tomato (all spellings)."
+            "Showing only comments that mention Juliet · tomato (any spelling)."
         )
 
     def test_the_results_anchor_is_trusted_fixed_markup(self) -> None:
@@ -2189,5 +2216,5 @@ class TestGlanceTables:
             }
         )
         table = ui.setup_table(setups)
-        assert list(table.columns) == ["Condition", "Stated as", "Comments"]
+        assert list(table.columns) == ["Garden detail", "Mentioned as", "Comments"]
         assert table.values.tolist() == [["Setting", "Greenhouse / tunnel", 5]]
